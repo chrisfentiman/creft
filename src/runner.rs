@@ -485,7 +485,7 @@ impl PipeSignalGuard {
         // sighandler_t is the standard way to install a signal handler via
         // libc::signal.
         let original_handler =
-            unsafe { libc::signal(libc::SIGINT, sigint_forward_handler as libc::sighandler_t) };
+            unsafe { libc::signal(libc::SIGINT, sigint_forward_handler as *const () as libc::sighandler_t) };
 
         Self { original_handler }
     }
