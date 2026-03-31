@@ -484,8 +484,12 @@ impl PipeSignalGuard {
         // async-signal-safe (only calls atomic load and kill). Casting to
         // sighandler_t is the standard way to install a signal handler via
         // libc::signal.
-        let original_handler =
-            unsafe { libc::signal(libc::SIGINT, sigint_forward_handler as *const () as libc::sighandler_t) };
+        let original_handler = unsafe {
+            libc::signal(
+                libc::SIGINT,
+                sigint_forward_handler as *const () as libc::sighandler_t,
+            )
+        };
 
         Self { original_handler }
     }
