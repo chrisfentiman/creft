@@ -113,27 +113,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
 
-  publish-npm:
-    name: Publish to npm
-    needs: [release-please]
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Set version and publish
-        run: |
-          cd npm
-          npm version "${{ needs.release-please.outputs.version }}" --no-git-tag-version
-          npm publish --access public --provenance
-
   homebrew:
     name: Update Homebrew Tap
     needs: [release-please, upload]
