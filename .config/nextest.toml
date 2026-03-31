@@ -1,0 +1,17 @@
+[store]
+dir = "target/nextest"
+
+[profile.default]
+# Per-test process isolation — creft tests set env vars (CREFT_HOME, HOME)
+# on child processes, but nextest's process-per-test model prevents any
+# accidental bleed between test runner env and test env.
+test-threads = "num-cpus"
+fail-fast = true
+status-level = "fail"
+final-status-level = "flaky"
+
+[profile.ci]
+test-threads = "num-cpus"
+fail-fast = false
+status-level = "all"
+retries = 0

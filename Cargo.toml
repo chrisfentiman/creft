@@ -1,0 +1,35 @@
+[package]
+name = "creft"
+version = "0.1.0"
+edition = "2024"
+description = "Executable skills for Agents"
+license = "MIT"
+repository = "https://github.com/chrisfentiman/px.sh"
+homepage = "https://github.com/chrisfentiman/px.sh"
+readme = "README.md"
+keywords = ["cli", "ai", "agents", "skills", "markdown"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Chris Fentiman"]
+
+[[bin]]
+name = "creft"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "string"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+thiserror = "2"
+regex = "1"
+tempfile = "3"
+shell-escape = "0.1"
+ureq = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+rstest = "0.25"
+pretty_assertions = "1"
