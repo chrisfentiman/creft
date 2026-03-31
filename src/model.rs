@@ -104,7 +104,18 @@ impl AppContext {
         if self.creft_home.is_some() {
             return None;
         }
-        find_local_root_from(&self.cwd)
+        let found = find_local_root_from(&self.cwd)?;
+        // ~/.creft/ is the global store, not a project-local root.
+        // If the walk-up lands on it, treat that as "no local root".
+        // Canonicalize both sides to handle symlinks (e.g. macOS /var -> /private/var).
+        if let Ok(global) = self.global_root() {
+            let found_canon = std::fs::canonicalize(&found).unwrap_or_else(|_| found.clone());
+            let global_canon = std::fs::canonicalize(&global).unwrap_or(global);
+            if found_canon == global_canon {
+                return None;
+            }
+        }
+        Some(found)
     }
 
     /// Root directory for a given scope.
@@ -937,6 +948,48 @@ name: MY_TOKEN
         assert!(
             ctx.find_local_root().is_none(),
             "find_local_root must return None when creft_home is set"
+        );
+    }
+
+    #[test]
+    fn test_find_local_root_excludes_global_root() {
+        // HOME is a temp dir containing ~/.creft/ (the global store).
+        // CWD is a subdirectory of HOME with no .creft/ of its own.
+        // find_local_root() must return None — the global store is not a project root.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".creft")).unwrap();
+        let subdir = home.path().join("myproject");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
+
+        assert!(
+            ctx.find_local_root().is_none(),
+            "find_local_root must return None when walk-up reaches the global ~/.creft/"
+        );
+    }
+
+    #[test]
+    fn test_find_local_root_finds_real_project_root() {
+        // HOME is a temp dir containing ~/.creft/ (the global store).
+        // CWD is a subdirectory that has its own .creft/ — a real project root.
+        // find_local_root() must return the project-local root, not None.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".creft")).unwrap();
+        let project = home.path().join("myproject");
+        std::fs::create_dir_all(project.join(".creft")).unwrap();
+        let subdir = project.join("src");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
+
+        let found = ctx
+            .find_local_root()
+            .expect("find_local_root must find the project-local .creft/");
+        assert_eq!(
+            found,
+            project.join(".creft"),
+            "find_local_root must return the project-local root"
         );
     }
 
