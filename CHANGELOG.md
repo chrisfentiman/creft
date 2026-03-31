@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/chrisfentiman/creft/compare/creft-v0.1.2...creft-v0.1.3) (2026-03-31)
+
+
+### Features
+
+* **runner:** add --verbose flag and fix optional arg validation ([5380cf9](https://github.com/chrisfentiman/creft/commit/5380cf94a15b641b1e79b0a39c2d04f61574d50f))
+
 ## [0.1.2](https://github.com/chrisfentiman/creft/compare/creft-v0.1.1...creft-v0.1.2) (2026-03-31)
 
 
