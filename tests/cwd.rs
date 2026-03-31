@@ -262,3 +262,99 @@ fn test_creft_project_root_absent_for_global_skill() {
         "CREFT_PROJECT_ROOT must be empty/unset for global skill; got: {root_value:?}"
     );
 }
+
+/// When CWD is under HOME but no project-local `.creft/` exists, a global skill's
+/// subprocess must run in the actual CWD, not in HOME.
+///
+/// Regression: `find_local_root` used to return `~/.creft/` which caused
+/// `derive_cwd()` to set subprocess CWD to HOME.
+#[test]
+fn test_global_skill_cwd_not_home_when_no_local_creft() {
+    let home = tempfile::tempdir().unwrap();
+    // Create the global store.
+    let global_commands = home.path().join(".creft").join("commands");
+    std::fs::create_dir_all(&global_commands).unwrap();
+
+    // A workdir under HOME with no .creft/ of its own.
+    let workdir = home.path().join("myproject");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    // Skill prints its working directory.
+    let skill_md =
+        "---\nname: print-cwd\ndescription: print working dir\n---\n\n```bash\npwd\n```\n";
+    std::fs::write(global_commands.join("print-cwd.md"), skill_md).unwrap();
+
+    let output = Command::cargo_bin("creft")
+        .unwrap()
+        .env("HOME", home.path())
+        .env_remove("CREFT_HOME")
+        .env_remove("CREFT_PROJECT_ROOT")
+        .current_dir(&workdir)
+        .args(["print-cwd"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    // On macOS temp dirs may resolve through /private/var/... symlinks.
+    let resolved_workdir = std::fs::canonicalize(&workdir)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let raw_workdir = workdir.to_string_lossy().to_string();
+
+    assert!(
+        stdout.trim() == resolved_workdir || stdout.trim() == raw_workdir,
+        "subprocess CWD must be the workdir, not HOME; got: {stdout:?}"
+    );
+}
+
+/// When CWD is under HOME but no project-local `.creft/` exists, a global skill
+/// must not receive `CREFT_PROJECT_ROOT` pointing at HOME.
+///
+/// Regression: `find_local_root` used to return `~/.creft/` which caused
+/// `CREFT_PROJECT_ROOT` to be set to HOME.
+#[test]
+fn test_creft_project_root_not_home_when_no_local_creft() {
+    let home = tempfile::tempdir().unwrap();
+    // Create the global store.
+    let global_commands = home.path().join(".creft").join("commands");
+    std::fs::create_dir_all(&global_commands).unwrap();
+
+    // A workdir under HOME with no .creft/ of its own.
+    let workdir = home.path().join("myproject");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    // Skill echoes CREFT_PROJECT_ROOT.
+    let skill_md = "---\nname: show-root\ndescription: show project root\n---\n\n```bash\necho \"ROOT=$CREFT_PROJECT_ROOT\"\n```\n";
+    std::fs::write(global_commands.join("show-root.md"), skill_md).unwrap();
+
+    let output = Command::cargo_bin("creft")
+        .unwrap()
+        .env("HOME", home.path())
+        .env_remove("CREFT_HOME")
+        .env_remove("CREFT_PROJECT_ROOT")
+        .current_dir(&workdir)
+        .args(["show-root"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    let root_value = stdout
+        .lines()
+        .find(|line| line.starts_with("ROOT="))
+        .map(|line| line.trim_start_matches("ROOT=").trim())
+        .unwrap_or("");
+
+    assert!(
+        root_value.is_empty(),
+        "CREFT_PROJECT_ROOT must be empty when no local .creft/ exists; got: {root_value:?}"
+    );
+}
