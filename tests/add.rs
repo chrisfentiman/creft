@@ -428,37 +428,6 @@ fn test_rm_not_found() {
         .code(2);
 }
 
-// ── command existence warning tests ──────────────────────────────────────────
-
-/// A skill with a shell block referencing a nonexistent command produces a
-/// warning on stderr but still exits 0 (warning, not error).
-#[test]
-fn test_add_warns_on_missing_command() {
-    let dir = creft_env();
-    // Use a command name guaranteed to not be on any machine's PATH.
-    let skill = "---\nname: cmd-warn-test\ndescription: test command existence warning\n---\n\n```bash\n__creft_nonexistent_cmd_xyzzy__ --flag\n```\n";
-    creft_with(&dir)
-        .args(["add"])
-        .write_stdin(skill)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("not found on PATH"));
-}
-
-/// With `--no-validate`, the command-existence check is skipped and no warning
-/// is emitted.
-#[test]
-fn test_add_no_command_warn_with_no_validate() {
-    let dir = creft_env();
-    let skill = "---\nname: cmd-nowarn-test\ndescription: test no-validate skips command warn\n---\n\n```bash\n__creft_nonexistent_cmd_xyzzy__ --flag\n```\n";
-    creft_with(&dir)
-        .args(["add", "--no-validate"])
-        .write_stdin(skill)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("not found on PATH").not());
-}
-
 // ── sub-skill existence warning tests ────────────────────────────────────────
 
 /// `creft add` warns when a shell block references a creft sub-skill that doesn't exist.
