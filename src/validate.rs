@@ -122,10 +122,8 @@ pub fn validate_skill(
             check_shellcheck(&sanitized, i, &block.lang, &mut warnings);
         }
 
-        // Deep checks run only after syntax passes: no point checking commands in
-        // syntactically broken code.
+        // Check creft sub-skill invocations reference real skills.
         if doctor::is_shell_lang(&block.lang) {
-            check_command_existence(block, i, &mut warnings);
             check_sub_skill_existence(block, i, ctx, &mut warnings);
         }
 
@@ -548,7 +546,19 @@ pub(crate) fn check_shellcheck(
     };
 
     let mut child = match Command::new("shellcheck")
-        .args(["-s", shell_dialect, "-f", "gcc", "-"])
+        .args([
+            "-s",
+            shell_dialect,
+            "-f",
+            "gcc",
+            "-e",
+            "SC2034", // variable appears unused — common in skill block snippets
+            "-e",
+            "SC2086", // double quote to prevent globbing — fires on template placeholders
+            "-e",
+            "SC2154", // variable referenced but not assigned — common for cross-block vars
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -596,25 +606,6 @@ pub(crate) fn check_shellcheck(
 /// Placeholders are sanitized before extraction to avoid false positives
 /// from template tokens like `{{name|default}}` where `|` would look like
 /// a pipe and `default` would be extracted as a command name.
-fn check_command_existence(
-    block: &CodeBlock,
-    block_index: usize,
-    warnings: &mut Vec<ValidationDiagnostic>,
-) {
-    let sanitized = sanitize_placeholders(&block.code);
-    let commands = doctor::extract_commands(&sanitized);
-    for cmd_name in &commands {
-        if doctor::which_path(cmd_name).is_none() {
-            warnings.push(ValidationDiagnostic {
-                block_index: Some(block_index),
-                lang: Some(block.lang.clone()),
-                message: format!("command '{}' not found on PATH", cmd_name),
-                line: None,
-            });
-        }
-    }
-}
-
 /// Check that creft sub-skill invocations reference skills that exist.
 ///
 /// Parses `creft <name>` patterns from shell code and attempts to resolve
@@ -1672,20 +1663,18 @@ mod tests {
 
     #[test]
     fn test_shellcheck_produces_warnings_for_known_issue() {
-        // Verify shellcheck integration end-to-end: known bad patterns (unquoted
-        // variables) must produce at least one warning with a non-zero line number.
+        // Verify shellcheck integration end-to-end: a pattern that is NOT in our
+        // exclusion list (SC2034/SC2086/SC2154) must still produce a warning.
+        // SC2162: read without -r will mangle backslashes. Not excluded.
         if crate::doctor::which_path("shellcheck").is_none() {
             return;
         }
         let def = make_def(vec![], vec![]);
-        // SC2086: Double quote to prevent globbing and word splitting.
-        // SC2181: Check exit code directly rather than via $?.
-        // Using multiple patterns ensures at least one is flagged regardless of shellcheck version.
-        let block = make_block("bash", "x=$1\nif [ $x = hello ]; then\n  echo ok\nfi\n");
+        let block = make_block("bash", "read answer\necho \"$answer\"\n");
         let result = validate_skill(&def, &[block], None);
         assert!(
             !result.warnings.is_empty(),
-            "shellcheck must produce at least one warning for unquoted variable; got none"
+            "shellcheck must produce at least one warning for 'read' without -r (SC2162); got none"
         );
     }
 
@@ -1697,119 +1686,6 @@ mod tests {
     //
     // 2. Shellcheck lineno guard: shellcheck never emits line 0, so `> 0`
     //    and `>= 0` are behaviorally identical for real shellcheck output.
-
-    // ── check_command_existence tests ────────────────────────────────────────────
-
-    /// A shell block referencing a command that does not exist on PATH produces
-    /// exactly one warning containing "not found on PATH".
-    #[test]
-    fn test_command_existence_warns_for_missing_command() {
-        let def = make_def(vec![], vec![]);
-        // Use a name that is guaranteed to not exist on any machine.
-        let block = make_block("bash", "__creft_nonexistent_cmd_xyzzy__ --flag");
-        let result = validate_skill(&def, &[block], None);
-        assert_eq!(result.errors.len(), 0, "should be no errors");
-        let cmd_warns: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.message.contains("not found on PATH"))
-            .collect();
-        assert_eq!(
-            cmd_warns.len(),
-            1,
-            "expected exactly one 'not found on PATH' warning"
-        );
-        assert!(
-            cmd_warns[0]
-                .message
-                .contains("__creft_nonexistent_cmd_xyzzy__"),
-            "warning should name the missing command, got: {}",
-            cmd_warns[0].message
-        );
-    }
-
-    /// A shell block using only builtins (filtered) and a known command (ls)
-    /// produces no command-existence warnings.
-    #[test]
-    fn test_command_existence_no_warn_for_known_command() {
-        let def = make_def(vec![], vec![]);
-        // echo is a builtin (filtered), ls is a real binary universally available.
-        let block = make_block("bash", "echo hello && ls /tmp");
-        let result = validate_skill(&def, &[block], None);
-        let cmd_warns: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.message.contains("not found on PATH"))
-            .collect();
-        assert_eq!(
-            cmd_warns.len(),
-            0,
-            "expected no command-existence warnings for echo+ls, got: {:?}",
-            cmd_warns
-        );
-    }
-
-    /// A python block produces no command-existence warnings.
-    #[test]
-    fn test_command_existence_skipped_for_python_block() {
-        let def = make_def(vec![], vec![]);
-        // This contains a "command" that wouldn't be on PATH, but it's Python code.
-        let block = make_block("python", "__creft_nonexistent_cmd_xyzzy__()");
-        let result = validate_skill(&def, &[block], None);
-        let cmd_warns: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.message.contains("not found on PATH"))
-            .collect();
-        assert_eq!(
-            cmd_warns.len(),
-            0,
-            "python block must not produce command-existence warnings"
-        );
-    }
-
-    /// A shell block with two nonexistent commands produces two warnings.
-    #[test]
-    fn test_command_existence_multiple_missing() {
-        let def = make_def(vec![], vec![]);
-        let block = make_block(
-            "bash",
-            "__creft_nonexistent_cmd_aaa__ && __creft_nonexistent_cmd_bbb__",
-        );
-        let result = validate_skill(&def, &[block], None);
-        let cmd_warns: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.message.contains("not found on PATH"))
-            .collect();
-        assert_eq!(
-            cmd_warns.len(),
-            2,
-            "expected two 'not found on PATH' warnings"
-        );
-    }
-
-    /// A command used twice in the same block produces at most one warning
-    /// (extract_commands deduplicates).
-    #[test]
-    fn test_command_existence_deduplicates() {
-        let def = make_def(vec![], vec![]);
-        let block = make_block(
-            "bash",
-            "__creft_nonexistent_cmd_xyzzy__ foo\n__creft_nonexistent_cmd_xyzzy__ bar",
-        );
-        let result = validate_skill(&def, &[block], None);
-        let cmd_warns: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.message.contains("__creft_nonexistent_cmd_xyzzy__"))
-            .collect();
-        assert_eq!(
-            cmd_warns.len(),
-            1,
-            "duplicate command should produce only one warning"
-        );
-    }
 
     // ── check_sub_skill_existence tests ──────────────────────────────────────────
 

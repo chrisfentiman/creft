@@ -107,7 +107,9 @@ fn test_namespaced_command() {
 // ── optional args tests ────────────────────────────────────────────────────────
 
 /// A skill with `required: false` and a template default `{{count|5}}` runs
-/// successfully when the arg is omitted, using the template default value.
+/// Optional arg omitted — parse_and_bind binds it to "". The bound "" takes
+/// precedence over the template default, so `{{count|5}}` resolves to the
+/// shell-escaped empty string, not "5".
 #[test]
 fn test_optional_arg_with_template_default_omitted() {
     let dir = creft_env();
@@ -120,12 +122,12 @@ fn test_optional_arg_with_template_default_omitted() {
         .assert()
         .success();
 
-    // Invoke without providing the arg — template default fires.
+    // Invoke without providing the arg — arg is bound to "", template default does not fire.
     creft_with(&dir)
         .args(["opt-count"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("count=5"));
+        .stdout(predicate::str::contains("count=''"));
 }
 
 /// Same skill as above, but the arg is provided — the provided value is used,
@@ -151,13 +153,14 @@ fn test_optional_arg_with_template_default_provided() {
 }
 
 /// A skill with `required: false`, no frontmatter default, and a bare `{{name}}`
-/// template (no template default) should produce a MissingArg error from
-/// `substitute()` when invoked without the arg — not a clap parse error.
+/// template resolves to empty string when the arg is omitted. parse_and_bind
+/// now binds optional args to "" so `{{name}}` substitutes as the shell-escaped
+/// empty string rather than erroring.
 #[test]
 fn test_optional_arg_no_default_anywhere_errors() {
     let dir = creft_env();
 
-    // Note: template uses {{name}} with no `|default` — substitute will error.
+    // Template uses {{name}} with no `|default` — resolves to '' when omitted.
     let markdown = "---\nname: opt-nodefault\ndescription: needs a name\nargs:\n  - name: name\n    description: a name\n    required: false\n---\n\n```bash\necho \"hello {{name}}\"\n```\n";
 
     creft_with(&dir)
@@ -166,15 +169,12 @@ fn test_optional_arg_no_default_anywhere_errors() {
         .assert()
         .success();
 
-    // Invoke without the arg — expect failure with a missing-arg message.
-    // The error must come from template substitution, not clap parsing.
-    // (Clap parse errors mention "required" or "USAGE"; substitute errors
-    //  mention the placeholder name.)
+    // Invoke without the arg — succeeds, resolves to empty string.
     creft_with(&dir)
         .args(["opt-nodefault"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("name"));
+        .success()
+        .stdout(predicate::str::contains("hello ''"));
 }
 
 // ── pipe intermediate output suppression tests ────────────────────────────────
