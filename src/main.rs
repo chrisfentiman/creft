@@ -146,12 +146,15 @@ fn run_builtin(ctx: &model::AppContext) -> Result<(), CreftError> {
 fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let dry_run = args.iter().any(|a| a == "--dry-run");
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
 
     // Filter out meta-flags before resolving command name so they are not
     // mistakenly matched as part of the command name or passed as remaining args.
     let filtered: Vec<String> = args
         .iter()
-        .filter(|a| *a != "--help" && *a != "-h" && *a != "--dry-run")
+        .filter(|a| {
+            *a != "--help" && *a != "-h" && *a != "--dry-run" && *a != "--verbose" && *a != "-v"
+        })
         .cloned()
         .collect();
 
@@ -212,13 +215,35 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
         extra_env.push(("CREFT_PROJECT_ROOT", &cwd_str));
     }
 
-    if dry_run {
-        if cmd.def.supports_feature("dry-run") {
-            extra_env.push(("CREFT_DRY_RUN", "1"));
-            runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
-        } else {
-            runner::dry_run(&cmd, &remaining, &cwd)
+    if verbose || dry_run {
+        // Bind args first so render_blocks can substitute them.
+        let (bound, _) = runner::parse_and_bind(&cmd, &remaining)?;
+        let bound_refs: Vec<(&str, &str)> = bound
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        if verbose {
+            runner::render_blocks(&cmd, &bound_refs)?;
         }
+
+        if dry_run && !verbose {
+            // Pure dry-run path (existing behavior).
+            if cmd.def.supports_feature("dry-run") {
+                extra_env.push(("CREFT_DRY_RUN", "1"));
+                return runner::run_with_env(&cmd, &remaining, &extra_env, &cwd);
+            } else {
+                return runner::dry_run(&cmd, &remaining, &cwd);
+            }
+        }
+
+        if dry_run {
+            // --verbose --dry-run: rendered above, do not execute.
+            return Ok(());
+        }
+
+        // --verbose only: render already done above, now execute normally.
+        runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
     } else {
         runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
     }

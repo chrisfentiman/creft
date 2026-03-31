@@ -817,6 +817,20 @@ pub fn run_with_env(
     Ok(())
 }
 
+/// Write rendered (substituted) blocks to stderr for diagnostic inspection.
+///
+/// Called when `--verbose` is active. Each block is shown with `===` delimiters
+/// so the output is visually distinct from `--dry-run`'s `---` format.
+pub fn render_blocks(cmd: &ParsedCommand, bound_refs: &[(&str, &str)]) -> Result<(), CreftError> {
+    for (i, block) in cmd.blocks.iter().enumerate() {
+        let expanded = substitute(&block.code, bound_refs, &block.lang)?;
+        eprintln!("=== block {} ({}) ===", i + 1, block.lang);
+        eprintln!("{}", expanded);
+        eprintln!("=== end ===");
+    }
+    Ok(())
+}
+
 /// Print the expanded code for each block without executing it.
 pub fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(), CreftError> {
     check_env(cmd)?;

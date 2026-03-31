@@ -8,13 +8,19 @@ Executable skills for Agents
 Saves reusable commands as markdown and runs them as subcommands.
 Skills are .md files with YAML frontmatter and fenced code blocks.
 
-  creft add <<'EOF'       save a skill from stdin
-  creft hello World       run a skill directly
-  creft list              see available skills
-  creft add --help        learn how to create skills
+  creft add <<'EOF'              save a skill from stdin
+  creft hello World              run a skill directly
+  creft hello World --verbose    show rendered blocks, then run
+  creft hello World --dry-run    show rendered blocks, do not run
+  creft list                     see available skills
+  creft add --help               learn how to create skills
 
 Skills are stored in .creft/ (project-local) or ~/.creft/ (global).
-Local skills shadow global ones with the same name.";
+Local skills shadow global ones with the same name.
+
+Global Flags (available on every skill):
+  --dry-run       Show rendered template blocks, do not execute
+  --verbose, -v   Show rendered template blocks on stderr, then execute";
 
 /// Extended description shown by `creft add --help`, covering skill format, frontmatter fields, and validation.
 pub const ADD_LONG_ABOUT: &str = "\
