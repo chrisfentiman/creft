@@ -548,7 +548,19 @@ pub(crate) fn check_shellcheck(
     };
 
     let mut child = match Command::new("shellcheck")
-        .args(["-s", shell_dialect, "-f", "gcc", "-"])
+        .args([
+            "-s",
+            shell_dialect,
+            "-f",
+            "gcc",
+            "-e",
+            "SC2034", // variable appears unused — common in skill block snippets
+            "-e",
+            "SC2086", // double quote to prevent globbing — fires on template placeholders
+            "-e",
+            "SC2154", // variable referenced but not assigned — common for cross-block vars
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1672,20 +1684,18 @@ mod tests {
 
     #[test]
     fn test_shellcheck_produces_warnings_for_known_issue() {
-        // Verify shellcheck integration end-to-end: known bad patterns (unquoted
-        // variables) must produce at least one warning with a non-zero line number.
+        // Verify shellcheck integration end-to-end: a pattern that is NOT in our
+        // exclusion list (SC2034/SC2086/SC2154) must still produce a warning.
+        // SC2162: read without -r will mangle backslashes. Not excluded.
         if crate::doctor::which_path("shellcheck").is_none() {
             return;
         }
         let def = make_def(vec![], vec![]);
-        // SC2086: Double quote to prevent globbing and word splitting.
-        // SC2181: Check exit code directly rather than via $?.
-        // Using multiple patterns ensures at least one is flagged regardless of shellcheck version.
-        let block = make_block("bash", "x=$1\nif [ $x = hello ]; then\n  echo ok\nfi\n");
+        let block = make_block("bash", "read answer\necho \"$answer\"\n");
         let result = validate_skill(&def, &[block], None);
         assert!(
             !result.warnings.is_empty(),
-            "shellcheck must produce at least one warning for unquoted variable; got none"
+            "shellcheck must produce at least one warning for 'read' without -r (SC2162); got none"
         );
     }
 

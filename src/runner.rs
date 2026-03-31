@@ -127,10 +127,10 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
         } else if let Some(d) = &arg_def.default {
             d.clone()
         } else if !arg_def.required {
-            // Optional arg with no explicit default — do not bind.
-            // Template substitution will use {{name|default}} if present,
-            // or error on {{name}} with no default.
-            continue;
+            // Optional arg with no explicit default — bind to empty string so
+            // {{name}} resolves to "" rather than erroring. Users who want a
+            // non-empty fallback can still use {{name|fallback}} in the template.
+            String::new()
         } else {
             return Err(CreftError::MissingArg(arg_def.name.clone()));
         };
@@ -161,7 +161,9 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
         } else if let Some(d) = &flag_def.default {
             d.clone()
         } else {
-            continue; // string flag with no default and not provided — skip
+            // String flag with no default and not provided — bind to empty
+            // string so {{flagname}} resolves to "" rather than erroring.
+            String::new()
         };
 
         // Regex validation for string flags
@@ -1147,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_optional_arg_not_bound_when_absent() {
-        // required: false, no default, no value provided → arg NOT in pairs
+        // required: false, no default, no value provided → arg IS in pairs with value ""
         let cmd = make_cmd(
             vec![Arg {
                 name: "count".into(),
@@ -1160,9 +1162,13 @@ mod tests {
         );
         let raw: Vec<String> = vec![];
         let (pairs, _) = parse_and_bind(&cmd, &raw).unwrap();
-        assert!(
-            pairs.iter().find(|(k, _)| k == "count").is_none(),
-            "optional arg with no value should not appear in pairs"
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(k, _)| k == "count")
+                .map(|(_, v)| v.as_str()),
+            Some(""),
+            "optional arg with no value should be bound to empty string"
         );
     }
 
@@ -1221,20 +1227,55 @@ mod tests {
 
     #[test]
     fn test_optional_arg_template_default_fires() {
-        // required: false, no frontmatter default → arg not bound → template default fires
-        let pairs: Vec<(&str, &str)> = vec![];
-        let result = substitute("echo {{count|5}}", &pairs, "bash").unwrap();
-        assert_eq!(result, "echo 5");
+        // When parse_and_bind binds an optional arg to "", the bound "" takes
+        // precedence and {{count|5}} resolves to '' (shell-escaped empty string),
+        // not "5". The template default only fires when the key is absent from
+        // pairs entirely.
+        let cmd = make_cmd(
+            vec![Arg {
+                name: "count".into(),
+                description: "how many".into(),
+                default: None,
+                required: false,
+                validation: None,
+            }],
+            vec![],
+        );
+        let raw: Vec<String> = vec![];
+        let (pairs, _) = parse_and_bind(&cmd, &raw).unwrap();
+        let bound_refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        // count is bound to "" by parse_and_bind — template default does not fire
+        let result = substitute("echo {{count|5}}", &bound_refs, "bash").unwrap();
+        assert_eq!(result, "echo ''");
     }
 
     #[test]
     fn test_optional_arg_no_default_template_errors() {
-        // required: false, no frontmatter default, no template default → MissingArg from substitute
-        let pairs: Vec<(&str, &str)> = vec![];
-        let result = substitute("echo {{name}}", &pairs, "bash");
-        assert!(
-            result.is_err(),
-            "substitute should error when arg is missing with no default"
+        // With the new behavior, required: false + no default → arg bound to ""
+        // by parse_and_bind. So {{name}} resolves to '' (empty string), not an error.
+        let cmd = make_cmd(
+            vec![Arg {
+                name: "name".into(),
+                description: "a name".into(),
+                default: None,
+                required: false,
+                validation: None,
+            }],
+            vec![],
+        );
+        let raw: Vec<String> = vec![];
+        let (pairs, _) = parse_and_bind(&cmd, &raw).unwrap();
+        let bound_refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let result = substitute("echo {{name}}", &bound_refs, "bash").unwrap();
+        assert_eq!(
+            result, "echo ''",
+            "optional arg with no default should resolve to empty string"
         );
     }
 
@@ -1388,7 +1429,7 @@ mod tests {
 
     #[test]
     fn test_flag_string_no_default_absent_skipped() {
-        // string flag with no default, not provided → not in pairs
+        // string flag with no default, not provided → bound to "" in pairs
         let cmd = make_cmd(
             vec![],
             vec![Flag {
@@ -1402,9 +1443,41 @@ mod tests {
         );
         let raw: Vec<String> = vec![];
         let (pairs, _) = parse_and_bind(&cmd, &raw).unwrap();
-        assert!(
-            pairs.iter().find(|(k, _)| k == "filter").is_none(),
-            "string flag with no default and not provided should not be in pairs"
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(k, _)| k == "filter")
+                .map(|(_, v)| v.as_str()),
+            Some(""),
+            "string flag with no default and not provided should be bound to empty string"
+        );
+    }
+
+    #[test]
+    fn test_optional_flag_no_default_binds_empty() {
+        // string flag with required: false (implied by flag type), no default, not provided
+        // → bound to "" so {{flagname}} resolves to empty string rather than erroring
+        let cmd = make_cmd(
+            vec![],
+            vec![Flag {
+                name: "format".into(),
+                short: None,
+                description: "output format".into(),
+                r#type: "string".into(),
+                default: None,
+                validation: None,
+            }],
+        );
+        let raw: Vec<String> = vec![];
+        let (pairs, _) = parse_and_bind(&cmd, &raw).unwrap();
+        let bound_refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let result = substitute("output {{format}}", &bound_refs, "bash").unwrap();
+        assert_eq!(
+            result, "output ''",
+            "unset string flag should substitute as empty string"
         );
     }
 
