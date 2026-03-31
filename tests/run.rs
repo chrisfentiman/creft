@@ -1333,3 +1333,152 @@ fn test_pipe_sigint_no_python_traceback() {
         "creft stderr must not contain 'KeyboardInterrupt' after SIGINT, got: {stderr:?}"
     );
 }
+
+// ── --verbose flag tests ────────────────────────────────────────────────────────
+
+/// `--verbose` shows rendered blocks on stderr and still executes the skill.
+#[test]
+fn test_verbose_shows_rendered_blocks() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: verbose-hello\n",
+            "description: greet with verbose\n",
+            "args:\n",
+            "  - name: who\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"Hello, {{who}}!\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["verbose-hello", "World", "--verbose"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Stderr shows the rendered block with === delimiters.
+    assert!(
+        stderr.contains("=== block 1 (bash) ==="),
+        "stderr should contain block header; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("=== end ==="),
+        "stderr should contain block footer; got: {stderr:?}"
+    );
+    // The substituted value appears in the rendered block.
+    assert!(
+        stderr.contains("World"),
+        "stderr should contain substituted arg value; got: {stderr:?}"
+    );
+
+    // Execution happened: stdout has the greeting.
+    assert!(
+        stdout.contains("Hello, World!"),
+        "stdout should contain execution output; got: {stdout:?}"
+    );
+}
+
+/// `--verbose --dry-run` shows rendered blocks on stderr and does NOT execute.
+#[test]
+fn test_verbose_dry_run_shows_rendered_no_execute() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: verbose-dry\n",
+            "description: verbose dry-run test\n",
+            "args:\n",
+            "  - name: msg\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"msg={{msg}}\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["verbose-dry", "hello", "--verbose", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Stderr shows the rendered block.
+    assert!(
+        stderr.contains("=== block 1 (bash) ==="),
+        "stderr should contain block header; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("hello"),
+        "stderr should contain substituted value; got: {stderr:?}"
+    );
+
+    // Execution did NOT happen: stdout is empty.
+    assert!(
+        stdout.is_empty(),
+        "stdout should be empty (no execution); got: {stdout:?}"
+    );
+}
+
+/// `--verbose` with an optional arg omitted shows the empty substitution in stderr.
+#[test]
+fn test_verbose_without_args_shows_empty_defaults() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: verbose-optional\n",
+            "description: optional arg verbose test\n",
+            "args:\n",
+            "  - name: thing\n",
+            "    required: false\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"thing={{thing}}\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["verbose-optional", "--verbose"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Stderr shows the block with the empty-substituted (shell-escaped) value.
+    assert!(
+        stderr.contains("=== block 1 (bash) ==="),
+        "stderr should contain block header; got: {stderr:?}"
+    );
+    // Empty string substitution produces '' in bash mode.
+    assert!(
+        stderr.contains("thing=''"),
+        "stderr should show empty substitution as ''; got: {stderr:?}"
+    );
+}

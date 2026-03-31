@@ -135,8 +135,10 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             return Err(CreftError::MissingArg(arg_def.name.clone()));
         };
 
-        // Regex validation (not supported natively by clap)
-        if let Some(pattern) = &arg_def.validation {
+        // Regex validation — skip when optional arg was not provided (empty default)
+        if let Some(pattern) = &arg_def.validation
+            && (!val.is_empty() || arg_def.required)
+        {
             let re = regex::Regex::new(pattern).map_err(|e| {
                 CreftError::Frontmatter(format!("invalid validation regex '{}': {}", pattern, e))
             })?;
@@ -166,9 +168,10 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             String::new()
         };
 
-        // Regex validation for string flags
+        // Regex validation for string flags — skip when empty default (not provided)
         if flag_def.r#type != "bool"
             && let Some(pattern) = &flag_def.validation
+            && !val.is_empty()
         {
             let re = regex::Regex::new(pattern).map_err(|e| {
                 CreftError::Frontmatter(format!("invalid validation regex '{}': {}", pattern, e))
@@ -814,6 +817,20 @@ pub fn run_with_env(
         block_outputs.push(output);
     }
 
+    Ok(())
+}
+
+/// Write rendered (substituted) blocks to stderr for diagnostic inspection.
+///
+/// Called when `--verbose` is active. Each block is shown with `===` delimiters
+/// so the output is visually distinct from `--dry-run`'s `---` format.
+pub fn render_blocks(cmd: &ParsedCommand, bound_refs: &[(&str, &str)]) -> Result<(), CreftError> {
+    for (i, block) in cmd.blocks.iter().enumerate() {
+        let expanded = substitute(&block.code, bound_refs, &block.lang)?;
+        eprintln!("=== block {} ({}) ===", i + 1, block.lang);
+        eprintln!("{}", expanded);
+        eprintln!("=== end ===");
+    }
     Ok(())
 }
 
