@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/chrisfentiman/creft/compare/creft-v0.1.1...creft-v0.1.2) (2026-03-31)
+
+
+### Bug Fixes
+
+* **validate:** optional arg defaults, shellcheck, and command checker ([88bacc2](https://github.com/chrisfentiman/creft/commit/88bacc25dc56193f023186ce4a86c6bb997c2dc6))
+
 ## [0.1.1](https://github.com/chrisfentiman/creft/compare/creft-v0.1.0...creft-v0.1.1) (2026-03-31)
 
 
