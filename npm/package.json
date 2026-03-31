@@ -1,0 +1,37 @@
+{
+  "name": "creft",
+  "version": "0.0.0",
+  "description": "Executable skills for Agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chrisfentiman/creft.git"
+  },
+  "homepage": "https://github.com/chrisfentiman/creft",
+  "bin": {
+    "creft": "bin/creft"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "agents",
+    "skills",
+    "markdown",
+    "executable"
+  ],
+  "files": [
+    "install.js",
+    "bin/"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
