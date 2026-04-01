@@ -990,7 +990,6 @@ fn run_pipe_chain(
         }
     }
 
-    // Pipe mode passes no CREFT_PREV/CREFT_BLOCK_N — output flows on stdin, not env.
     let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
     // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
     let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
@@ -2704,7 +2703,6 @@ mod tests {
     fn test_signal_detection() {
         // A block that kills itself with SIGTERM should produce ExecutionSignaled,
         // not ExecutionFailed. We use `kill -TERM $$` in bash to self-signal.
-        // This tests the signal detection path in execute_block (sequential mode).
         let cmd = ParsedCommand {
             def: CommandDef {
                 name: "test-signal".into(),
