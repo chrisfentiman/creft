@@ -1522,3 +1522,122 @@ fn test_verbose_without_args_shows_empty_defaults() {
         "stderr should show empty substitution as ''; got: {stderr:?}"
     );
 }
+
+// ── exit 99 early return tests ─────────────────────────────────────────────────
+
+/// A block that exits 99 stops the pipeline and creft returns 0.
+/// Blocks after the exiting block must not execute.
+#[test]
+fn test_early_exit_99_stops_remaining_blocks() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: early-exit-stop\n",
+            "description: exit 99 stops the pipeline\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "echo 'should not run'\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["early-exit-stop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("should not run").not());
+}
+
+/// A block that echoes output and then exits 99 preserves that output.
+#[test]
+fn test_early_exit_99_preserves_output() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: early-exit-output\n",
+            "description: exit 99 preserves block output\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo hello\n",
+            "exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["early-exit-output"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello"));
+}
+
+/// A block that exits 1 still causes creft to fail.
+#[test]
+fn test_normal_exit_1_still_fails() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit-one-fails\n",
+            "description: exit 1 is an error\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 1\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["exit-one-fails"])
+        .assert()
+        .failure();
+}
+
+/// In pipe mode, a block that exits 99 causes the pipeline to return 0.
+#[test]
+fn test_early_exit_99_in_pipe_mode() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-early-exit\n",
+            "description: exit 99 in pipe mode\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["pipe-early-exit"])
+        .assert()
+        .success();
+}
