@@ -85,6 +85,9 @@ pub enum CreftError {
     /// surfaced to the user — callers translate it to `Ok(())`.
     #[error("early exit (exit 99)")]
     EarlyExit,
+
+    #[error("llm provider not found: {0}")]
+    LlmProviderNotFound(String),
 }
 
 impl CreftError {
@@ -146,6 +149,7 @@ pub fn enrich_io_error(e: std::io::Error, context: &str) -> CreftError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::{assert_eq, assert_ne};
 
     // --- exit_code() tests ---
 
@@ -338,6 +342,18 @@ mod tests {
             matches!(result, CreftError::Io(_)),
             "Expected Io passthrough for non-E2BIG, non-NotFound errors"
         );
+    }
+
+    #[test]
+    fn test_exit_code_llm_provider_not_found() {
+        let err = CreftError::LlmProviderNotFound("claude".to_string());
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn test_is_quiet_llm_provider_not_found() {
+        let err = CreftError::LlmProviderNotFound("gemini".to_string());
+        assert!(!err.is_quiet());
     }
 
     #[test]

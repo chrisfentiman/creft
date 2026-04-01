@@ -323,12 +323,58 @@ fn default_true() -> bool {
     true
 }
 
+fn default_provider() -> String {
+    "claude".to_string()
+}
+
+/// Configuration for an `llm` code block, parsed from the YAML header.
+///
+/// All fields are optional strings for forward-compatibility with unknown
+/// providers and future provider features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// CLI tool to invoke. Defaults to `"claude"` when absent.
+    /// Known providers have specific command patterns; unknown providers
+    /// are invoked as literal command names.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+
+    /// Model name passed to the provider CLI. Omitted from the command
+    /// when empty (provider uses its own default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+
+    /// Raw parameter string appended to the command. Split on whitespace
+    /// before appending as individual arguments. This is the escape hatch
+    /// for any provider flag creft doesn't model explicitly.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub params: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+            model: String::new(),
+            params: String::new(),
+        }
+    }
+}
+
 /// A fenced code block extracted from a skill's markdown body.
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     pub lang: String,
     pub code: String,
     pub deps: Vec<String>,
+    /// LLM configuration, present only when `lang == "llm"`.
+    /// Parsed from the YAML header before `---` in the block content.
+    pub llm_config: Option<LlmConfig>,
+    /// When `lang == "llm"` and the YAML header failed to parse,
+    /// this holds the parse error message. Used by validation to
+    /// emit a diagnostic. `None` for all non-llm blocks and for
+    /// llm blocks that parsed successfully.
+    pub llm_parse_error: Option<String>,
 }
 
 /// A fully parsed skill ready for execution.
@@ -1135,5 +1181,38 @@ name: MY_TOKEN
             assert!(plain.contains(needle), "plain output missing {needle}");
             assert!(ansi_out.contains(needle), "ansi output missing {needle}");
         }
+    }
+
+    // ── LlmConfig deserialization ─────────────────────────────────────────────
+
+    #[test]
+    fn test_llm_config_deserialize_full() {
+        let yaml = r#"
+provider: openai
+model: gpt-4o
+params: "--max-tokens 1000"
+"#;
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.params, "--max-tokens 1000");
+    }
+
+    #[test]
+    fn test_llm_config_deserialize_defaults() {
+        let yaml = "{}";
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "claude");
+        assert!(config.model.is_empty());
+        assert!(config.params.is_empty());
+    }
+
+    #[test]
+    fn test_llm_config_deserialize_provider_only() {
+        let yaml = "provider: gemini";
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "gemini");
+        assert!(config.model.is_empty());
+        assert!(config.params.is_empty());
     }
 }

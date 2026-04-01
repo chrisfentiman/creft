@@ -453,6 +453,10 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.push(check_optional_tool("uv", "needed for python deps"));
     results.push(check_optional_tool("npm", "needed for node deps"));
 
+    for provider in &["claude", "gemini", "codex", "ollama"] {
+        results.push(check_llm_provider(provider));
+    }
+
     results.push(check_global_dir(ctx));
     results.push(check_local_dir(ctx));
     results.extend(check_packages(ctx));
@@ -521,6 +525,17 @@ fn run_skill_check_inner(
 
     for (idx, block) in cmd.blocks.iter().enumerate() {
         let block_num = idx + 1;
+
+        if block.lang == "llm" {
+            if let Some(config) = &block.llm_config {
+                let cli = llm_provider_cli_name(&config.provider);
+                if seen_interpreters.insert(cli.to_string()) {
+                    interpreter_checks.push(check_llm_provider(cli));
+                }
+            }
+            // llm blocks have no deps, commands, or sub-skill calls to check
+            continue;
+        }
 
         if let Some(interp) = interpreter_for_lang(&block.lang)
             && seen_interpreters.insert(interp.to_string())
@@ -691,6 +706,18 @@ pub(crate) fn is_shell_lang(lang: &str) -> bool {
     matches!(lang, "bash" | "sh" | "zsh")
 }
 
+/// Return the CLI command name for a given LLM provider string.
+///
+/// For known providers, the command name matches the provider name.
+/// For unknown providers, the provider string is used as-is (the literal
+/// command the user expects on PATH).
+pub(crate) fn llm_provider_cli_name(provider: &str) -> &str {
+    match provider {
+        "" => "claude",
+        other => other,
+    }
+}
+
 fn check_block_interpreter(interp: &str) -> CheckResult {
     match which_path(interp) {
         Some(p) => CheckResult {
@@ -701,6 +728,24 @@ fn check_block_interpreter(interp: &str) -> CheckResult {
         None => CheckResult {
             label: interp.to_string(),
             status: CheckStatus::Fail,
+            detail: "not found on PATH".to_string(),
+        },
+    }
+}
+
+/// Check for an LLM provider CLI. Missing providers are `Optional` (not `Fail`)
+/// because the provider may be available in the execution environment but not
+/// the authoring environment.
+fn check_llm_provider(name: &str) -> CheckResult {
+    match which_path(name) {
+        Some(p) => CheckResult {
+            label: name.to_string(),
+            status: CheckStatus::Ok,
+            detail: p.to_string_lossy().to_string(),
+        },
+        None => CheckResult {
+            label: name.to_string(),
+            status: CheckStatus::Optional,
             detail: "not found on PATH".to_string(),
         },
     }
@@ -1797,6 +1842,8 @@ mod tests {
             lang: "python".into(),
             code: "import requests".into(),
             deps: vec!["requests".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         // Whether uv is found or not, should have one result
@@ -1811,6 +1858,8 @@ mod tests {
             lang: "node".into(),
             code: "const axios = require('axios')".into(),
             deps: vec!["axios".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         assert_eq!(results.len(), 1);
@@ -1824,6 +1873,8 @@ mod tests {
             lang: "bash".into(),
             code: "curl url | jq .".into(),
             deps: vec!["curl".into(), "creft_no_such_dep_xyz9999".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         assert_eq!(results.len(), 2);
@@ -1835,5 +1886,44 @@ mod tests {
             .unwrap();
         assert_eq!(curl_result.status, CheckStatus::Ok);
         assert_eq!(fake_result.status, CheckStatus::Fail);
+    }
+
+    // ── llm_provider_cli_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_llm_provider_cli_name_empty_defaults_to_claude() {
+        assert_eq!(llm_provider_cli_name(""), "claude");
+    }
+
+    #[test]
+    fn test_llm_provider_cli_name_known_providers() {
+        assert_eq!(llm_provider_cli_name("claude"), "claude");
+        assert_eq!(llm_provider_cli_name("gemini"), "gemini");
+        assert_eq!(llm_provider_cli_name("codex"), "codex");
+        assert_eq!(llm_provider_cli_name("ollama"), "ollama");
+    }
+
+    #[test]
+    fn test_llm_provider_cli_name_unknown_returns_as_is() {
+        assert_eq!(llm_provider_cli_name("my-custom-llm"), "my-custom-llm");
+    }
+
+    // ── check_llm_provider ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_check_llm_provider_found() {
+        // Use `sh` as a stand-in for a found provider.
+        let result = check_llm_provider("sh");
+        assert_eq!(result.status, CheckStatus::Ok);
+        assert_eq!(result.label, "sh");
+    }
+
+    #[test]
+    fn test_check_llm_provider_not_found_is_optional() {
+        // A missing LLM provider is Optional (not Fail) because it may be
+        // available in the execution environment but not the authoring env.
+        let result = check_llm_provider("creft_no_such_llm_xyz9999");
+        assert_eq!(result.status, CheckStatus::Optional);
+        assert!(result.detail.contains("not found on PATH"));
     }
 }
