@@ -249,8 +249,6 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
     }
 }
 
-// ── Namespace help ────────────────────────────────────────────────────────────
-
 /// Show namespace help: a header line followed by the grouped skill listing.
 ///
 /// Called when `creft <namespace> --help` is used and the name resolves to a
@@ -309,8 +307,6 @@ fn cmd_namespace_help(ctx: &model::AppContext, prefix: &[&str]) -> Result<(), Cr
 
     Ok(())
 }
-
-// ── Built-in command implementations ─────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_add(

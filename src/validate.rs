@@ -217,7 +217,6 @@ fn check_llm_block(
         return;
     }
 
-    // Empty prompt check.
     if block.code.trim().is_empty() {
         errors.push(ValidationDiagnostic {
             block_index: Some(block_index),
@@ -228,7 +227,6 @@ fn check_llm_block(
         return;
     }
 
-    // Check placeholder references using the same logic as other blocks.
     check_placeholders(def, block, block_index, warnings);
 
     // Provider CLI PATH check (warning only — provider may be available in the
