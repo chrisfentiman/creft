@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/chrisfentiman/creft/compare/creft-v0.1.3...creft-v0.1.4) (2026-04-01)
+
+
+### Bug Fixes
+
+* **runner:** use npm install + NODE_PATH for node block deps ([382164a](https://github.com/chrisfentiman/creft/commit/382164a8c83f296f2f09c9861b88b6e9973b2f85))
+
 ## [0.1.3](https://github.com/chrisfentiman/creft/compare/creft-v0.1.2...creft-v0.1.3) (2026-03-31)
 
 
