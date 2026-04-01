@@ -65,6 +65,12 @@ Code Blocks:
   Each fenced block is an executable step. Language tag sets the interpreter.
   Blocks run in order; if one fails, execution stops.
 
+  Exit codes:
+    0     Success, continue to the next block
+    1-98  Error, stop the pipeline and propagate the exit code
+    99    Early successful return — stop the pipeline, creft exits 0
+    100+  Error, stop the pipeline and propagate the exit code
+
   Interpreters: bash, python, node, zsh, ruby, docs (not executed -- shown in --help)
 
   Dependencies (first line comment):

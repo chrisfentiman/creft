@@ -5,6 +5,13 @@ use std::sync::LazyLock;
 use crate::error::CreftError;
 use crate::model::{CodeBlock, ParsedCommand};
 
+/// Exit code that signals early successful return — skip remaining blocks.
+///
+/// A block that exits 99 is treated as a successful early termination of
+/// the pipeline. creft intercepts this code and returns 0 to the caller.
+/// All other non-zero exit codes propagate as errors.
+const EARLY_EXIT: i32 = 99;
+
 static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_-]*)(?:\|([^}]*))?\}\}").unwrap()
 });
@@ -733,6 +740,15 @@ fn run_pipe_chain(
         }
     }
 
+    // Exit 99 from any block means early successful return — downstream blocks
+    // will have received EOF/SIGPIPE and exited cleanly as a side-effect.
+    if results
+        .iter()
+        .any(|r| exit_code_of(&r.status) == Some(EARLY_EXIT))
+    {
+        return Ok(());
+    }
+
     // Last block success wins: earlier blocks dying from SIGPIPE (consumer exited
     // early) is normal pipeline behavior, not an error.
     let last = results.last().expect("at least one block");
@@ -779,6 +795,13 @@ fn execute_block(
     // _node_deps_dir kept alive here so the npm-installed node_modules directory
     // is not deleted before the child process finishes.
     let output = child.wait_with_output().map_err(CreftError::Io)?;
+
+    if exit_code_of(&output.status) == Some(EARLY_EXIT) {
+        // Print any output produced before the early exit so it is not lost.
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        print!("{}", stdout);
+        return Err(CreftError::EarlyExit);
+    }
 
     if !output.status.success() {
         return Err(make_execution_error(block_idx, &block.lang, &output.status));
@@ -857,7 +880,12 @@ pub fn run_with_env(
             env_vars.push((key.as_str(), block_outputs[idx].trim_end()));
         }
 
-        let output = execute_block(block, &expanded, i, &env_vars, cwd)?;
+        let output = match execute_block(block, &expanded, i, &env_vars, cwd) {
+            Ok(out) => out,
+            // Exit 99: stop the pipeline and return success to the caller.
+            Err(CreftError::EarlyExit) => return Ok(()),
+            Err(e) => return Err(e),
+        };
 
         prev_output = output.clone();
         block_outputs.push(output);
