@@ -854,9 +854,10 @@ fn sponge_thread(
             use std::os::unix::process::CommandExt;
             unsafe {
                 cmd.pre_exec(|| {
-                    if libc::setpgid(0, 0) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
+                    // EPERM is non-fatal: macOS fork() from non-main threads
+                    // can cause setpgid to fail. Signal protection via SIG_IGN
+                    // is the critical operation here.
+                    let _ = libc::setpgid(0, 0);
                     libc::signal(libc::SIGINT, libc::SIG_IGN);
                     Ok(())
                 });
