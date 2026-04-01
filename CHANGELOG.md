@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/chrisfentiman/creft/compare/creft-v0.1.8...creft-v0.1.9) (2026-04-01)
+
+
+### Features
+
+* **runner:** LLM sponge pattern, buffered relay, and pipe exit 99 fixes ([ae626f1](https://github.com/chrisfentiman/creft/commit/ae626f11d927aee822b4eb71c26838b819a38865))
+
 ## [0.1.8](https://github.com/chrisfentiman/creft/compare/creft-v0.1.7...creft-v0.1.8) (2026-04-01)
 
 
