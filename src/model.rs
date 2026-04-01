@@ -245,19 +245,6 @@ pub struct CommandDef {
     pub env: Vec<EnvVar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// Deprecated in v0.2.0. Multi-block skills now pipe by default.
-    /// Retained for backward-compatible deserialization only.
-    /// `true` is a no-op (pipe is now the default). `false` is indistinguishable
-    /// from absent after serde deserialization and does not trigger sequential mode.
-    /// Use `sequential: true` to opt into sequential execution.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pipe: bool,
-    /// When true, blocks run sequentially with output captured as strings.
-    /// `{{prev}}`, `$CREFT_PREV`, and `$CREFT_BLOCK_N` are available.
-    /// Default: false (multi-block skills use concurrent pipe execution).
-    /// Single-block skills always run sequentially regardless of this field.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub sequential: bool,
     /// Runtime features this command supports (e.g., "dry-run").
     /// When a feature is declared here and the corresponding runtime flag
     /// is passed, creft delegates handling to the command instead of
@@ -402,15 +389,6 @@ impl CommandDef {
     /// Split the command name into its whitespace-delimited namespace tokens.
     pub fn name_parts(&self) -> Vec<&str> {
         self.name.split_whitespace().collect()
-    }
-
-    /// Whether this skill's blocks should run sequentially.
-    ///
-    /// Returns `true` when `sequential: true` is set.
-    /// Single-block skills don't need this check — the runner handles
-    /// them as sequential regardless.
-    pub fn is_sequential(&self) -> bool {
-        self.sequential
     }
 }
 
@@ -564,8 +542,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         };
         assert_eq!(def.name_parts(), vec!["hello"]);
@@ -580,8 +556,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         };
         assert_eq!(def.name_parts(), vec!["gh", "issue-body"]);
@@ -615,8 +589,6 @@ mod tests {
                     required: true,
                 }],
                 tags: vec!["github".into(), "api".into()],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: Some("Fetches the body as raw markdown.".into()),
@@ -648,8 +620,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec!["dry-run".into()],
         };
         assert!(def.supports_feature("dry-run"));
@@ -664,8 +634,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec!["dry-run".into()],
         };
         assert!(!def.supports_feature("verbose"));
@@ -680,8 +648,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         };
         assert!(!def.supports_feature("dry-run"));
@@ -745,8 +711,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -781,8 +745,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -812,8 +774,6 @@ name: MY_TOKEN
                     required: false,
                 }],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -844,8 +804,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -876,8 +834,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -906,8 +862,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -937,8 +891,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -962,8 +914,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -990,8 +940,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -1107,8 +1055,6 @@ name: MY_TOKEN
                     required: true,
                 }],
                 tags: vec!["github".into()],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -1249,64 +1195,19 @@ params: "--max-tokens 1000"
         assert!(config.params.is_empty());
     }
 
-    // ── sequential field and is_sequential() ────────────────────────────────
-
     #[test]
-    fn test_is_sequential_default_false() {
-        let def = CommandDef {
-            name: "hello".into(),
-            description: "test".into(),
-            args: vec![],
-            flags: vec![],
-            env: vec![],
-            tags: vec![],
-            pipe: false,
-            sequential: false,
-            supports: vec![],
-        };
-        assert!(!def.is_sequential());
+    fn test_deserialize_ignores_pipe_field() {
+        // YAML with pipe: true must deserialize without error. Field is silently ignored.
+        let yaml = "name: hello\ndescription: test\npipe: true\n";
+        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(def.name, "hello");
     }
 
     #[test]
-    fn test_is_sequential_when_set() {
-        let def = CommandDef {
-            name: "hello".into(),
-            description: "test".into(),
-            args: vec![],
-            flags: vec![],
-            env: vec![],
-            tags: vec![],
-            pipe: false,
-            sequential: true,
-            supports: vec![],
-        };
-        assert!(def.is_sequential());
-    }
-
-    #[test]
-    fn test_sequential_field_deserialize() {
+    fn test_deserialize_ignores_sequential_field() {
+        // YAML with sequential: true must deserialize without error. Field is silently ignored.
         let yaml = "name: hello\ndescription: test\nsequential: true\n";
         let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(def.sequential);
-        assert!(def.is_sequential());
-    }
-
-    #[test]
-    fn test_sequential_field_default_absent() {
-        let yaml = "name: hello\ndescription: test\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(!def.sequential);
-        assert!(!def.is_sequential());
-    }
-
-    #[test]
-    fn test_pipe_and_sequential_both_set() {
-        // Both fields can coexist at the model layer. Validation catches the conflict.
-        // is_sequential() only checks the sequential field.
-        let yaml = "name: hello\ndescription: test\npipe: true\nsequential: true\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(def.pipe);
-        assert!(def.sequential);
-        assert!(def.is_sequential());
+        assert_eq!(def.name, "hello");
     }
 }

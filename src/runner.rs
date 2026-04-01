@@ -1582,8 +1582,10 @@ fn execute_llm_block(
 /// into every child process.
 ///
 /// `extra_env` entries are prepended to the per-block env vars so they are
-/// visible to every block, including the first. Block-specific vars
-/// (`CREFT_PREV`, `CREFT_BLOCK_N`) follow after.
+/// visible to every block, including the first.
+///
+/// Multi-block skills always pipe stdout between blocks via `run_pipe_chain`.
+/// Single-block skills run directly via `execute_block`.
 ///
 /// Use this when a runtime feature (e.g. dry-run delegation) needs to signal
 /// to the child process that a special mode is active.
@@ -1605,11 +1607,8 @@ pub fn run_with_env(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // pipe:true requires 2+ blocks; a single-block pipe falls through to sequential.
-    // On Unix, LLM blocks participate as sponge stages in run_pipe_chain.
-    // On non-Unix, skills with LLM blocks fall back to sequential execution because
-    // the sponge infrastructure (process groups, reaper channel) is Unix-only.
-    if cmd.def.pipe && !cmd.def.is_sequential() && cmd.blocks.len() > 1 {
+    // Multi-block skills always pipe. Single-block falls through to execute_block below.
+    if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
             return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
@@ -1617,67 +1616,35 @@ pub fn run_with_env(
         #[cfg(not(unix))]
         {
             let has_llm_blocks = cmd.blocks.iter().any(|b| b.lang == "llm");
-            if !has_llm_blocks {
-                return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
+            if has_llm_blocks {
+                return Err(CreftError::Setup(
+                    "Multi-block skills with LLM blocks require Unix (macOS/Linux). \
+                     LLM pipe stages use process groups which are not available on this platform."
+                        .into(),
+                ));
             }
-            // Fall through to sequential loop for non-Unix with LLM blocks.
+            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
         }
     }
 
-    let mut prev_output = String::new();
-    let mut block_outputs: Vec<String> = Vec::new();
+    // Single block execution.
+    let block = &cmd.blocks[0];
+    let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
+    let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
 
-    for (i, block) in cmd.blocks.iter().enumerate() {
-        let prev_owned = prev_output.trim_end().to_string();
-        let mut args_with_prev = bound_refs.clone();
-        args_with_prev.push(("prev", &prev_owned));
-
-        let expanded = substitute(&block.code, &args_with_prev, &block.lang)?;
-
-        // extra_env is prepended so CREFT_DRY_RUN (and any future injected vars)
-        // are visible to every block, including block 0.
-        let mut env_vars: Vec<(&str, &str)> = extra_env.to_vec();
-
-        let prev_trimmed = prev_output.trim_end();
-        if i > 0 {
-            env_vars.push(("CREFT_PREV", prev_trimmed));
+    if block.lang == "llm" {
+        match execute_llm_block(block, &expanded, 0, &env_vars, cwd) {
+            Ok(_) => Ok(()),
+            Err(CreftError::EarlyExit) => Ok(()),
+            Err(e) => Err(e),
         }
-        // Declared at loop scope so the string data outlives the env_vars references.
-        let block_env_keys: Vec<String> = (0..block_outputs.len())
-            .map(|idx| format!("CREFT_BLOCK_{}", idx + 1))
-            .collect();
-        for (idx, key) in block_env_keys.iter().enumerate() {
-            env_vars.push((key.as_str(), block_outputs[idx].trim_end()));
+    } else {
+        match execute_block(block, &expanded, 0, &env_vars, cwd, None) {
+            Ok(_) => Ok(()),
+            Err(CreftError::EarlyExit) => Ok(()),
+            Err(e) => Err(e),
         }
-
-        let output = if block.lang == "llm" {
-            match execute_llm_block(block, &expanded, i, &env_vars, cwd) {
-                Ok(out) => out,
-                Err(CreftError::EarlyExit) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-        } else {
-            // In pipe-fallback mode (pipe:true skill with llm blocks), route
-            // prev_output to the child's stdin so the pipe contract holds.
-            // Block 0 always inherits parent stdin (matching run_pipe_chain).
-            let stdin_data: Option<&[u8]> = if cmd.def.pipe && i > 0 {
-                Some(prev_owned.as_bytes())
-            } else {
-                None
-            };
-            match execute_block(block, &expanded, i, &env_vars, cwd, stdin_data) {
-                Ok(out) => out,
-                // Exit 99: stop the pipeline and return success to the caller.
-                Err(CreftError::EarlyExit) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-        };
-
-        prev_output = output.clone();
-        block_outputs.push(output);
     }
-
-    Ok(())
 }
 
 /// Write rendered (substituted) blocks to stderr for diagnostic inspection.
@@ -1900,8 +1867,6 @@ mod tests {
                 flags,
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2405,8 +2370,6 @@ mod tests {
                     required: true,
                 }],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2434,8 +2397,6 @@ mod tests {
                     required: false,
                 }],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2509,8 +2470,6 @@ mod tests {
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: true,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2585,20 +2544,18 @@ mod tests {
     }
 
     #[test]
-    fn test_non_pipe_mode_unaffected() {
-        // A two-block non-pipe command must still work correctly.
-        // Block 0 prints "hello". Block 1 prints "world".
-        // No stdin threading should occur (prev_stdin is None for both blocks).
+    fn test_multi_block_default_pipes() {
+        // Multi-block skills always pipe. Block 0 outputs "hello" on stdout,
+        // which becomes stdin for block 1. Block 1 (cat) passes it through.
+        // Both blocks run as part of a pipe chain — result is Ok.
         let cmd = ParsedCommand {
             def: CommandDef {
-                name: "test-nopipe".into(),
-                description: "test non-pipe".into(),
+                name: "test-default-pipe".into(),
+                description: "test multi-block pipes by default".into(),
                 args: vec![],
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2612,7 +2569,7 @@ mod tests {
                 },
                 CodeBlock {
                     lang: "bash".into(),
-                    code: "echo world".into(),
+                    code: "cat".into(),
                     deps: vec![],
                     llm_config: None,
                     llm_parse_error: None,
@@ -2623,7 +2580,7 @@ mod tests {
         let result = run_with_env(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
-            "non-pipe multi-block command must still work: {:?}",
+            "multi-block command must pipe by default: {:?}",
             result
         );
     }
@@ -2638,8 +2595,6 @@ mod tests {
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: true,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2677,18 +2632,15 @@ mod tests {
 
     #[test]
     fn test_pipe_single_block_passthrough() {
-        // pipe: true with only one block falls through to sequential path.
-        // The single block runs normally and its output reaches the terminal.
+        // Single-block skills skip the pipe path entirely and run via execute_block.
         let cmd = ParsedCommand {
             def: CommandDef {
                 name: "test-pipe-single".into(),
-                description: "single block pipe".into(),
+                description: "single block skill".into(),
                 args: vec![],
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: true, // pipe: true but only one block — should be a no-op
-                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2704,7 +2656,7 @@ mod tests {
         let result = run_with_env(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
-            "single-block pipe:true must succeed (falls through to sequential): {:?}",
+            "single-block skill must succeed: {:?}",
             result
         );
     }
@@ -2760,8 +2712,6 @@ mod tests {
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
-                sequential: false,
                 supports: vec![],
             },
             docs: None,

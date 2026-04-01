@@ -1396,8 +1396,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         };
         (def, SkillSource::Owned(Scope::Global))
@@ -1411,8 +1409,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         };
         (def, SkillSource::Package(pkg.to_string(), Scope::Global))

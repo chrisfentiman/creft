@@ -140,39 +140,19 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_with_sequential() {
-        // A skill with sequential: true must survive parse -> serialize -> parse
-        // with the field preserved.
-        let input = "---\nname: hello\ndescription: greet someone\nsequential: true\n---\nbody\n";
+    fn test_roundtrip_ignores_legacy_pipe_field() {
+        // YAML with pipe: true deserializes without error. On roundtrip,
+        // pipe does not appear in the serialized output (field is gone from the struct).
+        let input = "---\nname: hello\ndescription: greet someone\npipe: true\n---\nbody\n";
         let (def, body) = parse(input).unwrap();
-        assert!(def.sequential, "sequential should be true after parse");
+        assert_eq!(def.name, "hello");
         let serialized = serialize(&def, &body).unwrap();
         assert!(
-            serialized.contains("sequential: true"),
-            "serialized output must contain sequential: true; got:\n{serialized}"
+            !serialized.contains("pipe"),
+            "serialized output must not contain pipe after roundtrip; got:\n{serialized}"
         );
         let (def2, body2) = parse(&serialized).unwrap();
-        assert!(def2.sequential, "sequential must survive roundtrip");
-        assert_eq!(body, body2);
-    }
-
-    #[test]
-    fn test_roundtrip_without_sequential() {
-        // A skill without sequential must omit the field from serialized output
-        // (skip_serializing_if = "is_false").
-        let input = "---\nname: hello\ndescription: greet someone\n---\nbody\n";
-        let (def, body) = parse(input).unwrap();
-        assert!(!def.sequential, "sequential should default to false");
-        let serialized = serialize(&def, &body).unwrap();
-        assert!(
-            !serialized.contains("sequential"),
-            "serialized output must not contain sequential when false; got:\n{serialized}"
-        );
-        let (def2, body2) = parse(&serialized).unwrap();
-        assert!(
-            !def2.sequential,
-            "sequential must remain false after roundtrip"
-        );
+        assert_eq!(def2.name, "hello");
         assert_eq!(body, body2);
     }
 }

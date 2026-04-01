@@ -911,8 +911,6 @@ mod tests {
                 .collect(),
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         }
     }
@@ -1416,8 +1414,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
-            sequential: false,
             supports: vec![],
         }
     }
