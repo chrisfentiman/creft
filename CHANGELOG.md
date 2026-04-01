@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/chrisfentiman/creft/compare/creft-v0.1.5...creft-v0.1.6) (2026-04-01)
+
+
+### Features
+
+* **runner:** native llm block type with provider-agnostic AI CLI support ([ab515cd](https://github.com/chrisfentiman/creft/commit/ab515cd125e0c4fb23573b11a6ca00f9fc22cfca))
+
 ## [0.1.5](https://github.com/chrisfentiman/creft/compare/creft-v0.1.4...creft-v0.1.5) (2026-04-01)
 
 
