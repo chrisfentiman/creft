@@ -4,7 +4,6 @@ description: Run mutation testing
 tags:
   - dev
   - testing
-pipe: true
 args:
   - name: file
     description: Filter mutations to a specific file (e.g. error.rs, runner.rs)

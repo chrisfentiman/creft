@@ -19,6 +19,8 @@ pub(crate) enum CheckStatus {
     Ok,
     /// Check failed -- a required dependency is missing.
     Fail,
+    /// Warning -- something may be broken but is not a hard failure.
+    Warn,
     /// Informational -- not an error, just reporting state.
     Info,
     /// Optional tool missing -- not a failure.
@@ -599,15 +601,39 @@ fn run_skill_check_inner(
         env_checks.push(result);
     }
 
-    let uses_prev = cmd
+    let has_creft_prev = cmd.blocks.iter().any(|b| b.code.contains("$CREFT_PREV"));
+    let prev_in_shell = cmd
         .blocks
         .iter()
-        .any(|b| b.code.contains("$CREFT_PREV") || b.code.contains("{{prev}}"));
-    if uses_prev {
+        .any(|b| b.lang != "llm" && b.code.contains("{{prev}}"));
+    let prev_in_llm = cmd
+        .blocks
+        .iter()
+        .any(|b| b.lang == "llm" && b.code.contains("{{prev}}"));
+
+    if has_creft_prev {
+        misc_checks.push(CheckResult {
+            label: "pipeline input".to_string(),
+            status: CheckStatus::Warn,
+            detail: "$CREFT_PREV is removed in v0.2.0. Multi-block skills now pipe stdout \
+                     directly. Remove $CREFT_PREV references."
+                .to_string(),
+        });
+    }
+    if prev_in_shell {
+        misc_checks.push(CheckResult {
+            label: "pipeline input".to_string(),
+            status: CheckStatus::Warn,
+            detail: "{{prev}} in shell blocks is not supported. It is only valid in LLM \
+                     block prompts within multi-block skills."
+                .to_string(),
+        });
+    }
+    if prev_in_llm && !has_creft_prev && !prev_in_shell {
         misc_checks.push(CheckResult {
             label: "pipeline input".to_string(),
             status: CheckStatus::Info,
-            detail: "expects pipeline input (uses $CREFT_PREV or {{prev}})".to_string(),
+            detail: "uses {{prev}} in LLM prompt (reads buffered upstream input)".to_string(),
         });
     }
 
@@ -869,6 +895,7 @@ fn status_marker(status: CheckStatus) -> &'static str {
     match status {
         CheckStatus::Ok => "[ok]",
         CheckStatus::Fail => "[!!]",
+        CheckStatus::Warn => "[ww]",
         CheckStatus::Info => "[ii]",
         CheckStatus::Optional => "[--]",
     }
@@ -1556,8 +1583,8 @@ mod tests {
             )],
             misc_checks: vec![CheckResult {
                 label: "pipeline input".into(),
-                status: CheckStatus::Info,
-                detail: "uses $CREFT_PREV".into(),
+                status: CheckStatus::Warn,
+                detail: "$CREFT_PREV is removed in v0.2.0. Multi-block skills now pipe stdout directly. Remove $CREFT_PREV references.".into(),
             }],
             sub_reports: vec![],
         };
@@ -1809,6 +1836,7 @@ mod tests {
     fn test_status_marker_all_variants() {
         assert_eq!(status_marker(CheckStatus::Ok), "[ok]");
         assert_eq!(status_marker(CheckStatus::Fail), "[!!]");
+        assert_eq!(status_marker(CheckStatus::Warn), "[ww]");
         assert_eq!(status_marker(CheckStatus::Info), "[ii]");
         assert_eq!(status_marker(CheckStatus::Optional), "[--]");
     }
@@ -1925,5 +1953,86 @@ mod tests {
         let result = check_llm_provider("creft_no_such_llm_xyz9999");
         assert_eq!(result.status, CheckStatus::Optional);
         assert!(result.detail.contains("not found on PATH"));
+    }
+
+    // ── pipeline input diagnostics ────────────────────────────────────────────
+
+    fn write_skill_to_tmp(
+        markdown: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::model::AppContext,
+        String,
+        crate::model::SkillSource,
+    ) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let creft_dir = tmp.path().join(".creft/commands");
+        std::fs::create_dir_all(&creft_dir).unwrap();
+        let skill_path = creft_dir.join("test-skill.md");
+        std::fs::write(&skill_path, markdown).unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let source = crate::model::SkillSource::Owned(crate::model::Scope::Local);
+        (tmp, ctx, "test-skill".to_string(), source)
+    }
+
+    #[test]
+    fn test_skill_check_creft_prev_warns_removal() {
+        let markdown = "---\nname: test-skill\ndescription: uses CREFT_PREV\n---\n\n```bash\necho $CREFT_PREV\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let misc = &report.misc_checks;
+        let pipeline_check = misc
+            .iter()
+            .find(|c| c.label == "pipeline input")
+            .unwrap_or_else(|| panic!("no pipeline input check found, misc_checks: {:?}", misc));
+        assert_eq!(
+            pipeline_check.status,
+            CheckStatus::Warn,
+            "expected Warn for $CREFT_PREV usage"
+        );
+        assert!(
+            pipeline_check.detail.contains("removed in v0.2.0"),
+            "expected removal message, got: {}",
+            pipeline_check.detail
+        );
+    }
+
+    #[test]
+    fn test_skill_check_prev_in_shell_block_warns_not_supported() {
+        let markdown = "---\nname: test-skill\ndescription: uses prev in shell\n---\n\n```bash\necho '{{prev}}'\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let misc = &report.misc_checks;
+        let pipeline_check = misc.iter().find(|c| c.label == "pipeline input").unwrap();
+        assert_eq!(
+            pipeline_check.status,
+            CheckStatus::Warn,
+            "expected Warn for {{prev}} in shell block"
+        );
+        assert!(
+            pipeline_check.detail.contains("not supported"),
+            "expected not-supported message, got: {}",
+            pipeline_check.detail
+        );
+    }
+
+    #[test]
+    fn test_skill_check_prev_in_llm_block_is_info() {
+        let markdown = "---\nname: test-skill\ndescription: llm sponge\n---\n\n```bash\necho upstream\n```\n\n```llm\nprovider: cat\n---\nresult: {{prev}}\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let misc = &report.misc_checks;
+        let pipeline_check = misc.iter().find(|c| c.label == "pipeline input").unwrap();
+        assert_eq!(
+            pipeline_check.status,
+            CheckStatus::Info,
+            "expected Info for {{prev}} in LLM block only"
+        );
+        assert!(
+            pipeline_check.detail.contains("buffered upstream input"),
+            "expected buffered upstream input message, got: {}",
+            pipeline_check.detail
+        );
     }
 }

@@ -4,7 +4,6 @@ description: Measure compile time, test time, binary size
 tags:
   - dev
   - performance
-pipe: true
 flags:
   - name: compare
     short: c

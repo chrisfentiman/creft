@@ -2750,8 +2750,8 @@ mod tests {
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("pipe: true"),
-            "E2BIG message should suggest 'pipe: true', got: {msg}"
+            msg.contains("OS argument size limit"),
+            "E2BIG message should mention OS argument size limit, got: {msg}"
         );
         assert!(
             msg.contains("CREFT_PREV"),

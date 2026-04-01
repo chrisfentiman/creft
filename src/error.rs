@@ -130,14 +130,14 @@ impl CreftError {
 /// Pattern-matches on the raw OS error code and `ErrorKind` to return a
 /// `CreftError` variant with a more helpful message than the raw OS error.
 ///
-/// - E2BIG (os error 7): large env var payloads — suggest `pipe: true`.
+/// - E2BIG (os error 7): argument list too large — output exceeds OS env limit.
 /// - `NotFound` during spawn: interpreter missing — suggest `creft doctor`.
 /// - All other cases: `CreftError::Io(e)` unchanged.
 pub fn enrich_io_error(e: std::io::Error, context: &str) -> CreftError {
     if e.raw_os_error() == Some(7) {
         return CreftError::Setup(format!(
             "Output too large for environment variable ({context}). \
-            Use 'pipe: true' in the skill frontmatter for large outputs."
+            The output exceeded the OS argument size limit."
         ));
     }
     if e.kind() == std::io::ErrorKind::NotFound {
@@ -304,8 +304,8 @@ mod tests {
         let e2big = std::io::Error::from_raw_os_error(7);
         let result = enrich_io_error(e2big, "CREFT_PREV");
         assert!(
-            matches!(result, CreftError::Setup(ref msg) if msg.contains("pipe: true")),
-            "Expected Setup variant with pipe: true hint"
+            matches!(result, CreftError::Setup(ref msg) if msg.contains("OS argument size limit")),
+            "Expected Setup variant with OS argument size limit message"
         );
     }
 
