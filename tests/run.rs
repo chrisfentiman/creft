@@ -1605,10 +1605,7 @@ fn test_normal_exit_1_still_fails() {
         .assert()
         .success();
 
-    creft_with(&dir)
-        .args(["exit-one-fails"])
-        .assert()
-        .failure();
+    creft_with(&dir).args(["exit-one-fails"]).assert().failure();
 }
 
 /// In pipe mode, a block that exits 99 causes the pipeline to return 0.
