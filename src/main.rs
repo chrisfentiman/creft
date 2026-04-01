@@ -14,6 +14,8 @@ mod style;
 mod validate;
 
 use std::io::{IsTerminal, Read};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use clap::Parser;
 use error::CreftError;
@@ -208,12 +210,15 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
     let cwd_str = cwd.to_string_lossy().to_string();
     let cmd = store::load_from(ctx, &name, &source)?;
 
-    let mut extra_env: Vec<(&str, &str)> = Vec::new();
+    let mut extra_env: Vec<(String, String)> = Vec::new();
     if store::is_local_source(&source) {
         // Local-scope skills receive their project root so they can reference
         // project-relative paths without hard-coding the directory.
-        extra_env.push(("CREFT_PROJECT_ROOT", &cwd_str));
+        extra_env.push(("CREFT_PROJECT_ROOT".to_string(), cwd_str));
     }
+
+    // Cancellation token — always false in Phase 1 (no signal handler yet).
+    let cancel = Arc::new(AtomicBool::new(false));
 
     if verbose || dry_run {
         // Bind args first so render_blocks can substitute them.
@@ -230,10 +235,12 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
         if dry_run && !verbose {
             // Pure dry-run path (existing behavior).
             if cmd.def.supports_feature("dry-run") {
-                extra_env.push(("CREFT_DRY_RUN", "1"));
-                return runner::run_with_env(&cmd, &remaining, &extra_env, &cwd);
+                extra_env.push(("CREFT_DRY_RUN".to_string(), "1".to_string()));
+                let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
+                return runner::run_with_ctx(&cmd, &remaining, &run_ctx);
             } else {
-                return runner::dry_run(&cmd, &remaining, &cwd);
+                let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
+                return runner::dry_run_ctx(&cmd, &remaining, &run_ctx);
             }
         }
 
@@ -243,9 +250,11 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
         }
 
         // --verbose only: render already done above, now execute normally.
-        runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
+        let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
+        runner::run_with_ctx(&cmd, &remaining, &run_ctx)
     } else {
-        runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
+        let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
+        runner::run_with_ctx(&cmd, &remaining, &run_ctx)
     }
 }
 

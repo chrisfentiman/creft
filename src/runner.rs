@@ -1,9 +1,59 @@
 use std::io::Write;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
+
+/// Execution context for a single skill invocation.
+///
+/// Carries working directory, environment variables, and a cancellation token
+/// for cooperative shutdown. Runtime flags (`verbose`, `dry_run`) will be
+/// added in Phase 3 when runner functions take over that dispatch logic.
+///
+/// Constructed once per skill invocation in `run_user_command`.
+/// Shared across threads via `Arc` (sponge threads, reaper threads).
+#[derive(Debug, Clone)]
+pub(crate) struct RunContext {
+    /// Cancellation token. Set to `true` by the SIGINT handler.
+    /// Threads poll this to know when to stop.
+    cancel: Arc<AtomicBool>,
+
+    /// Working directory for subprocess execution.
+    cwd: std::path::PathBuf,
+
+    /// Extra environment variables injected into every child process.
+    env: Vec<(String, String)>,
+}
+
+impl RunContext {
+    pub(crate) fn new(
+        cancel: Arc<AtomicBool>,
+        cwd: std::path::PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        Self { cancel, cwd, env }
+    }
+
+    /// Check whether cancellation has been requested.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Borrow the working directory.
+    pub(crate) fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// Borrow the environment variables as a slice of string pairs.
+    pub(crate) fn env_pairs(&self) -> Vec<(&str, &str)> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+}
 
 /// Exit code that signals early successful return — skip remaining blocks.
 ///
@@ -1637,6 +1687,32 @@ pub fn run_with_env(
     }
 }
 
+/// Run a full parsed command using a `RunContext`.
+///
+/// Extracts working directory and environment from the context and delegates
+/// to the internal execution logic. Returns immediately if cancellation has
+/// already been requested.
+pub(crate) fn run_with_ctx(
+    cmd: &ParsedCommand,
+    raw_args: &[String],
+    ctx: &RunContext,
+) -> Result<(), CreftError> {
+    if ctx.is_cancelled() {
+        return Ok(());
+    }
+    let env_pairs = ctx.env_pairs();
+    run_with_env(cmd, raw_args, &env_pairs, ctx.cwd())
+}
+
+/// Print the expanded code for each block without executing it, using a `RunContext`.
+pub(crate) fn dry_run_ctx(
+    cmd: &ParsedCommand,
+    raw_args: &[String],
+    ctx: &RunContext,
+) -> Result<(), CreftError> {
+    dry_run(cmd, raw_args, ctx.cwd())
+}
+
 /// Write rendered (substituted) blocks to stderr for diagnostic inspection.
 ///
 /// Called when `--verbose` is active. Each block is shown with `===` delimiters
@@ -1709,8 +1785,67 @@ pub fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
+
+    fn make_context() -> RunContext {
+        RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "qux".to_string()),
+            ],
+        )
+    }
+
+    #[test]
+    fn run_context_new_cwd_accessible() {
+        let ctx = make_context();
+        assert_eq!(ctx.cwd(), std::path::Path::new("/tmp"));
+    }
+
+    #[test]
+    fn run_context_is_cancelled_default_false() {
+        let ctx = make_context();
+        assert!(!ctx.is_cancelled());
+    }
+
+    #[test]
+    fn run_context_cancel_shared_across_clone() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let ctx = RunContext::new(
+            Arc::clone(&cancel),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+        );
+        let cloned = ctx.clone();
+
+        // Both instances share the same cancellation state.
+        assert!(!ctx.is_cancelled());
+        assert!(!cloned.is_cancelled());
+
+        // Setting the flag is visible in both the original and clone.
+        cancel.store(true, Ordering::Relaxed);
+        assert!(ctx.is_cancelled());
+        assert!(cloned.is_cancelled());
+    }
+
+    #[test]
+    fn run_context_env_pairs_returns_str_refs() {
+        let ctx = make_context();
+        let pairs = ctx.env_pairs();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("FOO", "bar"));
+        assert_eq!(pairs[1], ("BAZ", "qux"));
+    }
+
+    #[test]
+    fn run_context_clone_shares_cwd_and_env() {
+        let ctx = make_context();
+        let cloned = ctx.clone();
+        assert_eq!(ctx.cwd(), cloned.cwd());
+        assert_eq!(ctx.env_pairs(), cloned.env_pairs());
+    }
 
     #[test]
     fn test_substitute_basic() {
