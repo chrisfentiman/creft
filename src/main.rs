@@ -217,8 +217,12 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
         extra_env.push(("CREFT_PROJECT_ROOT".to_string(), cwd_str));
     }
 
-    // Cancellation token — always false in Phase 1 (no signal handler yet).
     let cancel = Arc::new(AtomicBool::new(false));
+    // Register the cancel flag with the SIGINT handler. Failure is intentionally
+    // ignored — worst case the cancel token is never set, and cancellation falls
+    // back to pipe closure (the existing behavior).
+    #[cfg(unix)]
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
 
     if verbose || dry_run {
         // Bind args first so render_blocks can substitute them.

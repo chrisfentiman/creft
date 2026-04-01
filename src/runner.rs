@@ -53,6 +53,11 @@ impl RunContext {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect()
     }
+
+    /// Clone the underlying cancellation token for passing to spawned threads.
+    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
 }
 
 /// Exit code that signals early successful return — skip remaining blocks.
@@ -843,6 +848,7 @@ fn sponge_thread(
     block_idx: usize,
     pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
+    cancel: Arc<AtomicBool>,
 ) {
     use std::io::{Read as _, Write as _};
 
@@ -958,6 +964,13 @@ fn sponge_thread(
                 match stdout.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        // During pipe execution PipeSignalGuard overwrites the signal-hook
+                        // handler, so this check fires primarily for single-block LLM runs
+                        // and between sequential blocks. It will become the primary
+                        // cancellation path when PipeSignalGuard is replaced in a future phase.
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
                         if pipe_writer.write_all(&buf[..n]).is_err() {
                             // Downstream closed its stdin early — stop relaying.
                             break;
@@ -1009,6 +1022,7 @@ fn run_pipe_chain(
     bound_refs: &[(&str, &str)],
     extra_env: &[(&str, &str)],
     cwd: &Path,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<(), CreftError> {
     let n = cmd.blocks.len();
 
@@ -1086,6 +1100,7 @@ fn run_pipe_chain(
             let owned_cwd = cwd.to_path_buf();
             let reaper_tx_clone = reaper_tx.clone();
             let prompt_template = block.code.clone();
+            let cancel_clone = Arc::clone(cancel);
 
             let handle = std::thread::Builder::new()
                 .name(format!("creft-sponge-{i}"))
@@ -1101,6 +1116,7 @@ fn run_pipe_chain(
                         i,
                         pgid_tx,
                         reaper_tx_clone,
+                        cancel_clone,
                     );
                 })
                 .expect("failed to spawn sponge thread");
@@ -1238,6 +1254,11 @@ fn run_pipe_chain(
     // Install SIGINT handler for the pipe chain duration (Unix only).
     // The guard sets up SIGINT forwarding to the child process group and
     // restores the original handler when dropped (RAII).
+    //
+    // Note: PipeSignalGuard uses libc::signal(), which overwrites signal-hook's
+    // sigaction-based handler. The cancel token is therefore NOT set by SIGINT
+    // during pipe execution. On drop, the guard restores signal-hook's handler
+    // so the token is set again for any SIGINT received after the pipe chain exits.
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
@@ -1562,7 +1583,14 @@ fn execute_llm_block(
     block_idx: usize,
     env_vars: &[(&str, &str)],
     cwd: &Path,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<String, CreftError> {
+    // Check cancellation before spawning the provider — avoids starting a
+    // potentially long-running LLM call when SIGINT already fired.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CreftError::EarlyExit);
+    }
+
     let config = block
         .llm_config
         .as_ref()
@@ -1618,22 +1646,13 @@ fn execute_llm_block(
     Ok(stdout)
 }
 
-/// Run a full parsed command with additional environment variables injected
-/// into every child process.
-///
-/// `extra_env` entries are prepended to the per-block env vars so they are
-/// visible to every block, including the first.
-///
-/// Multi-block skills always pipe stdout between blocks via `run_pipe_chain`.
-/// Single-block skills run directly via `execute_block`.
-///
-/// Use this when a runtime feature (e.g. dry-run delegation) needs to signal
-/// to the child process that a special mode is active.
-pub fn run_with_env(
+/// Core execution logic. Threads the cancellation token into LLM execution paths.
+fn run_inner(
     cmd: &ParsedCommand,
     raw_args: &[String],
     extra_env: &[(&str, &str)],
     cwd: &Path,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<(), CreftError> {
     if cmd.blocks.is_empty() {
         return Err(CreftError::NoCodeBlocks);
@@ -1651,7 +1670,7 @@ pub fn run_with_env(
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
-            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
+            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd, cancel);
         }
         #[cfg(not(unix))]
         {
@@ -1663,7 +1682,7 @@ pub fn run_with_env(
                         .into(),
                 ));
             }
-            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
+            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd, cancel);
         }
     }
 
@@ -1673,7 +1692,7 @@ pub fn run_with_env(
     let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
 
     if block.lang == "llm" {
-        match execute_llm_block(block, &expanded, 0, &env_vars, cwd) {
+        match execute_llm_block(block, &expanded, 0, &env_vars, cwd, cancel) {
             Ok(_) => Ok(()),
             Err(CreftError::EarlyExit) => Ok(()),
             Err(e) => Err(e),
@@ -1701,7 +1720,7 @@ pub(crate) fn run_with_ctx(
         return Ok(());
     }
     let env_pairs = ctx.env_pairs();
-    run_with_env(cmd, raw_args, &env_pairs, ctx.cwd())
+    run_inner(cmd, raw_args, &env_pairs, ctx.cwd(), &ctx.cancel_token())
 }
 
 /// Print the expanded code for each block without executing it, using a `RunContext`.
@@ -1798,6 +1817,22 @@ mod tests {
         )
     }
 
+    /// Test helper: run a command with the given env and cwd, using a fresh (never-cancelled) RunContext.
+    fn run_for_test(
+        cmd: &ParsedCommand,
+        raw_args: &[&str],
+        extra_env: &[(&str, &str)],
+        cwd: &std::path::Path,
+    ) -> Result<(), CreftError> {
+        let args: Vec<String> = raw_args.iter().map(|s| s.to_string()).collect();
+        let env: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ctx = RunContext::new(Arc::new(AtomicBool::new(false)), cwd.to_path_buf(), env);
+        run_with_ctx(cmd, &args, &ctx)
+    }
+
     #[test]
     fn run_context_new_cwd_accessible() {
         let ctx = make_context();
@@ -1845,6 +1880,32 @@ mod tests {
         let cloned = ctx.clone();
         assert_eq!(ctx.cwd(), cloned.cwd());
         assert_eq!(ctx.env_pairs(), cloned.env_pairs());
+    }
+
+    #[test]
+    fn run_context_is_cancelled_true_after_flag_set() {
+        let ctx = make_context();
+        assert!(!ctx.is_cancelled());
+        ctx.cancel_token().store(true, Ordering::Relaxed);
+        assert!(ctx.is_cancelled());
+    }
+
+    #[test]
+    fn run_context_cancel_token_shared_with_context() {
+        // cancel_token() returns a clone of the same Arc — setting it externally
+        // is visible via is_cancelled().
+        let cancel = Arc::new(AtomicBool::new(false));
+        let ctx = RunContext::new(
+            Arc::clone(&cancel),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+        );
+        let token = ctx.cancel_token();
+        assert!(!ctx.is_cancelled());
+        token.store(true, Ordering::Relaxed);
+        assert!(ctx.is_cancelled());
+        // And the original Arc reflects the change too.
+        assert!(cancel.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -2627,7 +2688,7 @@ mod tests {
         let block1 = "cat";
         let cmd = make_pipe_cmd(block0, block1);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "large pipe should not deadlock: {:?}",
@@ -2645,7 +2706,7 @@ mod tests {
         let block1 = "exit 0";
         let cmd = make_pipe_cmd(block0, block1);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "BrokenPipe from early-exit child must not surface as error: {:?}",
@@ -2661,7 +2722,7 @@ mod tests {
         let block1 = "wc -l"; // reads stdin, prints line count
         let cmd = make_pipe_cmd(block0, block1);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "empty stdin pipe should succeed: {:?}",
@@ -2703,7 +2764,7 @@ mod tests {
             ],
         };
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "multi-block command must pipe by default: {:?}",
@@ -2748,7 +2809,7 @@ mod tests {
             r#"read line; echo "got: $line""#,
         ]);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "three-block pipe chain should succeed: {:?}",
@@ -2779,7 +2840,7 @@ mod tests {
             }],
         };
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             result.is_ok(),
             "single-block skill must succeed: {:?}",
@@ -2795,7 +2856,7 @@ mod tests {
         // When block 0 AND the last block both fail, the error is from block 0.
         let cmd = make_pipe_cmd_multi(&["exit 1", "wc -l"]);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         // Block 1 (wc -l) succeeds because it just sees EOF on stdin.
         // Last block exit determines the result; wc -l exits 0, so overall Ok.
         assert!(
@@ -2811,7 +2872,7 @@ mod tests {
         // determines the result — should return ExecutionFailed.
         let cmd = make_pipe_cmd_multi(&["echo hello", "exit 1"]);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             matches!(
                 result,
@@ -2850,7 +2911,7 @@ mod tests {
             }],
         };
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         assert!(
             matches!(
                 result,
@@ -2906,7 +2967,7 @@ mod tests {
         // closes, block 1 gets EOF and also exits 1 via explicit `exit 1`.
         let cmd = make_pipe_cmd_multi(&["exit 1", "exit 1"]);
         let cwd = std::path::Path::new("/tmp");
-        let result = run_with_env(&cmd, &[], &[], cwd);
+        let result = run_for_test(&cmd, &[], &[], cwd);
         // Block 0 fails with exit code (not a signal), so it's the root cause.
         assert!(
             matches!(
