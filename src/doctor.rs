@@ -1797,6 +1797,8 @@ mod tests {
             lang: "python".into(),
             code: "import requests".into(),
             deps: vec!["requests".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         // Whether uv is found or not, should have one result
@@ -1811,6 +1813,8 @@ mod tests {
             lang: "node".into(),
             code: "const axios = require('axios')".into(),
             deps: vec!["axios".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         assert_eq!(results.len(), 1);
@@ -1824,6 +1828,8 @@ mod tests {
             lang: "bash".into(),
             code: "curl url | jq .".into(),
             deps: vec!["curl".into(), "creft_no_such_dep_xyz9999".into()],
+            llm_config: None,
+            llm_parse_error: None,
         };
         let results = check_block_deps(&block, 1);
         assert_eq!(results.len(), 2);

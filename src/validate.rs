@@ -855,6 +855,8 @@ mod tests {
             lang: lang.into(),
             code: code.into(),
             deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
         }
     }
 
@@ -1740,6 +1742,8 @@ mod tests {
             lang: lang.into(),
             code: code.into(),
             deps: deps.into_iter().map(String::from).collect(),
+            llm_config: None,
+            llm_parse_error: None,
         }
     }
 

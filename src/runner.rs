@@ -1699,11 +1699,15 @@ mod tests {
                     lang: "bash".into(),
                     code: block0_code.into(),
                     deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
                 },
                 CodeBlock {
                     lang: "bash".into(),
                     code: block1_code.into(),
                     deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
                 },
             ],
         }
@@ -1782,11 +1786,15 @@ mod tests {
                     lang: "bash".into(),
                     code: "echo hello".into(),
                     deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
                 },
                 CodeBlock {
                     lang: "bash".into(),
                     code: "echo world".into(),
                     deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
                 },
             ],
         };
@@ -1819,6 +1827,8 @@ mod tests {
                     lang: "bash".into(),
                     code: code.to_string(),
                     deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
                 })
                 .collect(),
         }
@@ -1863,6 +1873,8 @@ mod tests {
                 lang: "bash".into(),
                 code: "echo single".into(),
                 deps: vec![],
+                llm_config: None,
+                llm_parse_error: None,
             }],
         };
         let cwd = std::path::Path::new("/tmp");
@@ -1934,6 +1946,8 @@ mod tests {
                 // Self-terminate with SIGTERM. bash propagates the signal exit.
                 code: "kill -TERM $$".into(),
                 deps: vec![],
+                llm_config: None,
+                llm_parse_error: None,
             }],
         };
         let cwd = std::path::Path::new("/tmp");

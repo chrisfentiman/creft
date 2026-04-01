@@ -323,12 +323,62 @@ fn default_true() -> bool {
     true
 }
 
+fn default_provider() -> String {
+    "claude".to_string()
+}
+
+/// Configuration for an `llm` code block, parsed from the YAML header.
+///
+/// All fields are optional strings for forward-compatibility with unknown
+/// providers and future provider features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// CLI tool to invoke. Defaults to `"claude"` when absent.
+    /// Known providers have specific command patterns; unknown providers
+    /// are invoked as literal command names.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+
+    /// Model name passed to the provider CLI. Omitted from the command
+    /// when empty (provider uses its own default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+
+    /// Raw parameter string appended to the command. Split on whitespace
+    /// before appending as individual arguments. This is the escape hatch
+    /// for any provider flag creft doesn't model explicitly.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub params: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+            model: String::new(),
+            params: String::new(),
+        }
+    }
+}
+
 /// A fenced code block extracted from a skill's markdown body.
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     pub lang: String,
     pub code: String,
     pub deps: Vec<String>,
+    /// LLM configuration, present only when `lang == "llm"`.
+    /// Parsed from the YAML header before `---` in the block content.
+    // consumed by runner.rs (Phase 2) and validate.rs (Phase 3)
+    #[allow(dead_code)]
+    pub llm_config: Option<LlmConfig>,
+    /// When `lang == "llm"` and the YAML header failed to parse,
+    /// this holds the parse error message. Used by validation to
+    /// emit a diagnostic. `None` for all non-llm blocks and for
+    /// llm blocks that parsed successfully.
+    // consumed by validate.rs (Phase 3)
+    #[allow(dead_code)]
+    pub llm_parse_error: Option<String>,
 }
 
 /// A fully parsed skill ready for execution.
