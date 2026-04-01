@@ -705,12 +705,23 @@ fn run_pipe_chain(
         let status = child.wait().map_err(CreftError::Io)?;
 
         if exit_code_of(&status) == Some(EARLY_EXIT) {
-            // Kill all children that haven't been waited on yet to avoid zombies.
-            // Errors are ignored: the process may have already exited on its own
-            // (e.g. via EOF/SIGPIPE) by the time we reach it.
+            // Kill all processes in the pipe chain's process group so that
+            // grandchildren (e.g. `sleep 5` spawned by bash) are also killed.
+            // A per-process SIGKILL would leave grandchildren running as orphans,
+            // causing creft to block until they exit naturally.
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                // pgid is valid (obtained from block 0's PID after spawn).
+                // Negative pgid means "all processes in process group pgid".
+                unsafe {
+                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            // Reap all remaining direct children to avoid zombies.
+            // Errors are ignored: processes may have exited on their own.
             for remaining in children.iter_mut().skip(i + 1) {
                 if let Some((mut c, _, _)) = remaining.take() {
-                    let _ = c.kill();
                     let _ = c.wait();
                 }
             }

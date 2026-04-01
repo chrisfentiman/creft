@@ -502,6 +502,67 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
     );
 }
 
+/// When a **middle** block in a 3-block pipe chain exits 99, all subsequent
+/// blocks must be killed immediately. Block 1 completes normally; block 2
+/// reads stdin, prints something, then exits 99; block 3 (`sleep 5`) must be
+/// killed before it produces output. creft must return 0 and the run must
+/// finish well under 2 seconds.
+#[test]
+fn test_pipe_exit_99_middle_block() {
+    let dir = creft_env();
+
+    let markdown = concat!(
+        "---\n",
+        "name: pipe-mid-exit99\n",
+        "description: middle block exit 99 test\n",
+        "pipe: true\n",
+        "---\n",
+        "\n",
+        "```bash\n",
+        "echo \"upstream data\"\n",
+        "```\n",
+        "\n",
+        "```bash\n",
+        "cat\n",
+        "echo processed\n",
+        "exit 99\n",
+        "```\n",
+        "\n",
+        "```bash\n",
+        "sleep 5\n",
+        "echo 'should not appear'\n",
+        "```\n",
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(markdown)
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    let output = creft_with(&dir)
+        .args(["pipe-mid-exit99"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let elapsed = start.elapsed();
+
+    let stdout_str = String::from_utf8_lossy(&output);
+    assert!(
+        !stdout_str.contains("should not appear"),
+        "block 3 output must not appear after middle block exits 99; got: {:?}",
+        stdout_str
+    );
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must terminate quickly after middle block exits 99 (took {:?})",
+        elapsed
+    );
+}
+
 // ── parent/child coexistence tests ────────────────────────────────────────────
 
 /// When both `test` (with a positional arg) and `test mutants` exist,
