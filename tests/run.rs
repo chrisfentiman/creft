@@ -356,10 +356,10 @@ fn test_pipe_mode_no_creft_prev_env() {
         .stdout(predicate::str::contains("EMPTY"));
 }
 
-/// In pipe mode, using `{{prev}}` in a block template must fail with a MissingArg
-/// error because `prev` is not bound (the output is on stdin, not in a template arg).
+/// In pipe mode, `{{prev}}` is not bound as a template arg (output is on stdin).
+/// Unmatched placeholders pass through as literal text.
 #[test]
-fn test_pipe_mode_prev_placeholder_errors() {
+fn test_pipe_mode_prev_placeholder_passes_through() {
     let dir = creft_env();
 
     let markdown = concat!(
@@ -374,13 +374,13 @@ fn test_pipe_mode_prev_placeholder_errors() {
         "```\n",
         "\n",
         "```bash\n",
-        // {{prev}} is not bound in pipe mode — substitute() should return MissingArg.
-        "echo {{prev}}\n",
+        // {{prev}} is not bound in pipe mode — passes through as literal text.
+        "echo '{{prev}}'\n",
         "```\n",
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -388,9 +388,8 @@ fn test_pipe_mode_prev_placeholder_errors() {
     creft_with(&dir)
         .args(["pipe-prev-placeholder"])
         .assert()
-        .failure()
-        // The MissingArg error from substitute() names the missing placeholder.
-        .stderr(predicate::str::contains("prev"));
+        .success()
+        .stdout(predicate::str::contains("{{prev}}"));
 }
 
 // ── subcommand-aware help tests ────────────────────────────────────────────────

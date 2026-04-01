@@ -47,8 +47,6 @@ pub fn substitute(template: &str, args: &[(&str, &str)], lang: &str) -> Result<S
     let re = &*PLACEHOLDER_RE;
     let escape = should_shell_escape(lang);
 
-    let mut missing: Vec<String> = Vec::new();
-
     let result = re.replace_all(template, |caps: &regex::Captures| {
         let name = &caps[1];
         let default_val = caps.get(2).map(|m| m.as_str());
@@ -63,14 +61,10 @@ pub fn substitute(template: &str, args: &[(&str, &str)], lang: &str) -> Result<S
             // Author-controlled default — no escaping regardless of language
             d.to_string()
         } else {
-            missing.push(name.to_string());
-            format!("{{{{{}}}}}", name)
+            // No matching arg/flag — leave as literal text.
+            caps[0].to_string()
         }
     });
-
-    if !missing.is_empty() {
-        return Err(CreftError::MissingArg(missing.join(", ")));
-    }
 
     Ok(result.to_string())
 }
@@ -1196,9 +1190,9 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_missing() {
-        let result = substitute("Hello, {{name}}!", &[], "bash");
-        assert!(result.is_err());
+    fn test_substitute_unmatched_passes_through() {
+        let result = substitute("Hello, {{name}}!", &[], "bash").unwrap();
+        assert_eq!(result, "Hello, {{name}}!");
     }
 
     #[test]
