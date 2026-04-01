@@ -240,8 +240,10 @@ fn test_pipe_intermediate_output_suppressed() {
     );
 }
 
-/// A two-block non-pipe skill must print BOTH blocks' stdout to the terminal
-/// (regression guard — pipe suppression must not affect non-pipe skills).
+/// A two-block skill must surface BOTH blocks' output on the final stdout.
+/// With pipe-by-default, block 1's stdout feeds block 2's stdin. Block 2 reads
+/// stdin via `cat` (passing block 1's output through) then appends its own line.
+/// Both markers must appear in the combined output.
 #[test]
 fn test_non_pipe_all_blocks_print() {
     let dir = creft_env();
@@ -257,12 +259,13 @@ fn test_non_pipe_all_blocks_print() {
         "```\n",
         "\n",
         "```bash\n",
+        "cat\n",
         "echo block-two-output\n",
         "```\n",
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
