@@ -473,8 +473,6 @@ fn make_execution_error(block: usize, lang: &str, status: &std::process::ExitSta
     }
 }
 
-// ── Unix-only signal management for pipe chains ──────────────────────────────
-
 /// Atomic storage for the child process group ID, used by the SIGINT
 /// forwarding handler. Zero means "no active pipe chain".
 #[cfg(unix)]
@@ -484,9 +482,9 @@ static PIPE_CHILD_PGID: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 ///
 /// # Safety
 ///
-/// This function is called by the OS as a signal handler. It must be
-/// async-signal-safe. The only operations performed are:
-/// - `AtomicU32::load` (async-signal-safe: no locks, no allocation)
+/// Called by the OS as a signal handler; must be async-signal-safe.
+/// Only async-signal-safe operations are performed:
+/// - `AtomicU32::load` (no locks, no allocation)
 /// - `libc::kill` (listed as async-signal-safe in POSIX)
 #[cfg(unix)]
 extern "C" fn sigint_forward_handler(_sig: libc::c_int) {
@@ -543,7 +541,6 @@ impl PipeSignalGuard {
 #[cfg(unix)]
 impl Drop for PipeSignalGuard {
     fn drop(&mut self) {
-        // Restore the original SIGINT handler.
         // SAFETY: libc::signal with the previously-saved handler value is
         // the standard way to restore signal disposition.
         unsafe {
@@ -721,8 +718,8 @@ fn wait_pipe_children_unix(
 
 /// Wait for all children in a non-Unix pipe chain using sequential wait calls.
 ///
-/// This is the v1 fallback for platforms without process groups or kill(-pgid).
-/// It has the same sequential-wait race window as the original implementation.
+/// Fallback for platforms without process groups or kill(-pgid). Has the same
+/// sequential-wait race window as the original implementation.
 #[cfg(not(unix))]
 fn wait_pipe_children_fallback(
     children: Vec<Option<(std::process::Child, usize, String)>>,
@@ -769,9 +766,9 @@ fn wait_pipe_children_fallback(
 /// provider's output to `pipe_writer`. Sends the provider's exit status through
 /// `reaper_tx` for the main thread to collect.
 ///
-/// This function runs on a dedicated thread (`creft-sponge-N`) and owns the
-/// entire LLM provider lifecycle. From the pipe chain's perspective, the sponge
-/// is just another stage that produces output on a pipe fd.
+/// Runs on a dedicated thread (`creft-sponge-N`), owning the entire LLM
+/// provider lifecycle. From the pipe chain's perspective, the sponge is just
+/// another stage that produces output on a pipe fd.
 ///
 /// When `upstream` is `None` (block 0), the sponge reads from the parent's
 /// stdin. When `is_pgid_creator` is true (block 0), the provider is spawned with
@@ -796,7 +793,6 @@ fn sponge_thread(
     use std::io::{Read as _, Write as _};
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Step 1: Buffer all upstream output.
         let buffered = match upstream {
             Some(mut reader) => {
                 let mut buf = Vec::new();
@@ -813,7 +809,7 @@ fn sponge_thread(
         };
         let trimmed = buffered.trim_end().to_string();
 
-        // Step 2: Template substitution with buffered content as {{prev}}.
+        // Template substitution with buffered content as {{prev}}.
         let ref_pairs: Vec<(&str, &str)> = bound_refs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -836,7 +832,6 @@ fn sponge_thread(
             }
         };
 
-        // Step 3: Spawn LLM provider.
         let provider = if config.provider.is_empty() {
             "claude"
         } else {
@@ -913,13 +908,11 @@ fn sponge_thread(
             let _ = tx.send(Ok(child.id()));
         }
 
-        // Step 4: Write substituted prompt to provider stdin, then close to signal EOF.
         if let Some(mut stdin) = child.stdin.take() {
             // Ignore BrokenPipe — provider's exit status is the authoritative error signal.
             let _ = stdin.write_all(prompt.as_bytes());
         }
 
-        // Step 5: Relay provider stdout to the pipe writer.
         let mut pipe_writer = pipe_writer;
         if let Some(mut stdout) = child.stdout.take() {
             let mut buf = [0u8; 8192];
@@ -940,7 +933,6 @@ fn sponge_thread(
         // Drop pipe_writer to signal EOF to the downstream block.
         drop(pipe_writer);
 
-        // Step 6: Wait for provider exit and report through reaper channel.
         let status = child.wait();
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
@@ -1024,7 +1016,6 @@ fn run_pipe_chain(
 
         #[cfg(unix)]
         if block.lang == "llm" {
-            // === Sponge stage ===
             let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(CreftError::Io)?;
 
             let upstream = prev_stdout.take();

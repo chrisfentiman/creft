@@ -76,8 +76,8 @@ pub fn name_to_path_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<Pat
 /// - `/` or `\` (path separators)
 /// - Empty strings
 ///
-/// This is applied to tokens from CLI args before they are used in
-/// path construction for package skill resolution.
+/// Applied to tokens from CLI args before they are used in path
+/// construction for package skill resolution.
 pub(crate) fn validate_path_token(token: &str) -> Result<(), CreftError> {
     if token.is_empty() {
         return Err(CreftError::InvalidName("path token cannot be empty".into()));
@@ -532,8 +532,8 @@ pub fn list_all_with_source(
 ///
 /// `"test mutants"` → `<scope_root>/commands/test mutants.md`
 ///
-/// This is the path an LLM or human might create when they use spaces
-/// in the filename instead of the directory structure.
+/// The path an LLM or human might create when using spaces in the
+/// filename instead of the directory structure.
 fn flat_file_path_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<PathBuf, CreftError> {
     let dir = ctx.commands_dir_for(scope)?;
     Ok(dir.join(format!("{name}.md")))
