@@ -1753,3 +1753,164 @@ fn test_early_exit_99_in_pipe_mode() {
         .assert()
         .success();
 }
+
+/// Verify that output from a fast downstream block is suppressed when an
+/// upstream block exits 99. This is the exact reproduction case from the v2
+/// spec: block 0 exits immediately with 99, block 1 (fast bash echo) must NOT
+/// produce output on creft's stdout.
+///
+/// This test is deterministic because the buffered relay never writes to the
+/// terminal. Output is only flushed after all reapers have reported and
+/// early_exit is confirmed false. Since block 0 exits 99, early_exit is true
+/// and the buffer is dropped without writing.
+#[test]
+fn test_pipe_exit_99_fast_downstream_no_output() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-fast-exit99\n",
+            "description: fast downstream must not leak output on exit 99\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "echo \"LEAKED\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    let output = creft_with(&dir)
+        .args(["pipe-fast-exit99"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let elapsed = start.elapsed();
+
+    let stdout_str = String::from_utf8_lossy(&output);
+    assert!(
+        !stdout_str.contains("LEAKED"),
+        "fast downstream output must not appear after exit 99; got: {:?}",
+        stdout_str
+    );
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must complete quickly after exit 99 (took {:?})",
+        elapsed
+    );
+}
+
+/// Verify that downstream blocks with stdin-dependent side effects are killed
+/// before those side effects occur when an upstream block exits 99.
+///
+/// Block 1 reads from stdin before running any side effect. With exit 99 from
+/// block 0, the pipe closes (EOF), block 1 gets SIGKILL from killpg, and the
+/// sentinel file is never created.
+#[test]
+fn test_pipe_exit_99_no_side_effects() {
+    let dir = creft_env();
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let sentinel_path = sentinel_dir.path().join("sentinel");
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-exit99-sentinel\n",
+            "description: exit 99 kills downstream before side effects\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "read line; touch \"$CREFT_SENTINEL\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["pipe-exit99-sentinel"])
+        .env("CREFT_SENTINEL", sentinel_path.display().to_string())
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+
+    assert!(
+        !sentinel_path.exists(),
+        "sentinel file must not be created when exit 99 kills downstream block"
+    );
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must complete quickly after exit 99 (took {:?})",
+        elapsed
+    );
+}
+
+/// Verify that when a middle block in a 3-block pipe chain exits 99, the last
+/// block's output is suppressed. Block 2 sleeps before echoing to ensure the
+/// buffered relay + discard path is exercised rather than a timing coincidence.
+#[test]
+fn test_pipe_exit_99_middle_block_output_suppressed() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-mid-exit99-suppress\n",
+            "description: middle exit 99 suppresses last block output\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"data\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat; exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 1; echo \"LEAKED\"; cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    let output = creft_with(&dir)
+        .args(["pipe-mid-exit99-suppress"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let elapsed = start.elapsed();
+
+    let stdout_str = String::from_utf8_lossy(&output);
+    assert!(
+        !stdout_str.contains("LEAKED"),
+        "last block output must not appear after middle block exits 99; got: {:?}",
+        stdout_str
+    );
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must terminate quickly after middle block exits 99 (took {:?})",
+        elapsed
+    );
+}

@@ -557,12 +557,186 @@ impl Drop for PipeSignalGuard {
     }
 }
 
+/// Result from a single reaper thread (Unix pipe mode).
+#[cfg(unix)]
+struct ReaperResult {
+    block_idx: usize,
+    lang: String,
+    status: Result<std::process::ExitStatus, std::io::Error>,
+}
+
+/// Result from a completed pipe block.
+struct PipeResult {
+    block: usize,
+    lang: String,
+    status: std::process::ExitStatus,
+}
+
+/// Wait for all children in a Unix pipe chain using concurrent reaper threads
+/// and a buffered stdout relay.
+///
+/// Each child is moved into its own reaper thread that calls `child.wait()` and
+/// sends the result through an mpsc channel. Results arrive in exit order, not
+/// spawn order. The last block's stdout is relayed into a buffer by a dedicated
+/// relay thread; output is only flushed to the terminal after all reapers have
+/// reported and no exit 99 was detected.
+///
+/// This design guarantees zero leakage: if any block exits 99, the relay buffer
+/// is discarded without ever writing to the terminal.
+///
+/// Note: side effects that occur unconditionally at block startup (before stdin
+/// is read) cannot be suppressed by exit 99, because all blocks are spawned
+/// concurrently before any are waited on. This is inherent to pipe architecture
+/// and applies equally to shell pipes (`false | touch /tmp/foo` creates the
+/// file despite `false` exiting 1).
+#[cfg(unix)]
+fn wait_pipe_children_unix(
+    children: Vec<(std::process::Child, usize, String)>,
+    last_stdout: std::process::ChildStdout,
+    child_pgid: Option<u32>,
+) -> Result<(Vec<PipeResult>, bool), CreftError> {
+    use std::io::Read as _;
+    use std::sync::mpsc;
+
+    let n = children.len();
+    let (tx, rx) = mpsc::channel::<ReaperResult>();
+
+    // Spawn relay thread: reads the last block's piped stdout into a buffer.
+    // Never writes to the terminal — the main thread decides flush vs. discard.
+    let relay_handle = std::thread::Builder::new()
+        .name("creft-relay".to_owned())
+        .spawn(move || {
+            let mut reader = last_stdout;
+            let mut buf = [0u8; 8192];
+            let mut output: Vec<u8> = Vec::new();
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => output.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            output
+        })
+        .expect("failed to spawn relay thread");
+
+    // Spawn one reaper thread per child. Each thread owns the Child and calls wait().
+    for (i, (child, block_idx, lang)) in children.into_iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name(format!("creft-reaper-{i}"))
+            .spawn(move || {
+                // child.wait() takes &mut self, so we need mut child.
+                let mut child = child;
+                let status = child.wait();
+                // Ignore send error: main thread dropped rx only if it panicked.
+                let _ = tx.send(ReaperResult {
+                    block_idx,
+                    lang,
+                    status,
+                });
+            })
+            .expect("failed to spawn reaper thread");
+    }
+    // Drop the original tx so rx.recv() returns Err when all reaper senders drop.
+    drop(tx);
+
+    let mut results: Vec<PipeResult> = Vec::with_capacity(n);
+    let mut early_exit = false;
+
+    while let Ok(reaper_result) = rx.recv() {
+        let status = reaper_result.status.map_err(CreftError::Io)?;
+
+        if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
+            early_exit = true;
+            // Kill all processes in the pipe group so grandchildren are also killed.
+            if let Some(pgid) = child_pgid {
+                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                // pgid is valid (obtained from block 0's PID after spawn).
+                // Negative pgid means "all processes in process group pgid".
+                unsafe {
+                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+        }
+
+        results.push(PipeResult {
+            block: reaper_result.block_idx,
+            lang: reaper_result.lang,
+            status,
+        });
+    }
+
+    // All reapers have exited. Join the relay thread to retrieve the buffered output.
+    // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
+    let relay_buffer = relay_handle.join().unwrap_or_default();
+
+    if !early_exit {
+        use std::io::Write as _;
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        // Ignore write errors: creft's own stdout may be a broken pipe.
+        let _ = lock.write_all(&relay_buffer);
+    }
+    // If early_exit is true, relay_buffer drops here without writing. Zero leakage.
+
+    // Sort by spawn order before post-loop checks; channel delivers in exit order.
+    results.sort_by_key(|r| r.block);
+
+    Ok((results, early_exit))
+}
+
+/// Wait for all children in a non-Unix pipe chain using sequential wait calls.
+///
+/// This is the v1 fallback for platforms without process groups or kill(-pgid).
+/// It has the same sequential-wait race window as the original implementation.
+#[cfg(not(unix))]
+fn wait_pipe_children_fallback(
+    children: Vec<Option<(std::process::Child, usize, String)>>,
+) -> Result<(Vec<PipeResult>, bool), CreftError> {
+    let mut children = children;
+    let n = children.len();
+    let mut results: Vec<PipeResult> = Vec::with_capacity(n);
+    let mut early_exit = false;
+
+    for i in 0..children.len() {
+        let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
+        let status = child.wait().map_err(CreftError::Io)?;
+
+        if exit_code_of(&status) == Some(EARLY_EXIT) {
+            for remaining in children.iter_mut().skip(i + 1) {
+                if let Some((mut c, _, _)) = remaining.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+            early_exit = true;
+            results.push(PipeResult {
+                block: block_idx,
+                lang,
+                status,
+            });
+            break;
+        }
+
+        results.push(PipeResult {
+            block: block_idx,
+            lang,
+            status,
+        });
+    }
+
+    Ok((results, early_exit))
+}
+
 /// Execute all blocks in a pipe:true command concurrently with OS-level pipe
 /// connections between stdout/stdin.
 ///
 /// All blocks are spawned before any are waited on. Block N's stdout is
-/// connected to block N+1's stdin via Stdio::from(ChildStdout). The last
-/// block's stdout is inherited (prints to terminal).
+/// connected to block N+1's stdin via Stdio::from(ChildStdout). On Unix, the
+/// last block's stdout is buffered by a relay thread; output is flushed to the
+/// terminal only after confirming no block exited 99.
 ///
 /// Returns Ok(()) if the last block exits successfully. Earlier blocks dying
 /// from SIGPIPE when the downstream consumer exits early is normal pipeline
@@ -593,6 +767,9 @@ fn run_pipe_chain(
     // PID of the first child, used as the process group ID for all pipe children.
     #[cfg(unix)]
     let mut child_pgid: Option<u32> = None;
+    // Last block's stdout handle (Unix only) — piped for buffered relay.
+    #[cfg(unix)]
+    let mut last_child_stdout: Option<std::process::ChildStdout> = None;
 
     for (i, block) in cmd.blocks.iter().enumerate() {
         let script_path = temp_files[i].path();
@@ -605,11 +782,16 @@ fn run_pipe_chain(
         };
 
         let is_last = i == n - 1;
+
+        // On Unix, all blocks use Stdio::piped(): intermediate blocks feed the
+        // next block's stdin, the last block's stdout goes to the relay thread.
+        // On non-Unix, last block inherits stdout (v1 behavior).
+        #[cfg(unix)]
+        let stdout_cfg = std::process::Stdio::piped();
+        #[cfg(not(unix))]
         let stdout_cfg = if is_last {
-            // Last block: print directly to terminal.
             std::process::Stdio::inherit()
         } else {
-            // Intermediate blocks: pipe stdout to next block.
             std::process::Stdio::piped()
         };
 
@@ -656,6 +838,9 @@ fn run_pipe_chain(
             child_pgid = Some(child.id());
         }
 
+        // For intermediate blocks: pipe stdout feeds the next block's stdin.
+        // For the last block on Unix: take() its stdout for the relay thread.
+        // For the last block on non-Unix: stdout is already inherited.
         if !is_last {
             prev_stdout = child.stdout.take().or_else(|| {
                 // Should never happen for Stdio::piped(), but handle defensively.
@@ -675,6 +860,13 @@ fn run_pipe_chain(
                     i, block.lang
                 )));
             }
+        } else {
+            // Last block: extract its stdout for the relay thread (Unix only).
+            // Must be done before the child is moved into the reaper thread.
+            #[cfg(unix)]
+            {
+                last_child_stdout = child.stdout.take();
+            }
         }
 
         children.push((child, i, block.lang.clone()));
@@ -686,60 +878,21 @@ fn run_pipe_chain(
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
-    struct PipeResult {
-        block: usize,
-        lang: String,
-        status: std::process::ExitStatus,
-    }
+    // Dispatch to platform-specific wait implementation.
+    #[cfg(unix)]
+    let (results, early_exit) = {
+        let last_stdout = last_child_stdout.ok_or_else(|| {
+            CreftError::Setup("internal: failed to capture last block stdout".to_owned())
+        })?;
+        wait_pipe_children_unix(children, last_stdout, child_pgid)?
+    };
 
-    // Wrap each child in Option so we can take() ownership when killing remaining
-    // processes after an early exit 99 is detected mid-wait.
-    let mut children: Vec<Option<(std::process::Child, usize, String)>> =
-        children.into_iter().map(Some).collect();
-
-    let mut results: Vec<PipeResult> = Vec::with_capacity(n);
-    let mut early_exit = false;
-
-    for i in 0..children.len() {
-        let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
-        let status = child.wait().map_err(CreftError::Io)?;
-
-        if exit_code_of(&status) == Some(EARLY_EXIT) {
-            // Kill all processes in the pipe chain's process group so that
-            // grandchildren (e.g. `sleep 5` spawned by bash) are also killed.
-            // A per-process SIGKILL would leave grandchildren running as orphans,
-            // causing creft to block until they exit naturally.
-            #[cfg(unix)]
-            if let Some(pgid) = child_pgid {
-                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                // pgid is valid (obtained from block 0's PID after spawn).
-                // Negative pgid means "all processes in process group pgid".
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                }
-            }
-            // Reap all remaining direct children to avoid zombies.
-            // Errors are ignored: processes may have exited on their own.
-            for remaining in children.iter_mut().skip(i + 1) {
-                if let Some((mut c, _, _)) = remaining.take() {
-                    let _ = c.wait();
-                }
-            }
-            early_exit = true;
-            results.push(PipeResult {
-                block: block_idx,
-                lang,
-                status,
-            });
-            break;
-        }
-
-        results.push(PipeResult {
-            block: block_idx,
-            lang,
-            status,
-        });
-    }
+    #[cfg(not(unix))]
+    let (results, early_exit) = {
+        let children_opt: Vec<Option<(std::process::Child, usize, String)>> =
+            children.into_iter().map(Some).collect();
+        wait_pipe_children_fallback(children_opt)?
+    };
 
     if early_exit {
         return Ok(());
