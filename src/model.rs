@@ -369,15 +369,13 @@ pub struct CodeBlock {
     pub deps: Vec<String>,
     /// LLM configuration, present only when `lang == "llm"`.
     /// Parsed from the YAML header before `---` in the block content.
-    // consumed by runner.rs (Phase 2) and validate.rs (Phase 3)
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub llm_config: Option<LlmConfig>,
     /// When `lang == "llm"` and the YAML header failed to parse,
     /// this holds the parse error message. Used by validation to
     /// emit a diagnostic. `None` for all non-llm blocks and for
     /// llm blocks that parsed successfully.
-    // consumed by validate.rs (Phase 3)
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub llm_parse_error: Option<String>,
 }
 
@@ -1185,5 +1183,38 @@ name: MY_TOKEN
             assert!(plain.contains(needle), "plain output missing {needle}");
             assert!(ansi_out.contains(needle), "ansi output missing {needle}");
         }
+    }
+
+    // ── LlmConfig deserialization ─────────────────────────────────────────────
+
+    #[test]
+    fn test_llm_config_deserialize_full() {
+        let yaml = r#"
+provider: openai
+model: gpt-4o
+params: "--max-tokens 1000"
+"#;
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.params, "--max-tokens 1000");
+    }
+
+    #[test]
+    fn test_llm_config_deserialize_defaults() {
+        let yaml = "{}";
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "claude");
+        assert!(config.model.is_empty());
+        assert!(config.params.is_empty());
+    }
+
+    #[test]
+    fn test_llm_config_deserialize_provider_only() {
+        let yaml = "provider: gemini";
+        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.provider, "gemini");
+        assert!(config.model.is_empty());
+        assert!(config.params.is_empty());
     }
 }

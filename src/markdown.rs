@@ -351,4 +351,32 @@ mod tests {
         let (_, blocks) = extract_blocks(body);
         assert!(blocks[0].deps.is_empty());
     }
+
+    #[test]
+    fn test_llm_block_among_regular_blocks() {
+        // A skill with both a bash block and an llm block: both are extracted correctly.
+        let body =
+            "```bash\necho hello\n```\n\n```llm\nprovider: claude\n---\nSummarize output.\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].lang, "bash");
+        assert_eq!(blocks[0].code, "echo hello");
+        assert!(blocks[0].llm_config.is_none());
+        assert_eq!(blocks[1].lang, "llm");
+        assert_eq!(blocks[1].code, "Summarize output.");
+        let config = blocks[1].llm_config.as_ref().unwrap();
+        assert_eq!(config.provider, "claude");
+    }
+
+    #[test]
+    fn test_non_llm_block_with_triple_dash_in_code() {
+        // A bash block whose code body contains "---" must not be mistaken for an llm separator.
+        let body = "```bash\necho start\n---\necho end\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lang, "bash");
+        assert_eq!(blocks[0].code, "echo start\n---\necho end");
+        assert!(blocks[0].llm_config.is_none());
+        assert!(blocks[0].llm_parse_error.is_none());
+    }
 }
