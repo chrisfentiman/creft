@@ -109,6 +109,12 @@ pub fn validate_skill(
     }
 
     for (i, block) in blocks.iter().enumerate() {
+        // LLM blocks have their own validation path.
+        if block.lang == "llm" {
+            check_llm_block(def, block, i, &mut errors, &mut warnings);
+            continue;
+        }
+
         check_placeholders(def, block, i, &mut warnings);
 
         // Record the error count before syntax check so we can gate shellcheck
@@ -182,6 +188,68 @@ fn check_placeholders(
                     line: None,
                 });
             }
+        }
+    }
+}
+
+/// Validate an `llm` code block.
+///
+/// Checks:
+/// 1. YAML header parse error (hard error)
+/// 2. Empty prompt after header extraction (hard error)
+/// 3. Placeholder references in the prompt body (same as other blocks)
+/// 4. Provider CLI not on PATH (warning)
+fn check_llm_block(
+    def: &CommandDef,
+    block: &CodeBlock,
+    block_index: usize,
+    errors: &mut Vec<ValidationDiagnostic>,
+    warnings: &mut Vec<ValidationDiagnostic>,
+) {
+    // YAML header parse failure takes priority — emit error and stop.
+    if let Some(parse_err) = &block.llm_parse_error {
+        errors.push(ValidationDiagnostic {
+            block_index: Some(block_index),
+            lang: Some("llm".to_string()),
+            message: format!("invalid YAML header in llm block: {}", parse_err),
+            line: None,
+        });
+        return;
+    }
+
+    // Empty prompt check.
+    if block.code.trim().is_empty() {
+        errors.push(ValidationDiagnostic {
+            block_index: Some(block_index),
+            lang: Some("llm".to_string()),
+            message: "llm block has no prompt text".to_string(),
+            line: None,
+        });
+        return;
+    }
+
+    // Check placeholder references using the same logic as other blocks.
+    check_placeholders(def, block, block_index, warnings);
+
+    // Provider CLI PATH check (warning only — provider may be available in the
+    // execution environment but not the authoring environment).
+    if let Some(config) = &block.llm_config {
+        let provider = if config.provider.is_empty() {
+            "claude"
+        } else {
+            config.provider.as_str()
+        };
+        if doctor::which_path(provider).is_none() {
+            warnings.push(ValidationDiagnostic {
+                block_index: Some(block_index),
+                lang: Some("llm".to_string()),
+                message: format!(
+                    "llm provider '{}' not found on PATH (install the provider CLI or ignore if \
+                     running in a different environment)",
+                    provider
+                ),
+                line: None,
+            });
         }
     }
 }
@@ -1855,5 +1923,142 @@ mod tests {
             method: HttpMethod::Head,
         };
         assert_eq!(ep.url_for("lodash"), "https://registry.npmjs.org/lodash");
+    }
+
+    // ── llm block validation tests ───────────────────────────────────────────────
+
+    fn make_llm_block(code: &str, config: Option<crate::model::LlmConfig>) -> CodeBlock {
+        CodeBlock {
+            lang: "llm".into(),
+            code: code.into(),
+            deps: vec![],
+            llm_config: config,
+            llm_parse_error: None,
+        }
+    }
+
+    fn default_llm_config() -> crate::model::LlmConfig {
+        crate::model::LlmConfig::default()
+    }
+
+    #[test]
+    fn test_llm_block_empty_prompt_error() {
+        let def = make_def(vec![], vec![]);
+        let block = make_llm_block("   ", Some(default_llm_config()));
+        let result = validate_skill(&def, &[block], None);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result.errors[0].message.contains("no prompt text"),
+            "expected 'no prompt text' error, got: {}",
+            result.errors[0].message
+        );
+    }
+
+    #[test]
+    fn test_llm_block_yaml_parse_error_reported() {
+        let def = make_def(vec![], vec![]);
+        let mut block = make_llm_block("some prompt", None);
+        block.llm_parse_error = Some("mapping values are not allowed here".to_string());
+        let result = validate_skill(&def, &[block], None);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result.errors[0].message.contains("invalid YAML header"),
+            "expected YAML parse error message, got: {}",
+            result.errors[0].message
+        );
+        assert!(
+            result.errors[0]
+                .message
+                .contains("mapping values are not allowed here"),
+            "expected original parse error in message"
+        );
+    }
+
+    #[test]
+    fn test_llm_block_valid_prompt_clean() {
+        // cat is universally available — this block should have no errors.
+        let def = make_def(vec![], vec![]);
+        let mut config = default_llm_config();
+        config.provider = "cat".to_string();
+        let block = make_llm_block("hello from llm block", Some(config));
+        let result = validate_skill(&def, &[block], None);
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_llm_block_provider_warning_when_not_on_path() {
+        let def = make_def(vec![], vec![]);
+        let mut config = default_llm_config();
+        config.provider = "nonexistent-llm-provider-xyz".to_string();
+        let block = make_llm_block("my prompt", Some(config));
+        let result = validate_skill(&def, &[block], None);
+        assert!(
+            result.errors.is_empty(),
+            "missing provider should warn, not error"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("nonexistent-llm-provider-xyz")),
+            "expected provider not found warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_llm_block_skips_syntax_check() {
+        // An llm block with content that looks like bad shell — should not trigger syntax errors.
+        let def = make_def(vec![], vec![]);
+        let mut config = default_llm_config();
+        config.provider = "cat".to_string();
+        let block = make_llm_block("if then else fi {{ broken shell syntax }", Some(config));
+        let result = validate_skill(&def, &[block], None);
+        // No syntax errors from the llm block content.
+        assert!(
+            result.errors.is_empty(),
+            "llm blocks should not be syntax-checked, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_llm_block_placeholder_check_works() {
+        // An undeclared placeholder in the prompt body should warn.
+        let def = make_def(vec![], vec![]);
+        let mut config = default_llm_config();
+        config.provider = "cat".to_string();
+        let block = make_llm_block("Summarize {{some_arg}}", Some(config));
+        let result = validate_skill(&def, &[block], None);
+        let has_placeholder_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("some_arg"));
+        assert!(
+            has_placeholder_warning,
+            "expected placeholder warning for undeclared {{{{some_arg}}}}, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_llm_block_prev_placeholder_in_second_block_no_warning() {
+        // {{prev}} in the second block (not block 0) should not produce a warning.
+        let def = make_def(vec![], vec![]);
+        let bash_block = make_block("bash", "echo hello");
+        let mut config = default_llm_config();
+        config.provider = "cat".to_string();
+        let llm_block = make_llm_block("Review this: {{prev}}", Some(config));
+        let result = validate_skill(&def, &[bash_block, llm_block], None);
+        let has_prev_warning = result.warnings.iter().any(|w| w.message.contains("prev"));
+        assert!(
+            !has_prev_warning,
+            "{{{{prev}}}} in block 2 should not produce a warning, got: {:?}",
+            result.warnings
+        );
     }
 }
