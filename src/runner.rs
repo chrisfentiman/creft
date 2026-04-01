@@ -8,9 +8,9 @@ use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
 
 /// Execution context for a single skill invocation.
 ///
-/// Carries working directory, environment variables, and a cancellation token
-/// for cooperative shutdown. Runtime flags (`verbose`, `dry_run`) will be
-/// added in Phase 3 when runner functions take over that dispatch logic.
+/// Carries all state that runner functions previously received as individual
+/// parameters: working directory, environment variables, runtime flags, and
+/// a cancellation token for cooperative shutdown.
 ///
 /// Constructed once per skill invocation in `run_user_command`.
 /// Shared across threads via `Arc` (sponge threads, reaper threads).
@@ -25,6 +25,12 @@ pub(crate) struct RunContext {
 
     /// Extra environment variables injected into every child process.
     env: Vec<(String, String)>,
+
+    /// Whether `--verbose` was passed. Controls block rendering before execution.
+    verbose: bool,
+
+    /// Whether `--dry-run` was passed. Controls execution vs. print-only.
+    dry_run: bool,
 }
 
 impl RunContext {
@@ -32,8 +38,16 @@ impl RunContext {
         cancel: Arc<AtomicBool>,
         cwd: std::path::PathBuf,
         env: Vec<(String, String)>,
+        verbose: bool,
+        dry_run: bool,
     ) -> Self {
-        Self { cancel, cwd, env }
+        Self {
+            cancel,
+            cwd,
+            env,
+            verbose,
+            dry_run,
+        }
     }
 
     /// Check whether cancellation has been requested.
@@ -54,9 +68,19 @@ impl RunContext {
             .collect()
     }
 
-    /// Clone the underlying cancellation token for passing to spawned threads.
-    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancel)
+    /// Whether verbose output was requested.
+    pub(crate) fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+
+    /// Whether dry-run mode was requested.
+    pub(crate) fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Borrow the environment variable vec for cloning or inspection.
+    pub(crate) fn env(&self) -> &Vec<(String, String)> {
+        &self.env
     }
 }
 
@@ -322,22 +346,22 @@ fn prepare_block_script(
 /// chain: only the first block receives Ctrl+C; downstream blocks learn
 /// the pipe broke via EOF/SIGPIPE and exit cleanly. `SIG_IGN` is inherited
 /// across exec, so the spawned interpreter (e.g. Python) will also ignore it.
-#[allow(clippy::too_many_arguments)] // private helper; grouping into a struct would add noise
 fn spawn_block(
     block: &CodeBlock,
     script_path: &Path,
-    env_vars: &[(&str, &str)],
+    ctx: &RunContext,
     stdin_cfg: std::process::Stdio,
     stdout_cfg: std::process::Stdio,
-    cwd: &Path,
     #[cfg(unix)] process_group: Option<u32>,
     #[cfg(unix)] ignore_sigint: bool,
 ) -> Result<(std::process::Child, Option<tempfile::TempDir>), CreftError> {
+    let env_pairs = ctx.env_pairs();
+    let cwd = ctx.cwd();
     // Stdio is not Copy, so we apply stdin/stdout directly rather than
     // using a reusable closure (which would require Fn, not FnOnce).
     let apply_common = |cmd: &mut std::process::Command| {
         cmd.current_dir(cwd);
-        for (k, v) in env_vars {
+        for (k, v) in &env_pairs {
             cmd.env(k, v);
         }
         cmd.stderr(std::process::Stdio::inherit());
@@ -843,12 +867,10 @@ fn sponge_thread(
     prompt_template: String,
     config: crate::model::LlmConfig,
     bound_refs: Vec<(String, String)>,
-    env_vars: Vec<(String, String)>,
-    cwd: std::path::PathBuf,
+    ctx: RunContext,
     block_idx: usize,
     pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-    cancel: Arc<AtomicBool>,
 ) {
     use std::io::{Read as _, Write as _};
 
@@ -899,9 +921,9 @@ fn sponge_thread(
         };
 
         let mut cmd = build_llm_command(&config);
-        cmd.current_dir(&cwd);
-        for (k, v) in &env_vars {
-            cmd.env(k.as_str(), v.as_str());
+        cmd.current_dir(ctx.cwd());
+        for (k, v) in ctx.env_pairs() {
+            cmd.env(k, v);
         }
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -968,7 +990,7 @@ fn sponge_thread(
                         // handler, so this check fires primarily for single-block LLM runs
                         // and between sequential blocks. It will become the primary
                         // cancellation path when PipeSignalGuard is replaced in a future phase.
-                        if cancel.load(Ordering::Relaxed) {
+                        if ctx.is_cancelled() {
                             break;
                         }
                         if pipe_writer.write_all(&buf[..n]).is_err() {
@@ -1020,9 +1042,7 @@ fn sponge_thread(
 fn run_pipe_chain(
     cmd: &ParsedCommand,
     bound_refs: &[(&str, &str)],
-    extra_env: &[(&str, &str)],
-    cwd: &Path,
-    cancel: &Arc<AtomicBool>,
+    ctx: &RunContext,
 ) -> Result<(), CreftError> {
     let n = cmd.blocks.len();
 
@@ -1041,7 +1061,6 @@ fn run_pipe_chain(
         }
     }
 
-    let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
     // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
     let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
     let mut children: Vec<(std::process::Child, usize, String)> = Vec::with_capacity(n);
@@ -1093,14 +1112,9 @@ fn run_pipe_chain(
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-            let owned_env_vars: Vec<(String, String)> = env_vars
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            let owned_cwd = cwd.to_path_buf();
+            let ctx_clone = ctx.clone();
             let reaper_tx_clone = reaper_tx.clone();
             let prompt_template = block.code.clone();
-            let cancel_clone = Arc::clone(cancel);
 
             let handle = std::thread::Builder::new()
                 .name(format!("creft-sponge-{i}"))
@@ -1111,12 +1125,10 @@ fn run_pipe_chain(
                         prompt_template,
                         llm_config,
                         owned_bound_refs,
-                        owned_env_vars,
-                        owned_cwd,
+                        ctx_clone,
                         i,
                         pgid_tx,
                         reaper_tx_clone,
-                        cancel_clone,
                     );
                 })
                 .expect("failed to spawn sponge thread");
@@ -1186,10 +1198,9 @@ fn run_pipe_chain(
         let (mut child, node_deps_dir) = spawn_block(
             block,
             script_path,
-            &env_vars,
+            ctx,
             stdin_cfg,
             stdout_cfg,
-            cwd,
             #[cfg(unix)]
             pg,
             #[cfg(unix)]
@@ -1363,8 +1374,7 @@ fn execute_block(
     block: &CodeBlock,
     code: &str,
     block_idx: usize,
-    env_vars: &[(&str, &str)],
-    cwd: &Path,
+    ctx: &RunContext,
     stdin_data: Option<&[u8]>,
 ) -> Result<String, CreftError> {
     let tmp = prepare_block_script(block, code)?;
@@ -1379,10 +1389,9 @@ fn execute_block(
     let (mut child, _node_deps_dir) = spawn_block(
         block,
         &tmp_path,
-        env_vars,
+        ctx,
         stdin_cfg,
         std::process::Stdio::piped(),
-        cwd,
         #[cfg(unix)]
         None, // single-block mode: no process group management
         #[cfg(unix)]
@@ -1581,13 +1590,11 @@ fn execute_llm_block(
     block: &CodeBlock,
     prompt: &str,
     block_idx: usize,
-    env_vars: &[(&str, &str)],
-    cwd: &Path,
-    cancel: &Arc<AtomicBool>,
+    ctx: &RunContext,
 ) -> Result<String, CreftError> {
     // Check cancellation before spawning the provider — avoids starting a
     // potentially long-running LLM call when SIGINT already fired.
-    if cancel.load(Ordering::Relaxed) {
+    if ctx.is_cancelled() {
         return Err(CreftError::EarlyExit);
     }
 
@@ -1603,8 +1610,8 @@ fn execute_llm_block(
     };
 
     let mut cmd = build_llm_command(config);
-    cmd.current_dir(cwd);
-    for (k, v) in env_vars {
+    cmd.current_dir(ctx.cwd());
+    for (k, v) in ctx.env_pairs() {
         cmd.env(k, v);
     }
     cmd.stdin(std::process::Stdio::piped());
@@ -1646,14 +1653,8 @@ fn execute_llm_block(
     Ok(stdout)
 }
 
-/// Core execution logic. Threads the cancellation token into LLM execution paths.
-fn run_inner(
-    cmd: &ParsedCommand,
-    raw_args: &[String],
-    extra_env: &[(&str, &str)],
-    cwd: &Path,
-    cancel: &Arc<AtomicBool>,
-) -> Result<(), CreftError> {
+/// Core execution logic. Uses `RunContext` for all execution configuration.
+fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Result<(), CreftError> {
     if cmd.blocks.is_empty() {
         return Err(CreftError::NoCodeBlocks);
     }
@@ -1670,7 +1671,7 @@ fn run_inner(
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
-            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd, cancel);
+            return run_pipe_chain(cmd, &bound_refs, ctx);
         }
         #[cfg(not(unix))]
         {
@@ -1682,23 +1683,22 @@ fn run_inner(
                         .into(),
                 ));
             }
-            return run_pipe_chain(cmd, &bound_refs, extra_env, cwd, cancel);
+            return run_pipe_chain(cmd, &bound_refs, ctx);
         }
     }
 
     // Single block execution.
     let block = &cmd.blocks[0];
     let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
-    let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
 
     if block.lang == "llm" {
-        match execute_llm_block(block, &expanded, 0, &env_vars, cwd, cancel) {
+        match execute_llm_block(block, &expanded, 0, ctx) {
             Ok(_) => Ok(()),
             Err(CreftError::EarlyExit) => Ok(()),
             Err(e) => Err(e),
         }
     } else {
-        match execute_block(block, &expanded, 0, &env_vars, cwd, None) {
+        match execute_block(block, &expanded, 0, ctx, None) {
             Ok(_) => Ok(()),
             Err(CreftError::EarlyExit) => Ok(()),
             Err(e) => Err(e),
@@ -1708,9 +1708,7 @@ fn run_inner(
 
 /// Run a full parsed command using a `RunContext`.
 ///
-/// Extracts working directory and environment from the context and delegates
-/// to the internal execution logic. Returns immediately if cancellation has
-/// already been requested.
+/// Returns immediately if cancellation has already been requested.
 pub(crate) fn run_with_ctx(
     cmd: &ParsedCommand,
     raw_args: &[String],
@@ -1719,8 +1717,7 @@ pub(crate) fn run_with_ctx(
     if ctx.is_cancelled() {
         return Ok(());
     }
-    let env_pairs = ctx.env_pairs();
-    run_inner(cmd, raw_args, &env_pairs, ctx.cwd(), &ctx.cancel_token())
+    run_inner(cmd, raw_args, ctx)
 }
 
 /// Print the expanded code for each block without executing it, using a `RunContext`.
@@ -1814,6 +1811,8 @@ mod tests {
                 ("FOO".to_string(), "bar".to_string()),
                 ("BAZ".to_string(), "qux".to_string()),
             ],
+            false,
+            false,
         )
     }
 
@@ -1829,7 +1828,13 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let ctx = RunContext::new(Arc::new(AtomicBool::new(false)), cwd.to_path_buf(), env);
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            cwd.to_path_buf(),
+            env,
+            false,
+            false,
+        );
         run_with_ctx(cmd, &args, &ctx)
     }
 
@@ -1852,6 +1857,8 @@ mod tests {
             Arc::clone(&cancel),
             std::path::PathBuf::from("/tmp"),
             vec![],
+            false,
+            false,
         );
         let cloned = ctx.clone();
 
@@ -1884,28 +1891,33 @@ mod tests {
 
     #[test]
     fn run_context_is_cancelled_true_after_flag_set() {
-        let ctx = make_context();
-        assert!(!ctx.is_cancelled());
-        ctx.cancel_token().store(true, Ordering::Relaxed);
-        assert!(ctx.is_cancelled());
-    }
-
-    #[test]
-    fn run_context_cancel_token_shared_with_context() {
-        // cancel_token() returns a clone of the same Arc — setting it externally
-        // is visible via is_cancelled().
         let cancel = Arc::new(AtomicBool::new(false));
         let ctx = RunContext::new(
             Arc::clone(&cancel),
             std::path::PathBuf::from("/tmp"),
             vec![],
+            false,
+            false,
         );
-        let token = ctx.cancel_token();
         assert!(!ctx.is_cancelled());
-        token.store(true, Ordering::Relaxed);
+        cancel.store(true, Ordering::Relaxed);
         assert!(ctx.is_cancelled());
-        // And the original Arc reflects the change too.
-        assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn run_context_cancel_shared_via_arc() {
+        // Setting the flag via the original Arc is visible through is_cancelled().
+        let cancel = Arc::new(AtomicBool::new(false));
+        let ctx = RunContext::new(
+            Arc::clone(&cancel),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        );
+        assert!(!ctx.is_cancelled());
+        cancel.store(true, Ordering::Relaxed);
+        assert!(ctx.is_cancelled());
     }
 
     #[test]

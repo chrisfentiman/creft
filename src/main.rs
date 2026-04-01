@@ -224,7 +224,9 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
     #[cfg(unix)]
     let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
 
-    if verbose || dry_run {
+    let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run);
+
+    if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.
         let (bound, _) = runner::parse_and_bind(&cmd, &remaining)?;
         let bound_refs: Vec<(&str, &str)> = bound
@@ -232,34 +234,37 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        if verbose {
+        if run_ctx.is_verbose() {
             runner::render_blocks(&cmd, &bound_refs)?;
         }
 
-        if dry_run && !verbose {
-            // Pure dry-run path (existing behavior).
+        if run_ctx.is_dry_run() && !run_ctx.is_verbose() {
+            // Pure dry-run path: either delegate to native dry-run or print-only.
             if cmd.def.supports_feature("dry-run") {
-                extra_env.push(("CREFT_DRY_RUN".to_string(), "1".to_string()));
-                let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
-                return runner::run_with_ctx(&cmd, &remaining, &run_ctx);
+                // Skill handles dry-run natively — inject the env var and execute.
+                let mut env = run_ctx.env().to_vec();
+                env.push(("CREFT_DRY_RUN".to_string(), "1".to_string()));
+                let native_ctx = runner::RunContext::new(
+                    Arc::clone(&cancel),
+                    run_ctx.cwd().to_path_buf(),
+                    env,
+                    false,
+                    true,
+                );
+                return runner::run_with_ctx(&cmd, &remaining, &native_ctx);
             } else {
-                let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
                 return runner::dry_run_ctx(&cmd, &remaining, &run_ctx);
             }
         }
 
-        if dry_run {
+        if run_ctx.is_dry_run() {
             // --verbose --dry-run: rendered above, do not execute.
             return Ok(());
         }
-
-        // --verbose only: render already done above, now execute normally.
-        let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
-        runner::run_with_ctx(&cmd, &remaining, &run_ctx)
-    } else {
-        let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env);
-        runner::run_with_ctx(&cmd, &remaining, &run_ctx)
     }
+
+    // --verbose only (render done above) or no flags: execute normally.
+    runner::run_with_ctx(&cmd, &remaining, &run_ctx)
 }
 
 /// Show namespace help: a header line followed by the grouped skill listing.
