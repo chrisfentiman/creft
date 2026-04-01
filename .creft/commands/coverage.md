@@ -4,7 +4,6 @@ description: Run code coverage analysis
 tags:
   - dev
   - testing
-pipe: true
 args:
   - name: file
     description: Show detailed uncovered lines/functions for this file (e.g. error.rs)

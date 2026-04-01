@@ -172,7 +172,7 @@ fn test_add_valid_syntax_succeeds(#[case] lang: &str, #[case] valid_body: &str) 
         .write_stdin(markdown.as_str())
         .assert()
         .success()
-        .stderr(predicate::str::contains(&format!("added: good-{lang}")));
+        .stderr(predicate::str::contains(format!("added: good-{lang}")));
 }
 
 /// Passing a skip-validation flag accepts broken bash syntax.
@@ -193,7 +193,7 @@ fn test_add_skip_validation_flag(#[case] flag: &str, #[case] skill_name: &str) {
         .write_stdin(markdown.as_str())
         .assert()
         .success()
-        .stderr(predicate::str::contains(&format!("added: {skill_name}")));
+        .stderr(predicate::str::contains(format!("added: {skill_name}")));
 }
 
 /// Piped `creft edit` with a syntax error in the new content is rejected.

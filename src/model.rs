@@ -245,11 +245,6 @@ pub struct CommandDef {
     pub env: Vec<EnvVar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// When true, stdout of each block is piped as stdin to the next block.
-    /// When false (default), stdout is captured into env vars CREFT_PREV and
-    /// CREFT_BLOCK_N, and available as {{prev}} in templates.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pipe: bool,
     /// Runtime features this command supports (e.g., "dry-run").
     /// When a feature is declared here and the corresponding runtime flag
     /// is passed, creft delegates handling to the command instead of
@@ -536,7 +531,8 @@ impl ParsedCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_name_parts_simple() {
@@ -547,7 +543,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec![],
         };
         assert_eq!(def.name_parts(), vec!["hello"]);
@@ -562,7 +557,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec![],
         };
         assert_eq!(def.name_parts(), vec!["gh", "issue-body"]);
@@ -596,7 +590,6 @@ mod tests {
                     required: true,
                 }],
                 tags: vec!["github".into(), "api".into()],
-                pipe: false,
                 supports: vec![],
             },
             docs: Some("Fetches the body as raw markdown.".into()),
@@ -628,7 +621,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec!["dry-run".into()],
         };
         assert!(def.supports_feature("dry-run"));
@@ -643,7 +635,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec!["dry-run".into()],
         };
         assert!(!def.supports_feature("verbose"));
@@ -658,7 +649,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec![],
         };
         assert!(!def.supports_feature("dry-run"));
@@ -722,7 +712,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -757,7 +746,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -787,7 +775,6 @@ name: MY_TOKEN
                     required: false,
                 }],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -818,7 +805,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -849,7 +835,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -878,7 +863,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -908,7 +892,6 @@ name: MY_TOKEN
                 }],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -932,7 +915,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -959,7 +941,6 @@ name: MY_TOKEN
                 flags: vec![],
                 env: vec![],
                 tags: vec![],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -1075,7 +1056,6 @@ name: MY_TOKEN
                     required: true,
                 }],
                 tags: vec!["github".into()],
-                pipe: false,
                 supports: vec![],
             },
             docs: None,
@@ -1214,5 +1194,21 @@ params: "--max-tokens 1000"
         assert_eq!(config.provider, "gemini");
         assert!(config.model.is_empty());
         assert!(config.params.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_ignores_pipe_field() {
+        // YAML with pipe: true must deserialize without error. Field is silently ignored.
+        let yaml = "name: hello\ndescription: test\npipe: true\n";
+        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(def.name, "hello");
+    }
+
+    #[test]
+    fn test_deserialize_ignores_sequential_field() {
+        // YAML with sequential: true must deserialize without error. Field is silently ignored.
+        let yaml = "name: hello\ndescription: test\nsequential: true\n";
+        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(def.name, "hello");
     }
 }

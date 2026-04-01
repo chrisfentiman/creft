@@ -121,18 +121,19 @@ fn test_dry_run_delegated_failure() {
 }
 
 /// A multi-block command with `supports: [dry-run]` injects `CREFT_DRY_RUN=1`
-/// into every block, not just the first. Each block echoes the env var value;
-/// both outputs must appear in stdout.
+/// into every block, not just the first. With pipe-by-default, block 1's stdout
+/// feeds block 2's stdin. Block 2 reads stdin via `cat` (passing through block 1's
+/// output) then appends its own marker. Both markers must appear in the final stdout.
 #[test]
 fn test_dry_run_delegated_multi_block() {
     let dir = creft_env();
 
-    // Two blocks: each echoes CREFT_DRY_RUN with a unique prefix so we can
-    // distinguish block 1 output from block 2 output.
-    let markdown = "---\nname: multi-dry\ndescription: multi-block dry-run\nsupports: [dry-run]\n---\n\n```bash\necho \"BLOCK1=$CREFT_DRY_RUN\"\n```\n\n```bash\necho \"BLOCK2=$CREFT_DRY_RUN\"\n```\n";
+    // Block 1 echoes its marker. Block 2 passes block 1's output through via `cat`
+    // then appends its own marker. Both BLOCK1=1 and BLOCK2=1 must appear.
+    let markdown = "---\nname: multi-dry\ndescription: multi-block dry-run\nsupports: [dry-run]\n---\n\n```bash\necho \"BLOCK1=$CREFT_DRY_RUN\"\n```\n\n```bash\ncat\necho \"BLOCK2=$CREFT_DRY_RUN\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();

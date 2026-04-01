@@ -1,5 +1,9 @@
 //! Shared test utilities for creft integration tests.
 
+// Each test binary only uses a subset of helpers. Suppress dead_code warnings
+// that fire when a particular binary doesn't use every helper in this module.
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use std::time::Duration;
 use tempfile::TempDir;

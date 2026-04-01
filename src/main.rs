@@ -876,9 +876,34 @@ fn cmd_doctor(ctx: &model::AppContext, name: Vec<String>) -> Result<(), CreftErr
     }
 }
 
+fn cmd_init(ctx: &model::AppContext) -> Result<(), CreftError> {
+    let cwd = ctx.cwd.clone();
+
+    if store::has_local_root(&cwd).is_some() {
+        eprintln!("already initialized: {}", cwd.join(".creft").display());
+        return Ok(());
+    }
+
+    if let Some(parent_root) = store::find_parent_local_root(&cwd) {
+        eprintln!(
+            "note: parent directory already has local skills at {}",
+            parent_root.display()
+        );
+        eprintln!("creating nested .creft/ in current directory anyway");
+    }
+
+    let target = cwd.join(".creft").join("commands");
+    std::fs::create_dir_all(&target).map_err(CreftError::Io)?;
+
+    eprintln!("created: {}", target.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::truncate_desc;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_truncate_desc_empty_string() {
@@ -952,27 +977,4 @@ mod tests {
             "should not have double space before ..."
         );
     }
-}
-
-fn cmd_init(ctx: &model::AppContext) -> Result<(), CreftError> {
-    let cwd = ctx.cwd.clone();
-
-    if store::has_local_root(&cwd).is_some() {
-        eprintln!("already initialized: {}", cwd.join(".creft").display());
-        return Ok(());
-    }
-
-    if let Some(parent_root) = store::find_parent_local_root(&cwd) {
-        eprintln!(
-            "note: parent directory already has local skills at {}",
-            parent_root.display()
-        );
-        eprintln!("creating nested .creft/ in current directory anyway");
-    }
-
-    let target = cwd.join(".creft").join("commands");
-    std::fs::create_dir_all(&target).map_err(CreftError::Io)?;
-
-    eprintln!("created: {}", target.display());
-    Ok(())
 }

@@ -747,7 +747,8 @@ pub fn resolve_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_is_reserved() {
@@ -1396,7 +1397,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec![],
         };
         (def, SkillSource::Owned(Scope::Global))
@@ -1410,7 +1410,6 @@ mod tests {
             flags: vec![],
             env: vec![],
             tags: vec![],
-            pipe: false,
             supports: vec![],
         };
         (def, SkillSource::Package(pkg.to_string(), Scope::Global))

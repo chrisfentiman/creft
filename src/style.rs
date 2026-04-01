@@ -36,6 +36,8 @@ pub(crate) fn bold<'a>(s: &'a str, ansi: bool) -> Cow<'a, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_bold_enabled() {

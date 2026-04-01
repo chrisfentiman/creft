@@ -59,7 +59,6 @@ Frontmatter Fields:
   flags         Named --flags. Each has: name, short, type (bool/string), default, validation
   env           Environment variables. Each has: name, required (default true)
   tags          List of tags for filtering with 'creft list --tag'
-  pipe          When true, stdout pipes between blocks. Default false: uses $CREFT_PREV
 
 Code Blocks:
   Each fenced block is an executable step. Language tag sets the interpreter.
@@ -87,8 +86,10 @@ Code Blocks:
 
     Providers: claude (default), gemini, codex, ollama, or any CLI tool name.
     The provider handles authentication (API keys, config files).
-    Template placeholders ({{prev}}, {{name}}) work in the prompt body.
-    Skills with llm blocks always run sequentially, even with pipe: true.
+    Template placeholders ({{name}}) work in the prompt body.
+    LLM blocks buffer all upstream input before sending to the provider (sponge pattern).
+    Use {{prev}} in the LLM prompt to reference the buffered input.
+    On non-Unix systems, multi-block skills with LLM blocks are not supported.
 
   Dependencies (first line comment):
     # deps: requests, pandas          Python (uses uv run --with)
@@ -97,12 +98,11 @@ Code Blocks:
 
 Template Placeholders:
   {{name}}            Positional arg or flag value
-  {{prev}}            Stdout of previous code block
   {{name|default}}    Value with fallback
 
 Output Chaining:
-  Default (pipe: false): $CREFT_PREV, $CREFT_BLOCK_1, $CREFT_BLOCK_2, etc.
-  Pipeline (pipe: true): stdout pipes directly as stdin to next block
+  Multi-block skills pipe stdout of each block as stdin to the next block.
+  Single-block skills run standalone.
 
 Storage:
   Skills save to nearest .creft/ directory, or ~/.creft/ if none exists.

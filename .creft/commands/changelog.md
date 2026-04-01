@@ -4,7 +4,6 @@ description: Generate changelog from git history
 tags:
   - dev
   - release
-pipe: true
 args:
   - name: range
     description: Git revision range (e.g. v0.1.0..HEAD, or a number like 20 for last N commits)

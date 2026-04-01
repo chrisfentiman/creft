@@ -55,7 +55,8 @@ pub fn serialize(def: &CommandDef, body: &str) -> Result<String, CreftError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_parse_basic() {
@@ -136,6 +137,23 @@ mod tests {
         let serialized = serialize(&def, &body).unwrap();
         let (def2, body2) = parse(&serialized).unwrap();
         assert_eq!(def2.supports, vec!["dry-run"]);
+        assert_eq!(body, body2);
+    }
+
+    #[test]
+    fn test_roundtrip_ignores_legacy_pipe_field() {
+        // YAML with pipe: true deserializes without error. On roundtrip,
+        // pipe does not appear in the serialized output (field is gone from the struct).
+        let input = "---\nname: hello\ndescription: greet someone\npipe: true\n---\nbody\n";
+        let (def, body) = parse(input).unwrap();
+        assert_eq!(def.name, "hello");
+        let serialized = serialize(&def, &body).unwrap();
+        assert!(
+            !serialized.contains("pipe"),
+            "serialized output must not contain pipe after roundtrip; got:\n{serialized}"
+        );
+        let (def2, body2) = parse(&serialized).unwrap();
+        assert_eq!(def2.name, "hello");
         assert_eq!(body, body2);
     }
 }

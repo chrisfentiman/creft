@@ -3,7 +3,6 @@ name: hello
 description: Greet someone with style
 args:
 - name: who
-pipe: true
 ---
 
 ```bash

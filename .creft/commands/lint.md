@@ -4,7 +4,6 @@ description: Run clippy with markdown output
 tags:
   - dev
   - quality
-pipe: true
 args:
   - name: file
     description: Filter findings to a specific file (e.g. runner.rs)

@@ -193,7 +193,6 @@ fn test_pipe_intermediate_output_suppressed() {
         "---\n",
         "name: pipe-two-block\n",
         "description: pipe test\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -240,10 +239,11 @@ fn test_pipe_intermediate_output_suppressed() {
     );
 }
 
-/// A two-block non-pipe skill must print BOTH blocks' stdout to the terminal
-/// (regression guard — pipe suppression must not affect non-pipe skills).
+/// Multi-block skills pipe by default: block 1's stdout feeds block 2's stdin.
+/// Block 2 reads stdin via `cat` (passing block 1's output through) then appends
+/// its own line. Both markers must appear in the combined output.
 #[test]
-fn test_non_pipe_all_blocks_print() {
+fn test_multi_block_default_pipes_integration() {
     let dir = creft_env();
 
     let markdown = concat!(
@@ -257,12 +257,13 @@ fn test_non_pipe_all_blocks_print() {
         "```\n",
         "\n",
         "```bash\n",
+        "cat\n",
         "echo block-two-output\n",
         "```\n",
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -291,7 +292,6 @@ fn test_pipe_large_output_no_e2big() {
         "---\n",
         "name: pipe-large-output\n",
         "description: large pipe test\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```python3\n",
@@ -329,7 +329,6 @@ fn test_pipe_mode_no_creft_prev_env() {
         "---\n",
         "name: pipe-no-creft-prev\n",
         "description: verify CREFT_PREV absent in pipe mode\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -366,7 +365,6 @@ fn test_pipe_mode_prev_placeholder_passes_through() {
         "---\n",
         "name: pipe-prev-placeholder\n",
         "description: prev placeholder in pipe mode\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -461,7 +459,6 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         "---\n",
         "name: pipe-exit-99-kill\n",
         "description: exit 99 kills remaining blocks\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -515,7 +512,6 @@ fn test_pipe_exit_99_middle_block() {
         "---\n",
         "name: pipe-mid-exit99\n",
         "description: middle block exit 99 test\n",
-        "pipe: true\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -998,7 +994,6 @@ fn test_pipe_sigint_clean_exit() {
             "---\n",
             "name: pipe-sigint-two\n",
             "description: SIGINT test skill\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1061,7 +1056,6 @@ fn test_pipe_sigint_no_signal_message() {
             "---\n",
             "name: pipe-sigint-quiet\n",
             "description: SIGINT quiet test skill\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1118,7 +1112,6 @@ fn test_pipe_non_sigint_signal_still_reported() {
             "---\n",
             "name: pipe-sigterm-report\n",
             "description: SIGTERM should be reported\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1201,7 +1194,6 @@ fn test_pipe_sigint_all_children_die() {
             "---\n",
             "name: pipe-sigint-three\n",
             "description: three-block SIGINT test\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1321,7 +1313,6 @@ fn test_pipe_sigint_non_terminal() {
             "---\n",
             "name: pipe-sigint-nontty\n",
             "description: non-terminal SIGINT test\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1397,7 +1388,6 @@ fn test_pipe_sigint_no_python_traceback() {
             "---\n",
             "name: pipe-sigint-python-norace\n",
             "description: python downstream SIGINT traceback regression\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1734,7 +1724,6 @@ fn test_early_exit_99_in_pipe_mode() {
             "---\n",
             "name: pipe-early-exit\n",
             "description: exit 99 in pipe mode\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1773,7 +1762,6 @@ fn test_pipe_exit_99_fast_downstream_no_output() {
             "---\n",
             "name: pipe-fast-exit99\n",
             "description: fast downstream must not leak output on exit 99\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1828,7 +1816,6 @@ fn test_pipe_exit_99_no_side_effects() {
             "---\n",
             "name: pipe-exit99-sentinel\n",
             "description: exit 99 kills downstream before side effects\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1874,7 +1861,6 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
             "---\n",
             "name: pipe-mid-exit99-suppress\n",
             "description: middle exit 99 suppresses last block output\n",
-            "pipe: true\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -1913,4 +1899,78 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
         "pipe must terminate quickly after middle block exits 99 (took {:?})",
         elapsed
     );
+}
+
+// ── pipe-by-default: legacy field tests ──────────────────────────────────────
+
+/// A skill with `pipe: true` in YAML still works — the field is ignored by
+/// serde (no deny_unknown_fields), and multi-block skills always pipe.
+#[test]
+fn test_legacy_pipe_true_ignored() {
+    let dir = creft_env();
+
+    let markdown = concat!(
+        "---\n",
+        "name: legacy-pipe-true\n",
+        "description: legacy field is silently ignored\n",
+        "pipe: true\n",
+        "---\n",
+        "\n",
+        "```bash\n",
+        "echo hello\n",
+        "```\n",
+        "\n",
+        "```bash\n",
+        "stdin=$(cat)\n",
+        "echo \"got: $stdin\"\n",
+        "```\n",
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(markdown)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["legacy-pipe-true"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("got: hello"));
+}
+
+/// A skill with `sequential: true` in YAML pipes its blocks — the field is
+/// ignored by serde (no deny_unknown_fields), and multi-block skills always pipe.
+#[test]
+fn test_legacy_sequential_true_ignored() {
+    let dir = creft_env();
+
+    let markdown = concat!(
+        "---\n",
+        "name: legacy-sequential-true\n",
+        "description: legacy sequential field is silently ignored\n",
+        "sequential: true\n",
+        "---\n",
+        "\n",
+        "```bash\n",
+        "echo piped\n",
+        "```\n",
+        "\n",
+        "```bash\n",
+        "stdin=$(cat)\n",
+        "echo \"got: $stdin\"\n",
+        "```\n",
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(markdown)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["legacy-sequential-true"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("got: piped"));
 }

@@ -71,12 +71,15 @@ fn test_llm_block_execution_provider_not_found() {
         .stderr(predicate::str::contains("nonexistent-llm-xyz"));
 }
 
-/// A multi-block skill where bash produces output and llm uses {{prev}}.
+/// A multi-block pipe chain where bash produces output and an LLM sponge uses {{prev}}.
+///
+/// With pipe-by-default, this skill runs through run_pipe_chain. The sponge reads
+/// bash's output, buffers it, and substitutes it as {{prev}} into the prompt.
 #[test]
-fn test_llm_block_sequential_with_prev() {
+fn test_llm_block_pipe_sponge_prev() {
     let dir = creft_env();
 
-    // Bash block outputs "from bash", llm block (cat) echoes the prompt with {{prev}} substituted.
+    // Bash block outputs "from bash", llm sponge (cat) echoes the prompt with {{prev}} substituted.
     let skill = "---\nname: llm-prev\ndescription: llm block using prev\n---\n\n\
 ```bash\necho from bash\n```\n\n\
 ```llm\nprovider: cat\n---\nreceived: {{prev}}\n```\n";
@@ -102,7 +105,8 @@ fn test_llm_block_no_header() {
 
     // No YAML header at all — LlmConfig defaults to claude provider.
     // We use dry-run to verify it parses correctly without needing claude.
-    let skill = "---\nname: llm-noheader\ndescription: llm block with no header\n---\n\njust a prompt without yaml header\n\
+    // Incorrect format (no fenced code block) — kept as documentation of what NOT to write.
+    let _skill = "---\nname: llm-noheader\ndescription: llm block with no header\n---\n\njust a prompt without yaml header\n\
 This is the prompt text that has no --- separator at all.\n```\n";
 
     // Actually we need a proper fenced code block format
@@ -123,16 +127,16 @@ This is the prompt text that has no --- separator at all.\n```\n";
         .stderr(predicate::str::contains("llm: claude"));
 }
 
-/// A `pipe: true` skill with an llm block runs as a true concurrent pipe chain.
+/// A multi-block skill with an llm block runs as a true concurrent pipe chain.
 ///
 /// The LLM block participates as a sponge stage: it reads all upstream output,
 /// performs template substitution, and relays the provider's stdout downstream
-/// via an OS pipe — no sequential fallback.
+/// via an OS pipe.
 #[test]
 fn test_llm_block_pipe_mode_sponge() {
     let dir = creft_env();
 
-    let skill = "---\nname: llm-pipe\ndescription: pipe skill with llm\npipe: true\n---\n\n\
+    let skill = "---\nname: llm-pipe\ndescription: pipe skill with llm\n---\n\n\
 ```bash\necho from pipe bash\n```\n\n\
 ```llm\nprovider: cat\n---\npipe input: {{prev}}\n```\n";
 
@@ -206,7 +210,7 @@ fn test_llm_block_verbose_shows_command() {
         .stderr(predicate::str::contains("prompt:"));
 }
 
-/// A `pipe: true` skill with bash -> llm -> bash chains output through the sponge correctly.
+/// A pipe chain with bash -> llm -> bash chains output through the sponge correctly.
 ///
 /// The sponge reads bash's output, substitutes `{{prev}}`, and relays the provider's
 /// stdout as stdin to the downstream bash block via an OS pipe.
@@ -218,7 +222,7 @@ fn test_llm_pipe_stdin_routes_prev_output() {
     // Block 2 (llm/cat): prompt contains {{prev}}, cat echoes it back.
     // Block 3 (bash): cat — reads stdin and echoes it.
     // If stdin routing is correct, block 3 outputs block 2's output.
-    let skill = "---\nname: pipe-stdin-chain\ndescription: pipe stdin routing test\npipe: true\n---\n\n\
+    let skill = "---\nname: pipe-stdin-chain\ndescription: pipe stdin routing test\n---\n\n\
 ```bash\necho 'hello from bash'\n```\n\n\
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
 ```bash\ncat\n```\n";
@@ -248,7 +252,7 @@ fn test_llm_pipe_block0_inherits_parent_stdin() {
     // Block 2 (llm/cat): prompt contains {{prev}}.
     // We pipe "injected data" into creft — if block 0 inherits parent stdin correctly,
     // it reads that data and passes it forward.
-    let skill = "---\nname: pipe-block0-stdin\ndescription: block 0 parent stdin test\npipe: true\n---\n\n\
+    let skill = "---\nname: pipe-block0-stdin\ndescription: block 0 parent stdin test\n---\n\n\
 ```bash\ncat\n```\n\n\
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n";
 
@@ -278,7 +282,7 @@ fn test_llm_pipe_empty_prev_sends_eof() {
     // Block 1 (bash): outputs nothing.
     // Block 2 (llm/cat): prompt is {{prev}} (empty string).
     // Block 3 (bash/wc -c): counts bytes on stdin — should output 0.
-    let skill = "---\nname: pipe-empty-prev\ndescription: empty prev EOF test\npipe: true\n---\n\n\
+    let skill = "---\nname: pipe-empty-prev\ndescription: empty prev EOF test\n---\n\n\
 ```bash\nprintf ''\n```\n\n\
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
 ```bash\nwc -c\n```\n";
@@ -352,7 +356,7 @@ fn test_llm_sponge_pipe_streams_to_downstream() {
     let dir = creft_env();
 
     // bash outputs "upstream", sponge (cat) echoes it as prompt, downstream wc -c counts bytes.
-    let skill = "---\nname: sponge-stream\ndescription: sponge streams to downstream\npipe: true\n---\n\n\
+    let skill = "---\nname: sponge-stream\ndescription: sponge streams to downstream\n---\n\n\
 ```bash\necho upstream\n```\n\n\
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
 ```bash\nwc -c\n```\n";
@@ -375,7 +379,7 @@ fn test_llm_sponge_multiple_consecutive() {
     let dir = creft_env();
 
     // bash → llm(cat, "A:{{prev}}") → llm(cat, "B:{{prev}}") → bash(cat)
-    let skill = "---\nname: sponge-chain\ndescription: consecutive sponge stages\npipe: true\n---\n\n\
+    let skill = "---\nname: sponge-chain\ndescription: consecutive sponge stages\n---\n\n\
 ```bash\necho start\n```\n\n\
 ```llm\nprovider: cat\n---\nA:{{prev}}\n```\n\n\
 ```llm\nprovider: cat\n---\nB:{{prev}}\n```\n\n\
@@ -401,7 +405,7 @@ fn test_llm_sponge_multiple_consecutive() {
 fn test_llm_sponge_provider_not_found_in_pipe() {
     let dir = creft_env();
 
-    let skill = "---\nname: sponge-missing\ndescription: pipe with missing provider\npipe: true\n---\n\n\
+    let skill = "---\nname: sponge-missing\ndescription: pipe with missing provider\n---\n\n\
 ```bash\necho hello\n```\n\n\
 ```llm\nprovider: nonexistent-xyz\n---\n{{prev}}\n```\n\n\
 ```bash\ncat\n```\n";
@@ -441,7 +445,7 @@ fn test_llm_sponge_exit_99_in_pipe() {
 
     let provider_path = script_path.to_string_lossy();
     let skill = format!(
-        "---\nname: sponge-exit99\ndescription: sponge exit 99 suppression\npipe: true\n---\n\n\
+        "---\nname: sponge-exit99\ndescription: sponge exit 99 suppression\n---\n\n\
 ```bash\necho data\n```\n\n\
 ```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n\n\
 ```bash\necho should-not-appear\n```\n"
@@ -467,7 +471,7 @@ fn test_llm_sponge_first_block() {
 
     // block 0: llm(cat, {{prev}}) — sponge reads parent stdin as "prev"
     // block 1: bash(cat) — echoes the sponge's output
-    let skill = "---\nname: sponge-first\ndescription: llm as first pipe block\npipe: true\n---\n\n\
+    let skill = "---\nname: sponge-first\ndescription: llm as first pipe block\n---\n\n\
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
 ```bash\ncat\n```\n";
 
@@ -490,7 +494,7 @@ fn test_llm_sponge_first_block() {
 fn test_llm_sponge_last_block() {
     let dir = creft_env();
 
-    let skill = "---\nname: sponge-last\ndescription: llm as last pipe block\npipe: true\n---\n\n\
+    let skill = "---\nname: sponge-last\ndescription: llm as last pipe block\n---\n\n\
 ```bash\necho upstream\n```\n\n\
 ```llm\nprovider: cat\n---\ngot: {{prev}}\n```\n";
 
@@ -513,7 +517,7 @@ fn test_llm_sponge_last_block() {
 fn test_llm_sponge_with_template_args() {
     let dir = creft_env();
 
-    let skill = "---\nname: sponge-args\ndescription: sponge with template args\npipe: true\n\
+    let skill = "---\nname: sponge-args\ndescription: sponge with template args\n\
 args:\n  - name: greeting\n    required: true\n---\n\n\
 ```bash\necho data\n```\n\n\
 ```llm\nprovider: cat\n---\n{{greeting}}: {{prev}}\n```\n";

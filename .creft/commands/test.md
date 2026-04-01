@@ -4,7 +4,6 @@ description: Run tests with markdown output
 tags:
   - dev
   - testing
-pipe: true
 args:
   - name: filter
     description: Filter tests by name or file (e.g. runner, test_pipe)

@@ -4,7 +4,6 @@ description: Lines of code by file
 args:
 - name: file
   description: Specific file to count
-pipe: true
 ---
 
 ```bash
