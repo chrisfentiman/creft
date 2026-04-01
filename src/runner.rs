@@ -296,38 +296,39 @@ fn spawn_block(
     // A minimal package.json is written before running `npm install` so that
     // npm anchors the node_modules directory to this temp dir rather than
     // walking up the directory tree to find an existing package.json.
-    let (node_deps_dir, node_modules_path): (Option<tempfile::TempDir>, Option<std::path::PathBuf>) =
-        if !block.deps.is_empty() && matches!(block.lang.as_str(), "node" | "javascript" | "js")
-        {
-            let dir = tempfile::tempdir().map_err(CreftError::Io)?;
-            // Write a stub package.json so npm installs into this directory.
-            let pkg_json = dir.path().join("package.json");
-            std::fs::write(&pkg_json, r#"{"private":true}"#).map_err(CreftError::Io)?;
-            let status = std::process::Command::new("npm")
-                .arg("install")
-                .args(&block.deps)
-                .current_dir(dir.path())
-                .status()
-                .map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        CreftError::InterpreterNotFound(
-                            "npm (install Node.js). Run 'creft doctor' to check.".to_string(),
-                        )
-                    } else {
-                        CreftError::Io(e)
-                    }
-                })?;
-            if !status.success() {
-                return Err(CreftError::Setup(format!(
-                    "npm install failed for deps: {}",
-                    block.deps.join(", ")
-                )));
-            }
-            let node_modules = dir.path().join("node_modules");
-            (Some(dir), Some(node_modules))
-        } else {
-            (None, None)
-        };
+    let (node_deps_dir, node_modules_path): (
+        Option<tempfile::TempDir>,
+        Option<std::path::PathBuf>,
+    ) = if !block.deps.is_empty() && matches!(block.lang.as_str(), "node" | "javascript" | "js") {
+        let dir = tempfile::tempdir().map_err(CreftError::Io)?;
+        // Write a stub package.json so npm installs into this directory.
+        let pkg_json = dir.path().join("package.json");
+        std::fs::write(&pkg_json, r#"{"private":true}"#).map_err(CreftError::Io)?;
+        let status = std::process::Command::new("npm")
+            .arg("install")
+            .args(&block.deps)
+            .current_dir(dir.path())
+            .status()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    CreftError::InterpreterNotFound(
+                        "npm (install Node.js). Run 'creft doctor' to check.".to_string(),
+                    )
+                } else {
+                    CreftError::Io(e)
+                }
+            })?;
+        if !status.success() {
+            return Err(CreftError::Setup(format!(
+                "npm install failed for deps: {}",
+                block.deps.join(", ")
+            )));
+        }
+        let node_modules = dir.path().join("node_modules");
+        (Some(dir), Some(node_modules))
+    } else {
+        (None, None)
+    };
 
     let mut cmd: std::process::Command = if !block.deps.is_empty() {
         match block.lang.as_str() {
