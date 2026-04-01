@@ -447,6 +447,61 @@ fn test_help_shows_subcommands_when_parent_and_child_exist() {
         .stdout(predicate::str::contains("Run mutation testing"));
 }
 
+// ── exit 99 pipe kill tests ───────────────────────────────────────────────────
+
+/// When a block in a pipe chain exits 99, all subsequent blocks must be killed
+/// immediately. creft must return 0, and no output from killed blocks should
+/// appear. The test asserts the whole run completes well under 2 seconds even
+/// though block 2 would have blocked for 5 seconds if not killed.
+#[test]
+fn test_pipe_exit_99_kills_remaining_blocks() {
+    let dir = creft_env();
+
+    let markdown = concat!(
+        "---\n",
+        "name: pipe-exit-99-kill\n",
+        "description: exit 99 kills remaining blocks\n",
+        "pipe: true\n",
+        "---\n",
+        "\n",
+        "```bash\n",
+        "exit 99\n",
+        "```\n",
+        "\n",
+        "```bash\n",
+        "sleep 5 && echo 'should not appear'\n",
+        "```\n",
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(markdown)
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    let output = creft_with(&dir)
+        .args(["pipe-exit-99-kill"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let elapsed = start.elapsed();
+
+    let stdout_str = String::from_utf8_lossy(&output);
+    assert!(
+        !stdout_str.contains("should not appear"),
+        "block 2 output must not appear after exit 99; got: {:?}",
+        stdout_str
+    );
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must terminate quickly after exit 99 (took {:?})",
+        elapsed
+    );
+}
+
 // ── parent/child coexistence tests ────────────────────────────────────────────
 
 /// When both `test` (with a positional arg) and `test mutants` exist,

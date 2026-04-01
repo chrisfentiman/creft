@@ -692,14 +692,46 @@ fn run_pipe_chain(
         status: std::process::ExitStatus,
     }
 
+    // Wrap each child in Option so we can take() ownership when killing remaining
+    // processes after an early exit 99 is detected mid-wait.
+    let mut children: Vec<Option<(std::process::Child, usize, String)>> =
+        children.into_iter().map(Some).collect();
+
     let mut results: Vec<PipeResult> = Vec::with_capacity(n);
-    for (mut child, block_idx, lang) in children {
+    let mut early_exit = false;
+
+    for i in 0..children.len() {
+        let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
         let status = child.wait().map_err(CreftError::Io)?;
+
+        if exit_code_of(&status) == Some(EARLY_EXIT) {
+            // Kill all children that haven't been waited on yet to avoid zombies.
+            // Errors are ignored: the process may have already exited on its own
+            // (e.g. via EOF/SIGPIPE) by the time we reach it.
+            for remaining in children.iter_mut().skip(i + 1) {
+                if let Some((mut c, _, _)) = remaining.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+            early_exit = true;
+            results.push(PipeResult {
+                block: block_idx,
+                lang,
+                status,
+            });
+            break;
+        }
+
         results.push(PipeResult {
             block: block_idx,
             lang,
             status,
         });
+    }
+
+    if early_exit {
+        return Ok(());
     }
 
     // Check if any block was killed by SIGINT (signal 2) first.
