@@ -692,14 +692,57 @@ fn run_pipe_chain(
         status: std::process::ExitStatus,
     }
 
+    // Wrap each child in Option so we can take() ownership when killing remaining
+    // processes after an early exit 99 is detected mid-wait.
+    let mut children: Vec<Option<(std::process::Child, usize, String)>> =
+        children.into_iter().map(Some).collect();
+
     let mut results: Vec<PipeResult> = Vec::with_capacity(n);
-    for (mut child, block_idx, lang) in children {
+    let mut early_exit = false;
+
+    for i in 0..children.len() {
+        let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
         let status = child.wait().map_err(CreftError::Io)?;
+
+        if exit_code_of(&status) == Some(EARLY_EXIT) {
+            // Kill all processes in the pipe chain's process group so that
+            // grandchildren (e.g. `sleep 5` spawned by bash) are also killed.
+            // A per-process SIGKILL would leave grandchildren running as orphans,
+            // causing creft to block until they exit naturally.
+            #[cfg(unix)]
+            if let Some(pgid) = child_pgid {
+                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                // pgid is valid (obtained from block 0's PID after spawn).
+                // Negative pgid means "all processes in process group pgid".
+                unsafe {
+                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            // Reap all remaining direct children to avoid zombies.
+            // Errors are ignored: processes may have exited on their own.
+            for remaining in children.iter_mut().skip(i + 1) {
+                if let Some((mut c, _, _)) = remaining.take() {
+                    let _ = c.wait();
+                }
+            }
+            early_exit = true;
+            results.push(PipeResult {
+                block: block_idx,
+                lang,
+                status,
+            });
+            break;
+        }
+
         results.push(PipeResult {
             block: block_idx,
             lang,
             status,
         });
+    }
+
+    if early_exit {
+        return Ok(());
     }
 
     // Check if any block was killed by SIGINT (signal 2) first.
