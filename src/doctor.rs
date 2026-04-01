@@ -451,7 +451,7 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
 
     results.push(check_optional_tool("shellcheck", "used for shell linting"));
     results.push(check_optional_tool("uv", "needed for python deps"));
-    results.push(check_optional_tool("npx", "needed for node deps"));
+    results.push(check_optional_tool("npm", "needed for node deps"));
 
     results.push(check_global_dir(ctx));
     results.push(check_local_dir(ctx));
@@ -725,15 +725,15 @@ fn check_block_deps(block: &CodeBlock, _block_idx: usize) -> Vec<CheckResult> {
             });
         }
     } else if matches!(lang, "node" | "js" | "javascript") {
-        if let Some(p) = which_path("npx") {
+        if let Some(p) = which_path("npm") {
             results.push(CheckResult {
-                label: "npx".to_string(),
+                label: "npm".to_string(),
                 status: CheckStatus::Ok,
                 detail: p.to_string_lossy().to_string(),
             });
         } else {
             results.push(CheckResult {
-                label: "npx".to_string(),
+                label: "npm".to_string(),
                 status: CheckStatus::Fail,
                 detail: "not found (needed for node deps)".to_string(),
             });
@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_block_deps_node_missing_npx() {
+    fn test_check_block_deps_node_missing_npm() {
         use crate::model::CodeBlock;
         let block = CodeBlock {
             lang: "node".into(),
@@ -1814,7 +1814,7 @@ mod tests {
         };
         let results = check_block_deps(&block, 1);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].label, "npx");
+        assert_eq!(results[0].label, "npm");
     }
 
     #[test]
