@@ -123,12 +123,15 @@ This is the prompt text that has no --- separator at all.\n```\n";
         .stderr(predicate::str::contains("llm: claude"));
 }
 
-/// A `pipe: true` skill with an llm block falls back to sequential execution.
+/// A `pipe: true` skill with an llm block runs as a true concurrent pipe chain.
+///
+/// The LLM block participates as a sponge stage: it reads all upstream output,
+/// performs template substitution, and relays the provider's stdout downstream
+/// via an OS pipe — no sequential fallback.
 #[test]
-fn test_llm_block_pipe_mode_fallback() {
+fn test_llm_block_pipe_mode_sponge() {
     let dir = creft_env();
 
-    // pipe: true skill with an llm block — should still work (falls back to sequential).
     let skill = "---\nname: llm-pipe\ndescription: pipe skill with llm\npipe: true\n---\n\n\
 ```bash\necho from pipe bash\n```\n\n\
 ```llm\nprovider: cat\n---\npipe input: {{prev}}\n```\n";
@@ -203,10 +206,10 @@ fn test_llm_block_verbose_shows_command() {
         .stderr(predicate::str::contains("prompt:"));
 }
 
-/// A `pipe: true` skill with bash -> llm -> bash chains prev_output to stdin correctly.
+/// A `pipe: true` skill with bash -> llm -> bash chains output through the sponge correctly.
 ///
-/// Regression guard: sequential fallback (triggered by the llm block) must route prev_output
-/// to non-llm block stdin rather than inheriting the parent process's stdin.
+/// The sponge reads bash's output, substitutes `{{prev}}`, and relays the provider's
+/// stdout as stdin to the downstream bash block via an OS pipe.
 #[test]
 fn test_llm_pipe_stdin_routes_prev_output() {
     let dir = creft_env();
@@ -233,11 +236,10 @@ fn test_llm_pipe_stdin_routes_prev_output() {
         .stdout(predicate::str::contains("hello from bash"));
 }
 
-/// Block 0 of a pipe-fallback skill still reads from the parent's stdin.
+/// Block 0 of a pipe skill reads from the parent's stdin regardless of LLM blocks.
 ///
-/// In sequential fallback mode (pipe:true + llm block), block 0 must inherit the
-/// parent's stdin so that upstream data can flow in. Only blocks after position 0
-/// receive prev_output on stdin.
+/// When block 0 is a normal block in a pipe skill, it inherits the parent's stdin.
+/// The sponge (block 1) reads block 0's output and substitutes `{{prev}}`.
 #[test]
 fn test_llm_pipe_block0_inherits_parent_stdin() {
     let dir = creft_env();
@@ -264,10 +266,11 @@ fn test_llm_pipe_block0_inherits_parent_stdin() {
         .stdout(predicate::str::contains("injected data"));
 }
 
-/// Empty prev_output sends EOF to the next block's stdin without hanging.
+/// An empty upstream output sponge sends EOF to the downstream block without hanging.
 ///
-/// When a block produces no output, the following non-llm block must receive
-/// an immediate EOF on stdin rather than blocking indefinitely.
+/// When the upstream block produces no output, the sponge substitutes empty string
+/// for `{{prev}}`, the provider produces empty output, and the downstream block
+/// receives EOF on stdin immediately.
 #[test]
 fn test_llm_pipe_empty_prev_sends_eof() {
     let dir = creft_env();
@@ -338,4 +341,193 @@ fn test_llm_block_exit_99_early_return() {
         .assert()
         .success()
         .stdout(predicate::str::contains("early exit output"));
+}
+
+/// Data flows from bash through an LLM sponge stage to a downstream bash block via true pipe.
+///
+/// Regression guard: the sponge must relay provider output through the os_pipe to the
+/// downstream block — not via env vars or sequential stdin injection.
+#[test]
+fn test_llm_sponge_pipe_streams_to_downstream() {
+    let dir = creft_env();
+
+    // bash outputs "upstream", sponge (cat) echoes it as prompt, downstream wc -c counts bytes.
+    let skill = "---\nname: sponge-stream\ndescription: sponge streams to downstream\npipe: true\n---\n\n\
+```bash\necho upstream\n```\n\n\
+```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
+```bash\nwc -c\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    // wc -c should report a non-zero byte count — data flowed through the sponge.
+    creft_with(&dir).args(["sponge-stream"]).assert().success();
+}
+
+/// Two consecutive LLM sponge stages chain correctly.
+///
+/// Sponge 1 reads bash output and annotates it; sponge 2 reads sponge 1's output.
+#[test]
+fn test_llm_sponge_multiple_consecutive() {
+    let dir = creft_env();
+
+    // bash → llm(cat, "A:{{prev}}") → llm(cat, "B:{{prev}}") → bash(cat)
+    let skill = "---\nname: sponge-chain\ndescription: consecutive sponge stages\npipe: true\n---\n\n\
+```bash\necho start\n```\n\n\
+```llm\nprovider: cat\n---\nA:{{prev}}\n```\n\n\
+```llm\nprovider: cat\n---\nB:{{prev}}\n```\n\n\
+```bash\ncat\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-chain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("B:"))
+        .stdout(predicate::str::contains("A:"))
+        .stdout(predicate::str::contains("start"));
+}
+
+/// A missing LLM provider in a pipe chain produces a non-zero exit and a useful error message.
+#[test]
+fn test_llm_sponge_provider_not_found_in_pipe() {
+    let dir = creft_env();
+
+    let skill = "---\nname: sponge-missing\ndescription: pipe with missing provider\npipe: true\n---\n\n\
+```bash\necho hello\n```\n\n\
+```llm\nprovider: nonexistent-xyz\n---\n{{prev}}\n```\n\n\
+```bash\ncat\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-missing"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nonexistent-xyz"));
+}
+
+/// Exit 99 from an LLM provider in a pipe chain suppresses relay output.
+#[test]
+fn test_llm_sponge_exit_99_in_pipe() {
+    let dir = creft_env();
+
+    let script_dir = tempfile::TempDir::new().unwrap();
+    let script_path = script_dir.path().join("exit99.sh");
+    {
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        f.write_all(b"#!/bin/sh\ncat\nexit 99\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let provider_path = script_path.to_string_lossy();
+    let skill = format!(
+        "---\nname: sponge-exit99\ndescription: sponge exit 99 suppression\npipe: true\n---\n\n\
+```bash\necho data\n```\n\n\
+```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n\n\
+```bash\necho should-not-appear\n```\n"
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill.as_str())
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-exit99"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("should-not-appear").not());
+}
+
+/// When the first block in a pipe chain is an LLM sponge, it reads from parent stdin.
+#[test]
+fn test_llm_sponge_first_block() {
+    let dir = creft_env();
+
+    // block 0: llm(cat, {{prev}}) — sponge reads parent stdin as "prev"
+    // block 1: bash(cat) — echoes the sponge's output
+    let skill = "---\nname: sponge-first\ndescription: llm as first pipe block\npipe: true\n---\n\n\
+```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
+```bash\ncat\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-first"])
+        .write_stdin("hello from parent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from parent"));
+}
+
+/// When the last block in a pipe chain is an LLM sponge, its output feeds the relay thread.
+#[test]
+fn test_llm_sponge_last_block() {
+    let dir = creft_env();
+
+    let skill = "---\nname: sponge-last\ndescription: llm as last pipe block\npipe: true\n---\n\n\
+```bash\necho upstream\n```\n\n\
+```llm\nprovider: cat\n---\ngot: {{prev}}\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-last"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("got:"))
+        .stdout(predicate::str::contains("upstream"));
+}
+
+/// Frontmatter args are available in LLM sponge templates in pipe chains.
+#[test]
+fn test_llm_sponge_with_template_args() {
+    let dir = creft_env();
+
+    let skill = "---\nname: sponge-args\ndescription: sponge with template args\npipe: true\n\
+args:\n  - name: greeting\n    required: true\n---\n\n\
+```bash\necho data\n```\n\n\
+```llm\nprovider: cat\n---\n{{greeting}}: {{prev}}\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-args", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello:"))
+        .stdout(predicate::str::contains("data"));
 }
