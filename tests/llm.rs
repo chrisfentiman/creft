@@ -7,6 +7,7 @@ mod helpers;
 
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
+use std::io::Write;
 
 const LLM_CAT_SKILL: &str = "---\nname: llm-cat\ndescription: llm block with cat provider\n---\n\n\
 ```llm\nprovider: cat\n---\nhello from llm block\n```\n";
@@ -198,4 +199,50 @@ fn test_llm_block_verbose_shows_command() {
         .success()
         .stderr(predicate::str::contains("command: cat"))
         .stderr(predicate::str::contains("prompt:"));
+}
+
+/// An llm block that exits 99 causes creft to return success (early pipeline termination).
+///
+/// Exit code 99 is the conventional "early successful exit" signal. Any block — including
+/// llm blocks — that exits 99 should stop pipeline execution and report success to the caller.
+#[test]
+fn test_llm_block_exit_99_early_return() {
+    let dir = creft_env();
+
+    // Write a script that consumes stdin, prints output, then exits 99.
+    let script_dir = tempfile::TempDir::new().unwrap();
+    let script_path = script_dir.path().join("exit99.sh");
+    {
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        f.write_all(b"#!/bin/sh\ncat\necho \"early exit output\"\nexit 99\n")
+            .unwrap();
+    }
+
+    // Make the script executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let provider_path = script_path.to_string_lossy();
+    let skill = format!(
+        "---\nname: llm-exit99\ndescription: llm block that exits 99\n---\n\n\
+```llm\nprovider: {provider_path}\n---\nprompt text\n```\n"
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill.as_str())
+        .assert()
+        .success();
+
+    // Exit 99 from the llm block means early successful termination — creft must exit 0.
+    creft_with(&dir)
+        .args(["llm-exit99"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("early exit output"));
 }

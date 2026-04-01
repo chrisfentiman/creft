@@ -369,13 +369,11 @@ pub struct CodeBlock {
     pub deps: Vec<String>,
     /// LLM configuration, present only when `lang == "llm"`.
     /// Parsed from the YAML header before `---` in the block content.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub llm_config: Option<LlmConfig>,
     /// When `lang == "llm"` and the YAML header failed to parse,
     /// this holds the parse error message. Used by validation to
     /// emit a diagnostic. `None` for all non-llm blocks and for
     /// llm blocks that parsed successfully.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub llm_parse_error: Option<String>,
 }
 

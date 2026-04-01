@@ -2270,14 +2270,6 @@ mod tests {
         }
     }
 
-    fn cmd_args(cmd: &mut std::process::Command) -> Vec<std::ffi::OsString> {
-        // Collect args from the Command's debug representation is fragile;
-        // instead inspect via format_llm_command which mirrors the logic.
-        // These tests use format_llm_command as a proxy for the command structure.
-        let _ = cmd;
-        vec![]
-    }
-
     // We test build_llm_command via format_llm_command (same logic, string form).
     // Direct Command inspection is not stable across Rust versions.
 
@@ -2369,16 +2361,13 @@ mod tests {
     #[test]
     fn test_build_llm_command_returns_correct_binary_claude() {
         let config = llm_config("claude", "", "");
-        let mut cmd = build_llm_command(&config);
-        // Verify the command can be inspected (it's a valid Command)
-        // We can't easily extract args, but we can verify the binary name via
-        // format_llm_command which mirrors the match exactly.
+        let _cmd = build_llm_command(&config);
+        // Verify the binary name via format_llm_command which mirrors the match exactly.
         let formatted = format_llm_command(&config);
         assert!(
             formatted.starts_with("claude"),
             "claude binary should be first"
         );
-        let _ = cmd_args(&mut cmd); // suppress unused warning
     }
 
     #[test]
