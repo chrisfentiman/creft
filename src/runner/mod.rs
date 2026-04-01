@@ -1,10 +1,19 @@
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
+
+mod blocks;
+mod pipe;
+#[cfg(unix)]
+mod signal;
+mod substitute;
+
+pub(crate) use self::blocks::spawn_block;
+pub(crate) use self::substitute::substitute;
 
 /// Execution context for a single skill invocation.
 ///
@@ -89,64 +98,7 @@ impl RunContext {
 /// A block that exits 99 is treated as a successful early termination of
 /// the pipeline. creft intercepts this code and returns 0 to the caller.
 /// All other non-zero exit codes propagate as errors.
-const EARLY_EXIT: i32 = 99;
-
-static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_-]*)(?:\|([^}]*))?\}\}").unwrap()
-});
-
-/// Returns `true` if the language tag uses a shell interpreter that performs
-/// word splitting and metacharacter expansion on substituted values.
-fn should_shell_escape(lang: &str) -> bool {
-    matches!(lang, "bash" | "sh" | "zsh")
-}
-
-/// Substitute `{{placeholder}}` values in a template string.
-///
-/// Named args from the command definition are matched positionally
-/// to the provided values. Supports `{{name|default}}` syntax.
-///
-/// # Shell escaping
-///
-/// When `lang` is a shell language (`bash`, `sh`, `zsh`), values from the
-/// `args` slice are single-quote escaped via `shell_escape::escape` so that
-/// shell metacharacters (`$()`, backticks, semicolons, etc.) are treated as
-/// literal characters. Author-supplied default values in `{{name|default}}`
-/// syntax are NOT escaped — they are considered intentional shell code.
-///
-/// Non-shell languages (`python`, `node`, etc.) receive raw values.
-///
-/// # Edge cases
-///
-/// - Empty string: produces `''` under escaping. This is the correct shell
-///   representation of an empty argument and makes intent unambiguous.
-/// - `{{prev}}` (previous block output) is in the `args` slice and IS escaped
-///   for shell blocks, since it may contain user-influenced content.
-pub fn substitute(template: &str, args: &[(&str, &str)], lang: &str) -> Result<String, CreftError> {
-    let re = &*PLACEHOLDER_RE;
-    let escape = should_shell_escape(lang);
-
-    let result = re.replace_all(template, |caps: &regex::Captures| {
-        let name = &caps[1];
-        let default_val = caps.get(2).map(|m| m.as_str());
-
-        if let Some((_, val)) = args.iter().find(|(n, _)| *n == name) {
-            if escape {
-                shell_escape::escape((*val).into()).to_string()
-            } else {
-                val.to_string()
-            }
-        } else if let Some(d) = default_val {
-            // Author-controlled default — no escaping regardless of language
-            d.to_string()
-        } else {
-            // No matching arg/flag — leave as literal text.
-            caps[0].to_string()
-        }
-    });
-
-    Ok(result.to_string())
-}
+pub(crate) const EARLY_EXIT: i32 = 99;
 
 /// Bound pairs (name → value) and any passthrough args.
 pub type BindResult = (Vec<(String, String)>, Vec<String>);
@@ -280,7 +232,7 @@ pub fn check_env(cmd: &ParsedCommand) -> Result<(), CreftError> {
 }
 
 /// Map a code block language tag to an interpreter command.
-fn interpreter(lang: &str) -> &str {
+pub(crate) fn interpreter(lang: &str) -> &str {
     match lang {
         "bash" => "bash",
         "sh" => "sh",
@@ -296,7 +248,7 @@ fn interpreter(lang: &str) -> &str {
 }
 
 /// File extension for a language.
-fn extension(lang: &str) -> &str {
+pub(crate) fn extension(lang: &str) -> &str {
     match lang {
         "bash" | "sh" | "zsh" => "sh",
         "python" | "python3" => "py",
@@ -311,7 +263,7 @@ fn extension(lang: &str) -> &str {
 /// Create a temporary script file for a code block.
 ///
 /// Returns the temp file handle (must be kept alive until the child exits).
-fn prepare_block_script(
+pub(crate) fn prepare_block_script(
     block: &CodeBlock,
     expanded_code: &str,
 ) -> Result<tempfile::NamedTempFile, CreftError> {
@@ -329,194 +281,13 @@ fn prepare_block_script(
     Ok(tmp)
 }
 
-/// Spawn a child process for a code block.
-///
-/// `stdin_cfg` and `stdout_cfg` control the stdio configuration.
-/// stderr is always inherited.
-///
-/// `process_group`: Unix-only parameter. When `Some(pgid)`, the child is
-/// placed into the specified process group via `setpgid(0, pgid)` in a
-/// `pre_exec` hook. Pass `Some(0)` for the first pipe-chain child (creates
-/// a new group using the child's own PID). Pass `Some(first_child_pid)` for
-/// subsequent children (joins the first child's group). Pass `None` for
-/// sequential (non-pipe) execution — no process group changes.
-///
-/// `ignore_sigint`: Unix-only. When `true`, the child process will have
-/// SIGINT set to `SIG_IGN` before exec. Use for non-first blocks in a pipe
-/// chain: only the first block receives Ctrl+C; downstream blocks learn
-/// the pipe broke via EOF/SIGPIPE and exit cleanly. `SIG_IGN` is inherited
-/// across exec, so the spawned interpreter (e.g. Python) will also ignore it.
-fn spawn_block(
-    block: &CodeBlock,
-    script_path: &Path,
-    ctx: &RunContext,
-    stdin_cfg: std::process::Stdio,
-    stdout_cfg: std::process::Stdio,
-    #[cfg(unix)] process_group: Option<u32>,
-    #[cfg(unix)] ignore_sigint: bool,
-) -> Result<(std::process::Child, Option<tempfile::TempDir>), CreftError> {
-    let env_pairs = ctx.env_pairs();
-    let cwd = ctx.cwd();
-    // Stdio is not Copy, so we apply stdin/stdout directly rather than
-    // using a reusable closure (which would require Fn, not FnOnce).
-    let apply_common = |cmd: &mut std::process::Command| {
-        cmd.current_dir(cwd);
-        for (k, v) in &env_pairs {
-            cmd.env(k, v);
-        }
-        cmd.stderr(std::process::Stdio::inherit());
-    };
-
-    // For node blocks with deps, install packages into a temp directory first
-    // so that require() / import() can resolve them via NODE_PATH. The tempdir
-    // must remain alive until the child exits; it is returned to the caller.
-    //
-    // A minimal package.json is written before running `npm install` so that
-    // npm anchors the node_modules directory to this temp dir rather than
-    // walking up the directory tree to find an existing package.json.
-    let (node_deps_dir, node_modules_path): (
-        Option<tempfile::TempDir>,
-        Option<std::path::PathBuf>,
-    ) = if !block.deps.is_empty() && matches!(block.lang.as_str(), "node" | "javascript" | "js") {
-        let dir = tempfile::tempdir().map_err(CreftError::Io)?;
-        // Write a stub package.json so npm installs into this directory.
-        let pkg_json = dir.path().join("package.json");
-        std::fs::write(&pkg_json, r#"{"private":true}"#).map_err(CreftError::Io)?;
-        let status = std::process::Command::new("npm")
-            .arg("install")
-            .args(&block.deps)
-            .current_dir(dir.path())
-            .status()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    CreftError::InterpreterNotFound(
-                        "npm (install Node.js). Run 'creft doctor' to check.".to_string(),
-                    )
-                } else {
-                    CreftError::Io(e)
-                }
-            })?;
-        if !status.success() {
-            return Err(CreftError::Setup(format!(
-                "npm install failed for deps: {}",
-                block.deps.join(", ")
-            )));
-        }
-        let node_modules = dir.path().join("node_modules");
-        (Some(dir), Some(node_modules))
-    } else {
-        (None, None)
-    };
-
-    let mut cmd: std::process::Command = if !block.deps.is_empty() {
-        match block.lang.as_str() {
-            "python" | "python3" => {
-                let mut c = std::process::Command::new("uv");
-                c.arg("run");
-                for dep in &block.deps {
-                    c.arg("--with").arg(dep);
-                }
-                c.arg("--").arg("python3").arg(script_path);
-                c
-            }
-            "node" | "javascript" | "js" => {
-                let mut c = std::process::Command::new("node");
-                if let Some(ref node_modules) = node_modules_path {
-                    c.env("NODE_PATH", node_modules);
-                }
-                c.arg(script_path);
-                c
-            }
-            "bash" | "sh" | "zsh" => {
-                for dep in &block.deps {
-                    if which(dep).is_none() {
-                        eprintln!("warning: '{}' not found on PATH", dep);
-                    }
-                }
-                let interp = interpreter(&block.lang);
-                let mut c = std::process::Command::new(interp);
-                c.arg(script_path);
-                c
-            }
-            _ => {
-                let interp = interpreter(&block.lang);
-                let mut c = std::process::Command::new(interp);
-                c.arg(script_path);
-                c
-            }
-        }
-    } else {
-        let interp = interpreter(&block.lang);
-        let parts: Vec<&str> = interp.split_whitespace().collect();
-        let mut c = std::process::Command::new(parts[0]);
-        for part in &parts[1..] {
-            c.arg(part);
-        }
-        c.arg(script_path);
-        c
-    };
-
-    apply_common(&mut cmd);
-    cmd.stdin(stdin_cfg);
-    cmd.stdout(stdout_cfg);
-
-    // Both operations must happen between fork() and exec() — exactly when
-    // pre_exec() runs. setpgid(2) and signal(2) are both async-signal-safe.
-    #[cfg(unix)]
-    {
-        let need_pre_exec = process_group.is_some() || ignore_sigint;
-        if need_pre_exec {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: Both setpgid(0, pgid) and signal(SIGINT, SIG_IGN) are
-            // async-signal-safe (POSIX-required for use in the fork-exec window).
-            // No Rust allocations or mutexes are touched. Captured values
-            // (pgid via Option<u32>, ignore_sigint via bool) are Copy.
-            unsafe {
-                cmd.pre_exec(move || {
-                    if let Some(pgid) = process_group {
-                        // pgid=0: use child's own PID as the new process group ID.
-                        // pgid=N: join existing process group N.
-                        if libc::setpgid(0, pgid as libc::pid_t) == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                    if ignore_sigint {
-                        // SIG_IGN is inherited across exec(2). This means the
-                        // spawned interpreter (e.g. Python) will also ignore
-                        // SIGINT, preventing spurious tracebacks when the pipe
-                        // head dies from Ctrl+C and EOF propagates downstream.
-                        libc::signal(libc::SIGINT, libc::SIG_IGN);
-                    }
-                    Ok(())
-                });
-            }
-        }
-    }
-
-    // Build a descriptive interpreter name for error messages.
-    // For deps-based blocks, name the package manager (uv/npm) since that
-    // is what actually needs to be on PATH.
-    let interp_name = if !block.deps.is_empty() {
-        match block.lang.as_str() {
-            "python" | "python3" => {
-                "uv (install with: curl -LsSf https://astral.sh/uv/install.sh | sh)".to_string()
-            }
-            "node" | "javascript" | "js" => "npm (install Node.js)".to_string(),
-            _ => interpreter(&block.lang).to_string(),
-        }
-    } else {
-        interpreter(&block.lang).to_string()
-    };
-
-    let child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            CreftError::InterpreterNotFound(format!("{interp_name}. Run 'creft doctor' to check."))
-        } else {
-            // E2BIG (large env) and other OS errors get actionable messages.
-            crate::error::enrich_io_error(e, "environment")
-        }
-    })?;
-    Ok((child, node_deps_dir))
+/// Simple which(1) equivalent.
+pub(crate) fn which(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|p| p.join(name))
+            .find(|p| p.exists())
+    })
 }
 
 /// Return the plain exit code for a process status, or `None` if the process
@@ -524,7 +295,7 @@ fn spawn_block(
 ///
 /// On Unix this corresponds to `ExitStatusExt::code()`: `Some(n)` for a
 /// voluntary exit, `None` for a signal kill.
-fn exit_code_of(status: &std::process::ExitStatus) -> Option<i32> {
+pub(crate) fn exit_code_of(status: &std::process::ExitStatus) -> Option<i32> {
     status.code()
 }
 
@@ -533,7 +304,11 @@ fn exit_code_of(status: &std::process::ExitStatus) -> Option<i32> {
 /// On Unix, if the process was killed by a signal (`ExitStatus::code()` is
 /// `None`), returns `ExecutionSignaled` with the signal number. Otherwise
 /// returns `ExecutionFailed` with the exit code.
-fn make_execution_error(block: usize, lang: &str, status: &std::process::ExitStatus) -> CreftError {
+pub(crate) fn make_execution_error(
+    block: usize,
+    lang: &str,
+    status: &std::process::ExitStatus,
+) -> CreftError {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -552,811 +327,58 @@ fn make_execution_error(block: usize, lang: &str, status: &std::process::ExitSta
     }
 }
 
-/// Atomic storage for the child process group ID, used by the SIGINT
-/// forwarding handler. Zero means "no active pipe chain".
-#[cfg(unix)]
-static PIPE_CHILD_PGID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Signal handler that forwards SIGINT to the child process group.
+/// Format the command that `build_llm_command` would produce as a display string.
 ///
-/// # Safety
-///
-/// Called by the OS as a signal handler; must be async-signal-safe.
-/// Only async-signal-safe operations are performed:
-/// - `AtomicU32::load` (no locks, no allocation)
-/// - `libc::kill` (listed as async-signal-safe in POSIX)
-#[cfg(unix)]
-extern "C" fn sigint_forward_handler(_sig: libc::c_int) {
-    let pgid = PIPE_CHILD_PGID.load(std::sync::atomic::Ordering::SeqCst);
-    if pgid != 0 {
-        // SAFETY: kill(-pgid, SIGINT) is async-signal-safe per POSIX.
-        // pgid is non-zero (checked above). Negative pgid means "process group".
-        unsafe {
-            libc::kill(-(pgid as libc::pid_t), libc::SIGINT);
-        }
-    }
-}
-
-/// RAII guard that manages SIGINT handling during pipe chain execution.
-///
-/// Installs a signal handler that forwards SIGINT to the child process
-/// group via `kill(-pgid, SIGINT)`. The original SIGINT disposition is
-/// restored on drop.
-///
-/// Children are in their own process group (set up by `spawn_block`).
-/// creft stays in the shell's process group and never transfers terminal
-/// foreground ownership. This avoids races with shell job control (zsh
-/// in particular) that cause SIGTTOU suspension.
-#[cfg(unix)]
-struct PipeSignalGuard {
-    original_handler: libc::sighandler_t,
-}
-
-#[cfg(unix)]
-impl PipeSignalGuard {
-    fn new(child_pgid: u32) -> Self {
-        // Store the child pgid for the forwarding handler.
-        PIPE_CHILD_PGID.store(child_pgid, std::sync::atomic::Ordering::SeqCst);
-
-        // Install the forwarding handler, saving the previous disposition for
-        // restoration in Drop. creft ignores SIGINT while waiting for children;
-        // the handler forwards any SIGINT to the child process group instead.
-        //
-        // SAFETY: sigint_forward_handler is an extern "C" fn and is
-        // async-signal-safe (only calls atomic load and kill). Casting to
-        // sighandler_t is the standard way to install a signal handler via
-        // libc::signal.
-        let original_handler = unsafe {
-            libc::signal(
-                libc::SIGINT,
-                sigint_forward_handler as *const () as libc::sighandler_t,
-            )
-        };
-
-        Self { original_handler }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for PipeSignalGuard {
-    fn drop(&mut self) {
-        // SAFETY: libc::signal with the previously-saved handler value is
-        // the standard way to restore signal disposition.
-        unsafe {
-            libc::signal(libc::SIGINT, self.original_handler);
-        }
-        // Clear the atomic so a stale handler (if somehow called after drop)
-        // does not forward to a dead process group.
-        PIPE_CHILD_PGID.store(0, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// Result from a single reaper thread (Unix pipe mode).
-#[cfg(unix)]
-struct ReaperResult {
-    block_idx: usize,
-    lang: String,
-    status: Result<std::process::ExitStatus, std::io::Error>,
-}
-
-/// A stdout handle from a pipe chain stage.
-///
-/// Normal blocks produce a `ChildStdout`; sponge (LLM) stages produce a
-/// `PipeReader` from an `os_pipe::pipe()` pair. Both can be converted to
-/// `Stdio` for the next block's stdin, and both implement `Read` for the
-/// relay thread.
-enum PipeStdout {
-    Child(std::process::ChildStdout),
-    Pipe(os_pipe::PipeReader),
-}
-
-impl PipeStdout {
-    fn into_stdio(self) -> std::process::Stdio {
-        match self {
-            PipeStdout::Child(c) => std::process::Stdio::from(c),
-            PipeStdout::Pipe(p) => std::process::Stdio::from(p),
-        }
-    }
-}
-
-impl std::io::Read for PipeStdout {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            PipeStdout::Child(c) => c.read(buf),
-            PipeStdout::Pipe(p) => p.read(buf),
-        }
-    }
-}
-
-/// Result from a completed pipe block.
-struct PipeResult {
-    block: usize,
-    lang: String,
-    status: std::process::ExitStatus,
-}
-
-/// Wait for all children in a Unix pipe chain using concurrent reaper threads
-/// and a buffered stdout relay.
-///
-/// Each child is moved into its own reaper thread that calls `child.wait()` and
-/// sends the result through an mpsc channel. Results arrive in exit order, not
-/// spawn order. The last block's stdout is relayed into a buffer by a dedicated
-/// relay thread; output is only flushed to the terminal after all reapers have
-/// reported and no exit 99 was detected.
-///
-/// The `tx`/`rx` channel pair is created by the caller (`run_pipe_chain`) so
-/// that sponge threads can also send results through the same channel before
-/// this function is called. The caller must drop its own `tx` clone before
-/// calling this function so the channel closes when all reaper and sponge
-/// threads finish.
-///
-/// This design guarantees zero leakage: if any block exits 99, the relay buffer
-/// is discarded without ever writing to the terminal.
-///
-/// Note: side effects that occur unconditionally at block startup (before stdin
-/// is read) cannot be suppressed by exit 99, because all blocks are spawned
-/// concurrently before any are waited on. This is inherent to pipe architecture
-/// and applies equally to shell pipes (`false | touch /tmp/foo` creates the
-/// file despite `false` exiting 1).
-#[cfg(unix)]
-fn wait_pipe_children_unix(
-    children: Vec<(std::process::Child, usize, String)>,
-    last_stdout: PipeStdout,
-    child_pgid: Option<u32>,
-    tx: std::sync::mpsc::Sender<ReaperResult>,
-    rx: std::sync::mpsc::Receiver<ReaperResult>,
-) -> Result<(Vec<PipeResult>, bool), CreftError> {
-    use std::io::Read as _;
-
-    // Spawn relay thread: reads the last block's piped stdout into a buffer.
-    // Never writes to the terminal — the main thread decides flush vs. discard.
-    let relay_handle = std::thread::Builder::new()
-        .name("creft-relay".to_owned())
-        .spawn(move || {
-            let mut reader = last_stdout;
-            let mut buf = [0u8; 8192];
-            let mut output: Vec<u8> = Vec::new();
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => output.extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-            output
-        })
-        .expect("failed to spawn relay thread");
-
-    // Spawn one reaper thread per child. Each thread owns the Child and calls wait().
-    for (i, (child, block_idx, lang)) in children.into_iter().enumerate() {
-        let tx = tx.clone();
-        std::thread::Builder::new()
-            .name(format!("creft-reaper-{i}"))
-            .spawn(move || {
-                // child.wait() takes &mut self, so we need mut child.
-                let mut child = child;
-                let status = child.wait();
-                // Ignore send error: main thread dropped rx only if it panicked.
-                let _ = tx.send(ReaperResult {
-                    block_idx,
-                    lang,
-                    status,
-                });
-            })
-            .expect("failed to spawn reaper thread");
-    }
-    // Drop the tx clone passed in from run_pipe_chain. Combined with sponge threads
-    // dropping their clones and reaper threads dropping theirs, rx closes when all done.
-    drop(tx);
-
-    let mut results: Vec<PipeResult> = Vec::new();
-    let mut early_exit = false;
-
-    while let Ok(reaper_result) = rx.recv() {
-        let status = reaper_result.status.map_err(CreftError::Io)?;
-
-        if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
-            early_exit = true;
-            // Kill all processes in the pipe group so grandchildren are also killed.
-            if let Some(pgid) = child_pgid {
-                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                // pgid is valid (obtained from block 0's PID after spawn).
-                // Negative pgid means "all processes in process group pgid".
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                }
-            }
-        }
-
-        results.push(PipeResult {
-            block: reaper_result.block_idx,
-            lang: reaper_result.lang,
-            status,
-        });
-    }
-
-    // All reapers have exited. Join the relay thread to retrieve the buffered output.
-    // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
-    let relay_buffer = relay_handle.join().unwrap_or_default();
-
-    if !early_exit {
-        use std::io::Write as _;
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        // Ignore write errors: creft's own stdout may be a broken pipe.
-        let _ = lock.write_all(&relay_buffer);
-    }
-    // If early_exit is true, relay_buffer drops here without writing. Zero leakage.
-
-    // Sort by spawn order before post-loop checks; channel delivers in exit order.
-    results.sort_by_key(|r| r.block);
-
-    Ok((results, early_exit))
-}
-
-/// Wait for all children in a non-Unix pipe chain using sequential wait calls.
-///
-/// Fallback for platforms without process groups or kill(-pgid). Has the same
-/// sequential-wait race window as the original implementation.
-#[cfg(not(unix))]
-fn wait_pipe_children_fallback(
-    children: Vec<Option<(std::process::Child, usize, String)>>,
-) -> Result<(Vec<PipeResult>, bool), CreftError> {
-    let mut children = children;
-    let n = children.len();
-    let mut results: Vec<PipeResult> = Vec::with_capacity(n);
-    let mut early_exit = false;
-
-    for i in 0..children.len() {
-        let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
-        let status = child.wait().map_err(CreftError::Io)?;
-
-        if exit_code_of(&status) == Some(EARLY_EXIT) {
-            for remaining in children.iter_mut().skip(i + 1) {
-                if let Some((mut c, _, _)) = remaining.take() {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                }
-            }
-            early_exit = true;
-            results.push(PipeResult {
-                block: block_idx,
-                lang,
-                status,
-            });
-            break;
-        }
-
-        results.push(PipeResult {
-            block: block_idx,
-            lang,
-            status,
-        });
-    }
-
-    Ok((results, early_exit))
-}
-
-/// Sponge stage for an LLM block in a pipe chain.
-///
-/// Reads all upstream output (the "sponge"), performs template substitution with
-/// the buffered content as `{{prev}}`, spawns the LLM provider, and relays the
-/// provider's output to `pipe_writer`. Sends the provider's exit status through
-/// `reaper_tx` for the main thread to collect.
-///
-/// Runs on a dedicated thread (`creft-sponge-N`), owning the entire LLM
-/// provider lifecycle. From the pipe chain's perspective, the sponge is just
-/// another stage that produces output on a pipe fd.
-///
-/// When `upstream` is `None` (block 0), the sponge reads from the parent's
-/// stdin. When block 0 is a sponge, `pgid_tx` carries the provider's PID
-/// back to `run_pipe_chain` so subsequent non-sponge blocks can join the
-/// process group.
-///
-/// No `pre_exec` hooks are used. Sponge spawns use `posix_spawn()` (no
-/// `fork()`) to avoid EPERM failures from non-main threads in CI
-/// environments. The provider is not placed in the pipe chain's process
-/// group and does not have SIGINT ignored. The sponge thread manages the
-/// provider's lifecycle directly via pipe ownership and `child.wait()`.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn sponge_thread(
-    upstream: Option<PipeStdout>,
-    pipe_writer: os_pipe::PipeWriter,
-    prompt_template: String,
-    config: crate::model::LlmConfig,
-    bound_refs: Vec<(String, String)>,
-    ctx: RunContext,
-    block_idx: usize,
-    pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
-    reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-) {
-    use std::io::{Read as _, Write as _};
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let buffered = match upstream {
-            Some(mut reader) => {
-                let mut buf = Vec::new();
-                // Ignore read errors — if upstream crashed, reaper catches its exit status.
-                let _ = reader.read_to_end(&mut buf);
-                String::from_utf8_lossy(&buf).to_string()
-            }
-            None => {
-                // Block 0: read from parent stdin.
-                let mut buf = Vec::new();
-                let _ = std::io::stdin().lock().read_to_end(&mut buf);
-                String::from_utf8_lossy(&buf).to_string()
-            }
-        };
-        let trimmed = buffered.trim_end().to_string();
-
-        // Template substitution with buffered content as {{prev}}.
-        let ref_pairs: Vec<(&str, &str)> = bound_refs
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .chain(std::iter::once(("prev", trimmed.as_str())))
-            .collect();
-        let prompt = match substitute(&prompt_template, &ref_pairs, "llm") {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
-                drop(pipe_writer);
-                if let Some(tx) = pgid_tx {
-                    let _ = tx.send(Err(()));
-                }
-                let _ = reaper_tx.send(ReaperResult {
-                    block_idx,
-                    lang: "llm".to_string(),
-                    status: Err(std::io::Error::other(e.to_string())),
-                });
-                return;
-            }
-        };
-
-        let provider = if config.provider.is_empty() {
-            "claude"
-        } else {
-            config.provider.as_str()
-        };
-
-        let mut cmd = build_llm_command(&config);
-        cmd.current_dir(ctx.cwd());
-        for (k, v) in ctx.env_pairs() {
-            cmd.env(k, v);
-        }
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::inherit());
-
-        // No pre_exec hooks on sponge spawns. pre_exec forces Rust's Command
-        // to use fork()+exec() instead of posix_spawn(). fork() from non-main
-        // threads fails with EPERM in CI environments (GitHub Actions macOS
-        // launchd sessions, Ubuntu containers). Without pre_exec, posix_spawn()
-        // is used, which works reliably from any thread.
-        //
-        // Consequences of removing pre_exec:
-        // - No setpgid: provider is not in the pipe chain's process group.
-        //   exit 99 cleanup via killpg won't reach it, but the provider dies
-        //   naturally when pipes close. The sponge thread owns the Child handle.
-        // - No SIG_IGN: provider receives SIGINT on Ctrl+C. The sponge thread
-        //   sees stdout close, stops relaying, and reports the exit status.
-        //   The only user-visible effect is the provider may print an error to
-        //   stderr before dying.
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                    format!(
-                        "'{}' not found on PATH. Install the provider CLI.",
-                        provider
-                    )
-                } else {
-                    e.to_string()
-                };
-                eprintln!("error: sponge block {}: {}", block_idx + 1, msg);
-                drop(pipe_writer);
-                if let Some(tx) = pgid_tx {
-                    let _ = tx.send(Err(()));
-                }
-                let _ = reaper_tx.send(ReaperResult {
-                    block_idx,
-                    lang: "llm".to_string(),
-                    status: Err(e),
-                });
-                return;
-            }
-        };
-
-        // If this sponge created the process group, report the provider's PID as pgid.
-        if let Some(tx) = pgid_tx {
-            let _ = tx.send(Ok(child.id()));
-        }
-
-        if let Some(mut stdin) = child.stdin.take() {
-            // Ignore BrokenPipe — provider's exit status is the authoritative error signal.
-            let _ = stdin.write_all(prompt.as_bytes());
-        }
-
-        let mut pipe_writer = pipe_writer;
-        if let Some(mut stdout) = child.stdout.take() {
-            let mut buf = [0u8; 8192];
-            loop {
-                match stdout.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        // During pipe execution PipeSignalGuard overwrites the signal-hook
-                        // handler, so this check fires primarily for single-block LLM runs
-                        // and between sequential blocks. It will become the primary
-                        // cancellation path when PipeSignalGuard is replaced in a future phase.
-                        if ctx.is_cancelled() {
-                            break;
-                        }
-                        if pipe_writer.write_all(&buf[..n]).is_err() {
-                            // Downstream closed its stdin early — stop relaying.
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-        }
-        // Drop pipe_writer to signal EOF to the downstream block.
-        drop(pipe_writer);
-
-        let status = child.wait();
-        let _ = reaper_tx.send(ReaperResult {
-            block_idx,
-            lang: "llm".to_string(),
-            status,
-        });
-    }));
-
-    if result.is_err() {
-        // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
-        let _ = reaper_tx.send(ReaperResult {
-            block_idx,
-            lang: "llm".to_string(),
-            status: Err(std::io::Error::other("sponge thread panicked")),
-        });
-    }
-}
-
-/// Execute all blocks in a multi-block command concurrently with OS-level pipe
-/// connections between stdout/stdin.
-///
-/// All blocks are spawned before any are waited on. Block N's stdout is
-/// connected to block N+1's stdin via Stdio::from(PipeStdout). On Unix, the
-/// last block's stdout is buffered by a relay thread; output is flushed to the
-/// terminal only after confirming no block exited 99.
-///
-/// LLM blocks participate as sponge stages: each sponge thread reads all
-/// upstream output, performs template substitution, spawns the LLM provider,
-/// and relays the provider's stdout to the next block via an `os_pipe` pair.
-///
-/// Returns Ok(()) if the last block exits successfully. Earlier blocks dying
-/// from SIGPIPE when the downstream consumer exits early is normal pipeline
-/// behavior and is not reported as an error unless the last block also fails.
-fn run_pipe_chain(
-    cmd: &ParsedCommand,
-    bound_refs: &[(&str, &str)],
-    ctx: &RunContext,
-) -> Result<(), CreftError> {
-    let n = cmd.blocks.len();
-
-    // Temp files for non-LLM blocks. LLM blocks do not use script files —
-    // the prompt is written directly to the provider's stdin by the sponge thread.
-    // Use Option<NamedTempFile> so the index aligns with block indices.
-    let mut temp_files: Vec<Option<tempfile::NamedTempFile>> = Vec::with_capacity(n);
-    for block in &cmd.blocks {
-        if block.lang == "llm" {
-            temp_files.push(None);
-        } else {
-            // In pipe mode, no "prev" template arg (output is on stdin).
-            let expanded = substitute(&block.code, bound_refs, &block.lang)?;
-            let tmp = prepare_block_script(block, &expanded)?;
-            temp_files.push(Some(tmp));
-        }
-    }
-
-    // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
-    let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
-    let mut children: Vec<(std::process::Child, usize, String)> = Vec::with_capacity(n);
-    let mut prev_stdout: Option<PipeStdout> = None;
-    // PID of the first child, used as the process group ID for all pipe children.
-    #[cfg(unix)]
-    let mut child_pgid: Option<u32> = None;
-    // Last block's stdout handle (Unix only) — piped for buffered relay.
-    #[cfg(unix)]
-    let mut last_child_stdout: Option<PipeStdout> = None;
-
-    // Reaper channel created here so sponge threads can also send results.
-    // The main thread drops its tx clone before calling wait_pipe_children_unix.
-    #[cfg(unix)]
-    let (reaper_tx, reaper_rx) = std::sync::mpsc::channel::<ReaperResult>();
-
-    // Join handles for sponge threads — joined after all reaper results collected.
-    #[cfg(unix)]
-    let mut sponge_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
-
-    for (i, block) in cmd.blocks.iter().enumerate() {
-        let is_last = i == n - 1;
-
-        #[cfg(unix)]
-        if block.lang == "llm" {
-            let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(CreftError::Io)?;
-
-            let upstream = prev_stdout.take();
-            let is_pgid_creator = i == 0;
-
-            // When block 0 is a sponge, synchronize pgid via a channel so
-            // subsequent blocks can join the correct process group.
-            type PgidChannel = (
-                std::sync::mpsc::SyncSender<Result<u32, ()>>,
-                std::sync::mpsc::Receiver<Result<u32, ()>>,
-            );
-            let pgid_channel: Option<PgidChannel> = if is_pgid_creator {
-                Some(std::sync::mpsc::sync_channel(1))
-            } else {
-                None
-            };
-            let pgid_tx = pgid_channel.as_ref().map(|(tx, _)| tx.clone());
-
-            let llm_config = block
-                .llm_config
-                .clone()
-                .expect("llm block without llm_config; validation must gate this");
-            let owned_bound_refs: Vec<(String, String)> = bound_refs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            let ctx_clone = ctx.clone();
-            let reaper_tx_clone = reaper_tx.clone();
-            let prompt_template = block.code.clone();
-
-            let handle = std::thread::Builder::new()
-                .name(format!("creft-sponge-{i}"))
-                .spawn(move || {
-                    sponge_thread(
-                        upstream,
-                        pipe_writer,
-                        prompt_template,
-                        llm_config,
-                        owned_bound_refs,
-                        ctx_clone,
-                        i,
-                        pgid_tx,
-                        reaper_tx_clone,
-                    );
-                })
-                .expect("failed to spawn sponge thread");
-            sponge_handles.push(handle);
-
-            // If block 0 is a sponge, wait for the provider to spawn before
-            // continuing. The sponge's provider PID is not used as the process
-            // group ID — posix_spawn() is used (no pre_exec setpgid), so the
-            // provider is not a pgid leader. The first non-sponge block creates
-            // the process group instead. Provider failure is handled by the
-            // reaper channel — continue regardless.
-            if is_pgid_creator && let Some((_, pgid_rx)) = pgid_channel {
-                let _ = pgid_rx.recv();
-            }
-
-            node_deps_dirs.push(None);
-
-            // The pipe_reader is the "stdout" of this sponge stage.
-            if !is_last {
-                prev_stdout = Some(PipeStdout::Pipe(pipe_reader));
-            } else {
-                last_child_stdout = Some(PipeStdout::Pipe(pipe_reader));
-            }
-            continue;
-        }
-
-        let script_path = temp_files[i]
-            .as_ref()
-            .expect("non-llm block must have temp file")
-            .path();
-
-        let stdin_cfg = match prev_stdout.take() {
-            // Block 0: inherit parent stdin (or /dev/null if none).
-            None => std::process::Stdio::inherit(),
-            // Intermediate + last blocks: fd from previous stage's stdout.
-            Some(ps) => ps.into_stdio(),
-        };
-
-        // On Unix, all blocks use Stdio::piped(): intermediate blocks feed the
-        // next block's stdin, the last block's stdout goes to the relay thread.
-        // On non-Unix, last block inherits stdout (v1 behavior).
-        #[cfg(unix)]
-        let stdout_cfg = std::process::Stdio::piped();
-        #[cfg(not(unix))]
-        let stdout_cfg = if is_last {
-            std::process::Stdio::inherit()
-        } else {
-            std::process::Stdio::piped()
-        };
-
-        // Some(0) → first spawned block creates its own process group; Some(pgid) → join it.
-        // child_pgid is None when no non-sponge block has been spawned yet (including when
-        // block 0 is a sponge — the sponge's provider is not a pgid leader).
-        #[cfg(unix)]
-        let pg = if child_pgid.is_none() {
-            Some(0u32)
-        } else {
-            child_pgid
-        };
-
-        // Non-first blocks ignore SIGINT so only the pipe head receives Ctrl+C.
-        // When the head dies, downstream blocks get EOF/SIGPIPE and exit cleanly
-        // without printing raw language-level tracebacks (e.g. Python KeyboardInterrupt).
-        #[cfg(unix)]
-        let sigint_ignored = i > 0;
-
-        let (mut child, node_deps_dir) = spawn_block(
-            block,
-            script_path,
-            ctx,
-            stdin_cfg,
-            stdout_cfg,
-            #[cfg(unix)]
-            pg,
-            #[cfg(unix)]
-            sigint_ignored,
-        )
-        .inspect_err(|_| {
-            #[cfg(unix)]
-            if let Some(pgid) = child_pgid {
-                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                // pgid is valid (we got it from child.id() which is always non-zero).
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                }
-            }
-            drop(children.drain(..));
-            drop(node_deps_dirs.drain(..));
-        })?;
-        node_deps_dirs.push(node_deps_dir);
-
-        // After spawning the first non-sponge block, record its PID as the
-        // process group ID. setpgid(0, 0) in pre_exec makes its PID its own PGID.
-        #[cfg(unix)]
-        if child_pgid.is_none() {
-            child_pgid = Some(child.id());
-        }
-
-        // For intermediate blocks: pipe stdout feeds the next block's stdin.
-        // For the last block on Unix: take() its stdout for the relay thread.
-        // For the last block on non-Unix: stdout is already inherited.
-        if !is_last {
-            let stdout = child.stdout.take();
-            if stdout.is_none() {
-                // Stdio::piped() must always yield a ChildStdout — this path is unreachable
-                // under normal conditions, but guard against it to avoid a silent hang.
-                #[cfg(unix)]
-                if let Some(pgid) = child_pgid {
-                    // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                    // pgid is valid (we got it from child.id() which is always non-zero).
-                    unsafe {
-                        libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                    }
-                }
-                drop(children.drain(..));
-                return Err(CreftError::Setup(format!(
-                    "internal: failed to capture stdout for block {} ({})",
-                    i, block.lang
-                )));
-            }
-            prev_stdout = stdout.map(PipeStdout::Child);
-        } else {
-            // Last block: extract its stdout for the relay thread (Unix only).
-            // Must be done before the child is moved into the reaper thread.
-            #[cfg(unix)]
-            {
-                last_child_stdout = child.stdout.take().map(PipeStdout::Child);
-            }
-        }
-
-        children.push((child, i, block.lang.clone()));
-    }
-
-    // Install SIGINT handler for the pipe chain duration (Unix only).
-    // The guard sets up SIGINT forwarding to the child process group and
-    // restores the original handler when dropped (RAII).
-    //
-    // Note: PipeSignalGuard uses libc::signal(), which overwrites signal-hook's
-    // sigaction-based handler. The cancel token is therefore NOT set by SIGINT
-    // during pipe execution. On drop, the guard restores signal-hook's handler
-    // so the token is set again for any SIGINT received after the pipe chain exits.
-    #[cfg(unix)]
-    let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
-
-    // Dispatch to platform-specific wait implementation.
-    #[cfg(unix)]
-    let (results, early_exit) = {
-        let last_stdout = last_child_stdout.ok_or_else(|| {
-            CreftError::Setup("internal: failed to capture last block stdout".to_owned())
-        })?;
-        // Drop the main-thread tx clone so rx closes when all senders (sponge + reaper) drop.
-        let tx = reaper_tx;
-        let rx = reaper_rx;
-        let outcome = wait_pipe_children_unix(children, last_stdout, child_pgid, tx, rx)?;
-        // Join sponge threads — they finished before sending their reaper results.
-        for handle in sponge_handles {
-            let _ = handle.join();
-        }
-        outcome
+/// Used by dry-run and verbose output.
+fn format_llm_command(config: &LlmConfig) -> String {
+    let provider = if config.provider.is_empty() {
+        "claude"
+    } else {
+        &config.provider
     };
 
-    #[cfg(not(unix))]
-    let (results, early_exit) = {
-        let children_opt: Vec<Option<(std::process::Child, usize, String)>> =
-            children.into_iter().map(Some).collect();
-        wait_pipe_children_fallback(children_opt)?
-    };
+    let mut parts: Vec<String> = vec![provider.to_string()];
 
-    if early_exit {
-        return Ok(());
-    }
-
-    // Check if any block was killed by SIGINT (signal 2) first.
-    //
-    // When non-first blocks have SIG_IGN for SIGINT, they exit cleanly via
-    // EOF/SIGPIPE after the head dies — so the last block may exit 0 even
-    // though the pipeline was interrupted. We must check for SIGINT-killed
-    // blocks BEFORE the last-block-success check to preserve the shell
-    // convention that Ctrl+C yields exit code 130.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        let sigint_killed = results.iter().any(|r| r.status.signal() == Some(2));
-        if sigint_killed {
-            // Drop the guard first to restore the original SIGINT handler.
-            // Then re-raise SIGINT so this process dies the same way.
-            drop(_sigint_guard);
-            // SAFETY: signal(SIGINT, SIG_DFL) and kill(getpid(), SIGINT) are
-            // standard POSIX calls used to propagate signal death to the parent
-            // shell. After kill(), the process receives SIGINT with default
-            // handler (terminate), so the code after this block is unreachable.
-            unsafe {
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::kill(libc::getpid(), libc::SIGINT);
+    match provider {
+        "claude" => {
+            parts.push("-p".to_string());
+            if !config.model.is_empty() {
+                parts.push("--model".to_string());
+                parts.push(config.model.clone());
             }
-            // Unreachable in practice, but return an error as fallback.
-            return Err(CreftError::ExecutionSignaled {
-                block: 0,
-                lang: results.first().map(|r| r.lang.clone()).unwrap_or_default(),
-                signal: 2,
-            });
+        }
+        "gemini" => {
+            parts.push("-p".to_string());
+            if !config.model.is_empty() {
+                parts.push("-m".to_string());
+                parts.push(config.model.clone());
+            }
+        }
+        "codex" => {
+            parts.push("exec".to_string());
+            parts.push("-".to_string());
+        }
+        "ollama" => {
+            parts.push("run".to_string());
+            if !config.model.is_empty() {
+                parts.push(config.model.clone());
+            }
+        }
+        _ => {
+            if !config.model.is_empty() {
+                parts.push("--model".to_string());
+                parts.push(config.model.clone());
+            }
         }
     }
 
-    // Exit 99 from any block means early successful return — downstream blocks
-    // will have received EOF/SIGPIPE and exited cleanly as a side-effect.
-    if results
-        .iter()
-        .any(|r| exit_code_of(&r.status) == Some(EARLY_EXIT))
-    {
-        return Ok(());
+    if !config.params.is_empty() {
+        for token in config.params.split_whitespace() {
+            parts.push(token.to_string());
+        }
     }
 
-    // Last block success wins: earlier blocks dying from SIGPIPE (consumer exited
-    // early) is normal pipeline behavior, not an error.
-    let last = results.last().expect("at least one block");
-    if last.status.success() {
-        return Ok(());
-    }
-
-    // Signal-killed upstream blocks (e.g. SIGPIPE when consumer exits early) are
-    // side-effects, not root causes. Find the earliest non-signal failure instead.
-    let root = results
-        .iter()
-        .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
-        .unwrap_or(last);
-
-    Err(make_execution_error(root.block, &root.lang, &root.status))
+    parts.join(" ")
 }
 
 /// Execute a single code block, capturing and echoing stdout.
@@ -1451,208 +473,6 @@ fn execute_block(
     Ok(stdout)
 }
 
-/// Simple which(1) equivalent.
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|p| p.join(name))
-            .find(|p| p.exists())
-    })
-}
-
-/// Build a `Command` for the given LLM provider.
-///
-/// Does NOT configure stdin/stdout/stderr or cwd — the caller does that.
-/// Does NOT set env vars — the caller does that.
-///
-/// Provider patterns:
-/// - `claude`: `claude -p [--model <model>]`
-/// - `gemini`: `gemini -p [-m <model>]`
-/// - `codex`: `codex exec -`
-/// - `ollama`: `ollama run [<model>]`
-/// - unknown: `<provider> [--model <model>]`
-///
-/// `params` is split on whitespace and appended as individual arguments.
-fn build_llm_command(config: &LlmConfig) -> std::process::Command {
-    let provider = if config.provider.is_empty() {
-        "claude"
-    } else {
-        &config.provider
-    };
-
-    let mut cmd = match provider {
-        "claude" => {
-            let mut c = std::process::Command::new("claude");
-            c.arg("-p");
-            if !config.model.is_empty() {
-                c.arg("--model").arg(&config.model);
-            }
-            c
-        }
-        "gemini" => {
-            let mut c = std::process::Command::new("gemini");
-            c.arg("-p");
-            if !config.model.is_empty() {
-                c.arg("-m").arg(&config.model);
-            }
-            c
-        }
-        "codex" => {
-            let mut c = std::process::Command::new("codex");
-            c.arg("exec").arg("-");
-            // codex does not take a model flag in exec mode
-            c
-        }
-        "ollama" => {
-            let mut c = std::process::Command::new("ollama");
-            c.arg("run");
-            if !config.model.is_empty() {
-                c.arg(&config.model);
-            }
-            c
-        }
-        unknown => {
-            let mut c = std::process::Command::new(unknown);
-            if !config.model.is_empty() {
-                c.arg("--model").arg(&config.model);
-            }
-            c
-        }
-    };
-
-    if !config.params.is_empty() {
-        for token in config.params.split_whitespace() {
-            cmd.arg(token);
-        }
-    }
-
-    cmd
-}
-
-/// Format the command that `build_llm_command` would produce as a display string.
-///
-/// Used by dry-run and verbose output.
-fn format_llm_command(config: &LlmConfig) -> String {
-    let provider = if config.provider.is_empty() {
-        "claude"
-    } else {
-        &config.provider
-    };
-
-    let mut parts: Vec<String> = vec![provider.to_string()];
-
-    match provider {
-        "claude" => {
-            parts.push("-p".to_string());
-            if !config.model.is_empty() {
-                parts.push("--model".to_string());
-                parts.push(config.model.clone());
-            }
-        }
-        "gemini" => {
-            parts.push("-p".to_string());
-            if !config.model.is_empty() {
-                parts.push("-m".to_string());
-                parts.push(config.model.clone());
-            }
-        }
-        "codex" => {
-            parts.push("exec".to_string());
-            parts.push("-".to_string());
-        }
-        "ollama" => {
-            parts.push("run".to_string());
-            if !config.model.is_empty() {
-                parts.push(config.model.clone());
-            }
-        }
-        _ => {
-            if !config.model.is_empty() {
-                parts.push("--model".to_string());
-                parts.push(config.model.clone());
-            }
-        }
-    }
-
-    if !config.params.is_empty() {
-        for token in config.params.split_whitespace() {
-            parts.push(token.to_string());
-        }
-    }
-
-    parts.join(" ")
-}
-
-/// Execute an LLM block by piping the prompt to the provider CLI.
-///
-/// Returns captured stdout as a `String`. Output is also printed to the terminal.
-fn execute_llm_block(
-    block: &CodeBlock,
-    prompt: &str,
-    block_idx: usize,
-    ctx: &RunContext,
-) -> Result<String, CreftError> {
-    // Check cancellation before spawning the provider — avoids starting a
-    // potentially long-running LLM call when SIGINT already fired.
-    if ctx.is_cancelled() {
-        return Err(CreftError::EarlyExit);
-    }
-
-    let config = block
-        .llm_config
-        .as_ref()
-        .expect("execute_llm_block called on block without llm_config; validation must gate this");
-
-    let provider = if config.provider.is_empty() {
-        "claude"
-    } else {
-        config.provider.as_str()
-    };
-
-    let mut cmd = build_llm_command(config);
-    cmd.current_dir(ctx.cwd());
-    for (k, v) in ctx.env_pairs() {
-        cmd.env(k, v);
-    }
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let mut child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            CreftError::LlmProviderNotFound(format!(
-                "'{}' not found on PATH. Install the provider CLI and ensure it is in your PATH.",
-                provider
-            ))
-        } else {
-            CreftError::Io(e)
-        }
-    })?;
-
-    // Write prompt to stdin, then drop to close it.
-    // LLM providers read the full prompt before producing output, so this is safe.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes()).map_err(CreftError::Io)?;
-    }
-
-    let output = child.wait_with_output().map_err(CreftError::Io)?;
-
-    if exit_code_of(&output.status) == Some(EARLY_EXIT) {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        print!("{}", stdout);
-        return Err(CreftError::EarlyExit);
-    }
-
-    if !output.status.success() {
-        return Err(make_execution_error(block_idx, &block.lang, &output.status));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    print!("{}", stdout);
-
-    Ok(stdout)
-}
-
 /// Core execution logic. Uses `RunContext` for all execution configuration.
 fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Result<(), CreftError> {
     if cmd.blocks.is_empty() {
@@ -1671,7 +491,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
-            return run_pipe_chain(cmd, &bound_refs, ctx);
+            return pipe::run_pipe_chain(cmd, &bound_refs, ctx);
         }
         #[cfg(not(unix))]
         {
@@ -1683,7 +503,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
                         .into(),
                 ));
             }
-            return run_pipe_chain(cmd, &bound_refs, ctx);
+            return pipe::run_pipe_chain(cmd, &bound_refs, ctx);
         }
     }
 
@@ -1692,7 +512,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
 
     if block.lang == "llm" {
-        match execute_llm_block(block, &expanded, 0, ctx) {
+        match blocks::execute_llm_block(block, &expanded, 0, ctx) {
             Ok(_) => Ok(()),
             Err(CreftError::EarlyExit) => Ok(()),
             Err(e) => Err(e),
@@ -1921,133 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn test_substitute_basic() {
-        // Safe value: no shell escaping changes the output for plain alphanumeric
-        let result = substitute("Hello, {{name}}!", &[("name", "World")], "bash").unwrap();
-        assert_eq!(result, "Hello, World!");
-    }
-
-    #[test]
-    fn test_substitute_multiple() {
-        let result = substitute("{{a}} and {{b}}", &[("a", "foo"), ("b", "bar")], "bash").unwrap();
-        assert_eq!(result, "foo and bar");
-    }
-
-    #[test]
-    fn test_substitute_default() {
-        // Default value — author-controlled, not escaped
-        let result = substitute("Hello, {{name|World}}!", &[], "bash").unwrap();
-        assert_eq!(result, "Hello, World!");
-    }
-
-    #[test]
-    fn test_substitute_default_overridden() {
-        // User-supplied value in bash: "Chris" has no metacharacters so output is unchanged
-        let result = substitute("Hello, {{name|World}}!", &[("name", "Chris")], "bash").unwrap();
-        assert_eq!(result, "Hello, Chris!");
-    }
-
-    #[test]
-    fn test_substitute_unmatched_passes_through() {
-        let result = substitute("Hello, {{name}}!", &[], "bash").unwrap();
-        assert_eq!(result, "Hello, {{name}}!");
-    }
-
-    #[test]
-    fn test_substitute_no_double_replace() {
-        // In bash mode, the substituted value '{{b}}' gets shell-escaped to `'{{b}}'`
-        // which is fine — the point is that the inner {{b}} is NOT re-expanded
-        let result = substitute("{{a}}", &[("a", "{{b}}"), ("b", "NOPE")], "bash").unwrap();
-        // shell_escape wraps in single quotes: '{{b}}'
-        assert_eq!(result, "'{{b}}'");
-    }
-
-    // ---- shell escaping tests ----
-
-    #[test]
-    fn test_shell_escape_subshell_injection_bash() {
-        // Command injection attempt must be neutralized for bash
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "bash").unwrap();
-        // shell_escape produces single-quoted literal: '$(whoami)'
-        assert_eq!(result, "echo '$(whoami)'");
-    }
-
-    #[test]
-    fn test_shell_escape_subshell_injection_sh() {
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "sh").unwrap();
-        assert_eq!(result, "echo '$(whoami)'");
-    }
-
-    #[test]
-    fn test_shell_escape_subshell_injection_zsh() {
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "zsh").unwrap();
-        assert_eq!(result, "echo '$(whoami)'");
-    }
-
-    #[test]
-    fn test_no_shell_escape_python() {
-        // Non-shell language: raw value, no escaping
-        let result = substitute("print('{{name}}')", &[("name", "$(whoami)")], "python").unwrap();
-        assert_eq!(result, "print('$(whoami)')");
-    }
-
-    #[test]
-    fn test_no_shell_escape_node() {
-        let result =
-            substitute("console.log('{{name}}')", &[("name", "$(whoami)")], "node").unwrap();
-        assert_eq!(result, "console.log('$(whoami)')");
-    }
-
-    #[test]
-    fn test_no_shell_escape_python3() {
-        let result = substitute("print('{{name}}')", &[("name", "$(whoami)")], "python3").unwrap();
-        assert_eq!(result, "print('$(whoami)')");
-    }
-
-    #[test]
-    fn test_shell_escape_default_not_escaped() {
-        // Author-supplied default value is NOT escaped even in bash
-        let result = substitute("echo {{name|default_val}}", &[], "bash").unwrap();
-        assert_eq!(result, "echo default_val");
-    }
-
-    #[test]
-    fn test_shell_escape_default_with_metachar_not_escaped() {
-        // Author can put shell code in defaults — not escaped
-        let result = substitute("echo {{name|$(date)}}", &[], "bash").unwrap();
-        assert_eq!(result, "echo $(date)");
-    }
-
-    #[test]
-    fn test_shell_escape_single_quote_in_value() {
-        // Embedded single quote: O'Brien -> 'O'\''Brien'
-        let result = substitute("echo {{name}}", &[("name", "O'Brien")], "bash").unwrap();
-        // shell_escape handles embedded single quotes
-        assert_eq!(result, "echo 'O'\\''Brien'");
-    }
-
-    #[test]
-    fn test_shell_escape_empty_string() {
-        // Empty string -> '' (documented behavior change: unambiguous empty arg)
-        let result = substitute("echo {{name}}", &[("name", "")], "bash").unwrap();
-        assert_eq!(result, "echo ''");
-    }
-
-    #[test]
-    fn test_shell_escape_semicolon_injection() {
-        // Semicolon would allow command chaining — must be escaped
-        let result = substitute("echo {{name}}", &[("name", "hello; rm -rf /")], "bash").unwrap();
-        assert_eq!(result, "echo 'hello; rm -rf /'");
-    }
-
-    #[test]
-    fn test_shell_no_escape_for_unknown_lang() {
-        // Unknown language: no escaping (treated as non-shell)
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "ruby").unwrap();
-        assert_eq!(result, "echo $(whoami)");
-    }
-
-    #[test]
     fn test_interpreter_mapping() {
         assert_eq!(interpreter("bash"), "bash");
         assert_eq!(interpreter("python"), "python3");
@@ -2055,7 +748,7 @@ mod tests {
         assert_eq!(interpreter("unknown"), "unknown");
     }
 
-    use crate::model::{Arg, CommandDef, Flag};
+    use crate::model::{Arg, CodeBlock, CommandDef, Flag};
 
     fn make_cmd(args: Vec<Arg>, flags: Vec<Flag>) -> ParsedCommand {
         ParsedCommand {
@@ -2642,21 +1335,7 @@ mod tests {
         assert_eq!(interpreter("perl"), "perl");
     }
 
-    // ---- should_shell_escape ----
-
-    #[test]
-    fn test_should_shell_escape_langs() {
-        assert!(should_shell_escape("bash"));
-        assert!(should_shell_escape("sh"));
-        assert!(should_shell_escape("zsh"));
-        assert!(!should_shell_escape("python"));
-        assert!(!should_shell_escape("node"));
-        assert!(!should_shell_escape("ruby"));
-    }
-
     // ---- stdin thread: pipe mode tests ----
-
-    use crate::model::CodeBlock;
 
     /// Build a two-block pipe command. Block 0 uses `block0_code` and block 1
     /// uses `block1_code`. Both blocks run as bash.
@@ -3103,7 +1782,7 @@ mod tests {
     #[test]
     fn test_build_llm_command_returns_correct_binary_claude() {
         let config = llm_config("claude", "", "");
-        let _cmd = build_llm_command(&config);
+        let _cmd = blocks::build_llm_command(&config);
         // Verify the binary name via format_llm_command which mirrors the match exactly.
         let formatted = format_llm_command(&config);
         assert!(
@@ -3117,26 +1796,5 @@ mod tests {
         let config = llm_config("ollama", "mistral", "");
         let formatted = format_llm_command(&config);
         assert!(formatted.starts_with("ollama run mistral"));
-    }
-
-    #[test]
-    fn test_sponge_substitute_prev() {
-        // {{prev}} in an llm template must be replaced with upstream content.
-        // The "llm" language tag must NOT shell-escape (no single-quoting of values).
-        let result = substitute(
-            "Process this: {{prev}}",
-            &[("prev", "upstream content")],
-            "llm",
-        )
-        .unwrap();
-        assert_eq!(result, "Process this: upstream content");
-    }
-
-    #[test]
-    fn test_sponge_substitute_prev_no_shell_escape() {
-        // Shell metacharacters in prev must pass through unescaped in llm templates.
-        let result =
-            substitute("{{prev}}", &[("prev", "$(echo injected) `whoami`")], "llm").unwrap();
-        assert_eq!(result, "$(echo injected) `whoami`");
     }
 }
