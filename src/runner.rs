@@ -958,21 +958,35 @@ fn run_pipe_chain(
 ///
 /// Returns captured stdout as a `String`. Output is also printed to the
 /// terminal so the user sees it in real time.
+///
+/// When `stdin_data` is `Some`, the child's stdin is piped and the data is
+/// written on a background thread before `wait_with_output` drains stdout.
+/// The background thread prevents the classic deadlock where a large stdin
+/// payload fills the OS pipe buffer while the child is also blocked writing
+/// to a full stdout pipe buffer. When `stdin_data` is `None`, the child
+/// inherits the parent's stdin (terminal or upstream process).
 fn execute_block(
     block: &CodeBlock,
     code: &str,
     block_idx: usize,
     env_vars: &[(&str, &str)],
     cwd: &Path,
+    stdin_data: Option<&[u8]>,
 ) -> Result<String, CreftError> {
     let tmp = prepare_block_script(block, code)?;
     let tmp_path = tmp.path().to_path_buf();
 
-    let (child, _node_deps_dir) = spawn_block(
+    let stdin_cfg = if stdin_data.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::inherit()
+    };
+
+    let (mut child, _node_deps_dir) = spawn_block(
         block,
         &tmp_path,
         env_vars,
-        std::process::Stdio::inherit(),
+        stdin_cfg,
         std::process::Stdio::piped(),
         cwd,
         #[cfg(unix)]
@@ -980,9 +994,42 @@ fn execute_block(
         #[cfg(unix)]
         false, // sequential mode: do not suppress SIGINT
     )?;
+
+    // When prev_output data must be written to the child's stdin, do it on a
+    // background thread so that stdout draining (via wait_with_output) and
+    // stdin writes proceed concurrently. This prevents deadlock when
+    // prev_output is large enough to fill the OS pipe buffer (~64 KB on Linux,
+    // ~16 KB on macOS) before the child has read any of it.
+    let stdin_thread = if let Some(data) = stdin_data {
+        let owned: Vec<u8> = data.to_vec();
+        let mut stdin_handle = child
+            .stdin
+            .take()
+            .expect("stdin was piped but handle is missing");
+        Some(std::thread::spawn(move || {
+            use std::io::ErrorKind;
+            match std::io::Write::write_all(&mut stdin_handle, &owned) {
+                Ok(()) => Ok(()),
+                // BrokenPipe means the child exited before reading all input.
+                // The child's exit status is the authoritative error signal.
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
+                Err(e) => Err(e),
+            }
+        }))
+    } else {
+        None
+    };
+
     // _node_deps_dir kept alive here so the npm-installed node_modules directory
     // is not deleted before the child process finishes.
     let output = child.wait_with_output().map_err(CreftError::Io)?;
+
+    if let Some(handle) = stdin_thread {
+        handle
+            .join()
+            .expect("stdin write thread panicked")
+            .map_err(CreftError::Io)?;
+    }
 
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
         // Print any output produced before the early exit so it is not lost.
@@ -1266,7 +1313,15 @@ pub fn run_with_env(
                 Err(e) => return Err(e),
             }
         } else {
-            match execute_block(block, &expanded, i, &env_vars, cwd) {
+            // In pipe-fallback mode (pipe:true skill with llm blocks), route
+            // prev_output to the child's stdin so the pipe contract holds.
+            // Block 0 always inherits parent stdin (matching run_pipe_chain).
+            let stdin_data: Option<&[u8]> = if cmd.def.pipe && i > 0 {
+                Some(prev_owned.as_bytes())
+            } else {
+                None
+            };
+            match execute_block(block, &expanded, i, &env_vars, cwd, stdin_data) {
                 Ok(out) => out,
                 // Exit 99: stop the pipeline and return success to the caller.
                 Err(CreftError::EarlyExit) => return Ok(()),

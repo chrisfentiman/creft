@@ -203,6 +203,97 @@ fn test_llm_block_verbose_shows_command() {
         .stderr(predicate::str::contains("prompt:"));
 }
 
+/// A `pipe: true` skill with bash -> llm -> bash chains prev_output to stdin correctly.
+///
+/// Regression guard: sequential fallback (triggered by the llm block) must route prev_output
+/// to non-llm block stdin rather than inheriting the parent process's stdin.
+#[test]
+fn test_llm_pipe_stdin_routes_prev_output() {
+    let dir = creft_env();
+
+    // Block 1 (bash): echo a known string.
+    // Block 2 (llm/cat): prompt contains {{prev}}, cat echoes it back.
+    // Block 3 (bash): cat — reads stdin and echoes it.
+    // If stdin routing is correct, block 3 outputs block 2's output.
+    let skill = "---\nname: pipe-stdin-chain\ndescription: pipe stdin routing test\npipe: true\n---\n\n\
+```bash\necho 'hello from bash'\n```\n\n\
+```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
+```bash\ncat\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["pipe-stdin-chain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from bash"));
+}
+
+/// Block 0 of a pipe-fallback skill still reads from the parent's stdin.
+///
+/// In sequential fallback mode (pipe:true + llm block), block 0 must inherit the
+/// parent's stdin so that upstream data can flow in. Only blocks after position 0
+/// receive prev_output on stdin.
+#[test]
+fn test_llm_pipe_block0_inherits_parent_stdin() {
+    let dir = creft_env();
+
+    // Block 1 (bash/cat): reads stdin from the parent process.
+    // Block 2 (llm/cat): prompt contains {{prev}}.
+    // We pipe "injected data" into creft — if block 0 inherits parent stdin correctly,
+    // it reads that data and passes it forward.
+    let skill = "---\nname: pipe-block0-stdin\ndescription: block 0 parent stdin test\npipe: true\n---\n\n\
+```bash\ncat\n```\n\n\
+```llm\nprovider: cat\n---\n{{prev}}\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["pipe-block0-stdin"])
+        .write_stdin("injected data")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("injected data"));
+}
+
+/// Empty prev_output sends EOF to the next block's stdin without hanging.
+///
+/// When a block produces no output, the following non-llm block must receive
+/// an immediate EOF on stdin rather than blocking indefinitely.
+#[test]
+fn test_llm_pipe_empty_prev_sends_eof() {
+    let dir = creft_env();
+
+    // Block 1 (bash): outputs nothing.
+    // Block 2 (llm/cat): prompt is {{prev}} (empty string).
+    // Block 3 (bash/wc -c): counts bytes on stdin — should output 0.
+    let skill = "---\nname: pipe-empty-prev\ndescription: empty prev EOF test\npipe: true\n---\n\n\
+```bash\nprintf ''\n```\n\n\
+```llm\nprovider: cat\n---\n{{prev}}\n```\n\n\
+```bash\nwc -c\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    // wc -c outputs a number (possibly with whitespace). The key invariant is
+    // that the command completes without hanging and the exit code is 0.
+    creft_with(&dir)
+        .args(["pipe-empty-prev"])
+        .assert()
+        .success();
+}
+
 /// An llm block that exits 99 causes creft to return success (early pipeline termination).
 ///
 /// Exit code 99 is the conventional "early successful exit" signal. Any block — including
