@@ -303,7 +303,7 @@ mod tests {
     fn test_enrich_io_error_e2big_returns_setup() {
         // Simulate E2BIG (raw OS error 7).
         let e2big = std::io::Error::from_raw_os_error(7);
-        let result = enrich_io_error(e2big, "CREFT_PREV");
+        let result = enrich_io_error(e2big, "environment");
         assert!(
             matches!(result, CreftError::Setup(ref msg) if msg.contains("OS argument size limit")),
             "Expected Setup variant with OS argument size limit message"
