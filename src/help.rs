@@ -73,6 +73,23 @@ Code Blocks:
 
   Interpreters: bash, python, node, zsh, ruby, docs (not executed -- shown in --help)
 
+  LLM Blocks:
+    Use ```llm to send prompts to AI CLI tools. Add a YAML header before
+    --- to configure the provider:
+
+      ```llm
+      provider: claude
+      model: haiku
+      params: \"--max-tokens 500\"
+      ---
+      Summarize this: {{prev}}
+      ```
+
+    Providers: claude (default), gemini, codex, ollama, or any CLI tool name.
+    The provider handles authentication (API keys, config files).
+    Template placeholders ({{prev}}, {{name}}) work in the prompt body.
+    Skills with llm blocks always run sequentially, even with pipe: true.
+
   Dependencies (first line comment):
     # deps: requests, pandas          Python (uses uv run --with)
     // deps: lodash, chalk            Node (uses npx --package=)
@@ -256,12 +273,14 @@ Exit Codes:
 
 Global Check:
   Checks interpreters (bash, python3, node, ruby), tools (git, shellcheck,
-  uv, npx), storage directories, and installed package manifests.
+  uv, npx), AI providers (claude, gemini, codex, ollama -- all optional),
+  storage directories, and installed package manifests.
 
 Skill Check:
   Checks interpreters needed by each code block, commands used in bash blocks,
-  required environment variables, dependency tools, and sub-skills called via
-  'creft <name>' in bash blocks. Recursively checks sub-skill dependencies.";
+  required environment variables, dependency tools, sub-skills called via
+  'creft <name>' in bash blocks, and LLM provider CLIs needed by llm blocks.
+  Recursively checks sub-skill dependencies.";
 
 /// Extended description shown by `creft init --help`, explaining local `.creft/` directory creation.
 pub const INIT_LONG_ABOUT: &str = "\

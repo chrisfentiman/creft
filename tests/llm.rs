@@ -164,7 +164,7 @@ fn test_llm_block_validate_empty_prompt() {
         .stderr(predicate::str::contains("no prompt text"));
 }
 
-/// creft doctor for a skill with an llm block reports the provider.
+/// creft doctor for a skill with an llm block reports the provider name and availability.
 #[test]
 fn test_llm_block_doctor_reports_provider() {
     let dir = creft_env();
@@ -179,7 +179,9 @@ fn test_llm_block_doctor_reports_provider() {
     creft_with(&dir)
         .args(["doctor", "llm-cat"])
         .assert()
-        .success();
+        .success()
+        // Doctor should report the provider CLI (cat) in its interpreter checks.
+        .stderr(predicate::str::contains("cat"));
 }
 
 /// A verbose run shows the provider command and expanded prompt on stderr.
