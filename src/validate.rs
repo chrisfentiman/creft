@@ -912,6 +912,7 @@ mod tests {
             env: vec![],
             tags: vec![],
             pipe: false,
+            sequential: false,
             supports: vec![],
         }
     }
@@ -1416,6 +1417,7 @@ mod tests {
             env: vec![],
             tags: vec![],
             pipe: false,
+            sequential: false,
             supports: vec![],
         }
     }

@@ -1609,7 +1609,7 @@ pub fn run_with_env(
     // On Unix, LLM blocks participate as sponge stages in run_pipe_chain.
     // On non-Unix, skills with LLM blocks fall back to sequential execution because
     // the sponge infrastructure (process groups, reaper channel) is Unix-only.
-    if cmd.def.pipe && cmd.blocks.len() > 1 {
+    if cmd.def.pipe && !cmd.def.is_sequential() && cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
             return run_pipe_chain(cmd, &bound_refs, extra_env, cwd);
@@ -1901,6 +1901,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: false,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2405,6 +2406,7 @@ mod tests {
                 }],
                 tags: vec![],
                 pipe: false,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2433,6 +2435,7 @@ mod tests {
                 }],
                 tags: vec![],
                 pipe: false,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2507,6 +2510,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: true,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2594,6 +2598,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: false,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2634,6 +2639,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: true,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2682,6 +2688,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: true, // pipe: true but only one block — should be a no-op
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
@@ -2754,6 +2761,7 @@ mod tests {
                 env: vec![],
                 tags: vec![],
                 pipe: false,
+                sequential: false,
                 supports: vec![],
             },
             docs: None,
