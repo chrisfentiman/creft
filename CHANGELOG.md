@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/chrisfentiman/creft/compare/creft-v0.1.9...creft-v0.2.0) (2026-04-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* pipe-by-default — multi-block skills always use concurrent pipes
+
+### Features
+
+* pipe-by-default — multi-block skills always use concurrent pipes ([9df2369](https://github.com/chrisfentiman/creft/commit/9df2369261af10b62ea49d547b52fc92cdd10bc0))
+
 ## [0.1.9](https://github.com/chrisfentiman/creft/compare/creft-v0.1.8...creft-v0.1.9) (2026-04-01)
 
 
