@@ -121,7 +121,6 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
 
     let mut pairs: Vec<(String, String)> = Vec::new();
 
-    // Extract positional args
     for arg_def in &cmd.def.args {
         let val = if let Some(v) = matches.get_one::<String>(&arg_def.name) {
             v.clone()
@@ -155,7 +154,6 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
         pairs.push((arg_def.name.clone(), val));
     }
 
-    // Extract flags
     for flag_def in &cmd.def.flags {
         let val = if flag_def.r#type == "bool" {
             matches.get_flag(&flag_def.name).to_string()
@@ -842,14 +840,14 @@ fn run_pipe_chain(
         // For the last block on Unix: take() its stdout for the relay thread.
         // For the last block on non-Unix: stdout is already inherited.
         if !is_last {
-            prev_stdout = child.stdout.take().or_else(|| {
-                // Should never happen for Stdio::piped(), but handle defensively.
-                None
-            });
+            prev_stdout = child.stdout.take();
             if prev_stdout.is_none() {
-                // Programming error: Stdio::piped() must yield a ChildStdout.
+                // Stdio::piped() must always yield a ChildStdout — this path is unreachable
+                // under normal conditions, but guard against it to avoid a silent hang.
                 #[cfg(unix)]
                 if let Some(pgid) = child_pgid {
+                    // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                    // pgid is valid (we got it from child.id() which is always non-zero).
                     unsafe {
                         libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
                     }
@@ -1180,7 +1178,6 @@ fn execute_llm_block(
     // LLM providers read the full prompt before producing output, so this is safe.
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).map_err(CreftError::Io)?;
-        // stdin is dropped here, closing the pipe
     }
 
     let output = child.wait_with_output().map_err(CreftError::Io)?;
