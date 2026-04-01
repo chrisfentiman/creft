@@ -149,6 +149,7 @@ pub fn enrich_io_error(e: std::io::Error, context: &str) -> CreftError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
 
     // --- exit_code() tests ---

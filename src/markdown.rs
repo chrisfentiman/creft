@@ -167,7 +167,8 @@ fn parse_deps(code: &str, lang: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_single_bash_block() {

@@ -882,7 +882,8 @@ fn check_shell_deps(
 mod tests {
     use super::*;
     use crate::model::{Arg, Flag};
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     fn make_def(args: Vec<&str>, flags: Vec<&str>) -> CommandDef {
         CommandDef {

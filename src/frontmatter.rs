@@ -55,7 +55,8 @@ pub fn serialize(def: &CommandDef, body: &str) -> Result<String, CreftError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    #[allow(unused_imports)]
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_parse_basic() {
