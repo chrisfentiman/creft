@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/chrisfentiman/creft/compare/creft-v0.1.4...creft-v0.1.5) (2026-04-01)
+
+
+### Features
+
+* **runner:** exit 99 as early successful return in block pipelines ([e31868f](https://github.com/chrisfentiman/creft/commit/e31868f8436af0929bc79b84e2561d90dcbca7ed))
+
 ## [0.1.4](https://github.com/chrisfentiman/creft/compare/creft-v0.1.3...creft-v0.1.4) (2026-04-01)
 
 
