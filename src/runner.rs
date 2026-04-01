@@ -434,7 +434,7 @@ fn spawn_block(
             CreftError::InterpreterNotFound(format!("{interp_name}. Run 'creft doctor' to check."))
         } else {
             // E2BIG (large env) and other OS errors get actionable messages.
-            crate::error::enrich_io_error(e, "CREFT_PREV")
+            crate::error::enrich_io_error(e, "environment")
         }
     })?;
     Ok((child, node_deps_dir))
@@ -952,7 +952,7 @@ fn sponge_thread(
     }
 }
 
-/// Execute all blocks in a pipe:true command concurrently with OS-level pipe
+/// Execute all blocks in a multi-block command concurrently with OS-level pipe
 /// connections between stdout/stdin.
 ///
 /// All blocks are spawned before any are waited on. Block N's stdout is
@@ -1323,9 +1323,9 @@ fn execute_block(
         std::process::Stdio::piped(),
         cwd,
         #[cfg(unix)]
-        None, // sequential mode: no process group management
+        None, // single-block mode: no process group management
         #[cfg(unix)]
-        false, // sequential mode: do not suppress SIGINT
+        false, // single-block mode: do not suppress SIGINT
     )?;
 
     // When prev_output data must be written to the child's stdin, do it on a
@@ -2742,7 +2742,7 @@ mod tests {
         // We can't easily trigger a real E2BIG in a unit test, so we construct the
         // io::Error directly using from_raw_os_error.
         let e2big = std::io::Error::from_raw_os_error(7);
-        let err = crate::error::enrich_io_error(e2big, "CREFT_PREV");
+        let err = crate::error::enrich_io_error(e2big, "environment");
         assert!(
             matches!(err, crate::error::CreftError::Setup(_)),
             "E2BIG should produce a Setup error with guidance, got: {:?}",
@@ -2754,8 +2754,8 @@ mod tests {
             "E2BIG message should mention OS argument size limit, got: {msg}"
         );
         assert!(
-            msg.contains("CREFT_PREV"),
-            "E2BIG message should include context 'CREFT_PREV', got: {msg}"
+            msg.contains("environment"),
+            "E2BIG message should include context 'environment', got: {msg}"
         );
     }
 

@@ -49,7 +49,6 @@ creft add <<'EOF'
 ---
 name: linecount
 description: Lines of code by file
-pipe: true
 ---
 ```bash
 find src -name '*.rs' -exec wc -l {} +
@@ -71,7 +70,7 @@ $ creft linecount
   doctor.rs                 1883
 ```
 
-`pipe: true` connects blocks with OS file descriptors. Concurrent, not buffered.
+Multi-block skills pipe stdout between blocks using OS file descriptors. Concurrent, not buffered.
 
 ## Add structure
 
