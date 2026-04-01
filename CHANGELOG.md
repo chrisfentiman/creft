@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/chrisfentiman/creft/compare/creft-v0.1.7...creft-v0.1.8) (2026-04-01)
+
+
+### Bug Fixes
+
+* **runner:** kill remaining pipe children on exit 99 ([16879f2](https://github.com/chrisfentiman/creft/commit/16879f27587372f2e703f215c8899bfdecc6c911))
+
 ## [0.1.7](https://github.com/chrisfentiman/creft/compare/creft-v0.1.6...creft-v0.1.7) (2026-04-01)
 
 
