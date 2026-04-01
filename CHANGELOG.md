@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/chrisfentiman/creft/compare/creft-v0.1.6...creft-v0.1.7) (2026-04-01)
+
+
+### Bug Fixes
+
+* **runner:** leave unmatched template placeholders as literal text ([a71ea97](https://github.com/chrisfentiman/creft/commit/a71ea97d9b2ced8dd9822f8fb5be47996e6e7ba5))
+
 ## [0.1.6](https://github.com/chrisfentiman/creft/compare/creft-v0.1.5...creft-v0.1.6) (2026-04-01)
 
 
