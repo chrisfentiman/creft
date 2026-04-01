@@ -771,9 +771,15 @@ fn wait_pipe_children_fallback(
 /// another stage that produces output on a pipe fd.
 ///
 /// When `upstream` is `None` (block 0), the sponge reads from the parent's
-/// stdin. When `is_pgid_creator` is true (block 0), the provider attempts
-/// `setpgid(0, 0)` (best-effort) and its PID is sent through `pgid_tx` so
-/// subsequent blocks can attempt to join the process group.
+/// stdin. When block 0 is a sponge, `pgid_tx` carries the provider's PID
+/// back to `run_pipe_chain` so subsequent non-sponge blocks can join the
+/// process group.
+///
+/// No `pre_exec` hooks are used. Sponge spawns use `posix_spawn()` (no
+/// `fork()`) to avoid EPERM failures from non-main threads in CI
+/// environments. The provider is not placed in the pipe chain's process
+/// group and does not have SIGINT ignored. The sponge thread manages the
+/// provider's lifecycle directly via pipe ownership and `child.wait()`.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn sponge_thread(
@@ -785,8 +791,6 @@ fn sponge_thread(
     env_vars: Vec<(String, String)>,
     cwd: std::path::PathBuf,
     block_idx: usize,
-    child_pgid: Option<u32>,
-    is_pgid_creator: bool,
     pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
 ) {
@@ -847,37 +851,20 @@ fn sponge_thread(
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
 
-        // Join or create the pipe chain's process group.
-        // SAFETY: setpgid and signal are async-signal-safe per POSIX.
-        // No Rust allocations or mutexes inside pre_exec. Captured values are Copy.
-        if is_pgid_creator {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    // EPERM is non-fatal: macOS fork() from non-main threads
-                    // can cause setpgid to fail. Signal protection via SIG_IGN
-                    // is the critical operation here.
-                    let _ = libc::setpgid(0, 0);
-                    libc::signal(libc::SIGINT, libc::SIG_IGN);
-                    Ok(())
-                });
-            }
-        } else if let Some(pgid) = child_pgid {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: setpgid and signal are async-signal-safe per POSIX.
-            // No Rust allocations or mutexes inside pre_exec. pgid is Copy.
-            // EPERM is treated as non-fatal: the pipe chain leader may have
-            // exited by the time the sponge spawns (sponge reads all upstream
-            // output first), which can cause setpgid to fail on macOS/Linux.
-            // SIGINT is still ignored so the provider exits via EOF/SIGPIPE.
-            unsafe {
-                cmd.pre_exec(move || {
-                    libc::setpgid(0, pgid as libc::pid_t);
-                    libc::signal(libc::SIGINT, libc::SIG_IGN);
-                    Ok(())
-                });
-            }
-        }
+        // No pre_exec hooks on sponge spawns. pre_exec forces Rust's Command
+        // to use fork()+exec() instead of posix_spawn(). fork() from non-main
+        // threads fails with EPERM in CI environments (GitHub Actions macOS
+        // launchd sessions, Ubuntu containers). Without pre_exec, posix_spawn()
+        // is used, which works reliably from any thread.
+        //
+        // Consequences of removing pre_exec:
+        // - No setpgid: provider is not in the pipe chain's process group.
+        //   exit 99 cleanup via killpg won't reach it, but the provider dies
+        //   naturally when pipes close. The sponge thread owns the Child handle.
+        // - No SIG_IGN: provider receives SIGINT on Ctrl+C. The sponge thread
+        //   sees stdout close, stops relaying, and reports the exit status.
+        //   The only user-visible effect is the provider may print an error to
+        //   stderr before dying.
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -1047,7 +1034,6 @@ fn run_pipe_chain(
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
             let owned_cwd = cwd.to_path_buf();
-            let pgid = child_pgid;
             let reaper_tx_clone = reaper_tx.clone();
             let prompt_template = block.code.clone();
 
@@ -1063,8 +1049,6 @@ fn run_pipe_chain(
                         owned_env_vars,
                         owned_cwd,
                         i,
-                        pgid,
-                        is_pgid_creator,
                         pgid_tx,
                         reaper_tx_clone,
                     );
@@ -1072,13 +1056,14 @@ fn run_pipe_chain(
                 .expect("failed to spawn sponge thread");
             sponge_handles.push(handle);
 
-            // If block 0 is a sponge, wait for its pgid before spawning block 1.
-            // Provider failure is handled by the reaper channel — continue regardless.
-            if is_pgid_creator
-                && let Some((_, pgid_rx)) = pgid_channel
-                && let Ok(Ok(pid)) = pgid_rx.recv()
-            {
-                child_pgid = Some(pid);
+            // If block 0 is a sponge, wait for the provider to spawn before
+            // continuing. The sponge's provider PID is not used as the process
+            // group ID — posix_spawn() is used (no pre_exec setpgid), so the
+            // provider is not a pgid leader. The first non-sponge block creates
+            // the process group instead. Provider failure is handled by the
+            // reaper channel — continue regardless.
+            if is_pgid_creator && let Some((_, pgid_rx)) = pgid_channel {
+                let _ = pgid_rx.recv();
             }
 
             node_deps_dirs.push(None);
@@ -1116,9 +1101,15 @@ fn run_pipe_chain(
             std::process::Stdio::piped()
         };
 
-        // Some(0) → block 0 creates its own process group; Some(pgid) → join it.
+        // Some(0) → first spawned block creates its own process group; Some(pgid) → join it.
+        // child_pgid is None when no non-sponge block has been spawned yet (including when
+        // block 0 is a sponge — the sponge's provider is not a pgid leader).
         #[cfg(unix)]
-        let pg = if i == 0 { Some(0u32) } else { child_pgid };
+        let pg = if child_pgid.is_none() {
+            Some(0u32)
+        } else {
+            child_pgid
+        };
 
         // Non-first blocks ignore SIGINT so only the pipe head receives Ctrl+C.
         // When the head dies, downstream blocks get EOF/SIGPIPE and exit cleanly
@@ -1152,10 +1143,10 @@ fn run_pipe_chain(
         })?;
         node_deps_dirs.push(node_deps_dir);
 
-        // After spawning block 0, record its PID as the process group ID.
-        // (The pre_exec setpgid(0, 0) makes block 0's PID its own PGID.)
+        // After spawning the first non-sponge block, record its PID as the
+        // process group ID. setpgid(0, 0) in pre_exec makes its PID its own PGID.
         #[cfg(unix)]
-        if i == 0 {
+        if child_pgid.is_none() {
             child_pgid = Some(child.id());
         }
 
