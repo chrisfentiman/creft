@@ -771,9 +771,9 @@ fn wait_pipe_children_fallback(
 /// another stage that produces output on a pipe fd.
 ///
 /// When `upstream` is `None` (block 0), the sponge reads from the parent's
-/// stdin. When `is_pgid_creator` is true (block 0), the provider is spawned with
-/// `setpgid(0, 0)` and its PID is sent through `pgid_tx` so subsequent blocks
-/// can join the process group.
+/// stdin. When `is_pgid_creator` is true (block 0), the provider attempts
+/// `setpgid(0, 0)` (best-effort) and its PID is sent through `pgid_tx` so
+/// subsequent blocks can attempt to join the process group.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn sponge_thread(
