@@ -278,7 +278,7 @@ fn spawn_block(
     cwd: &Path,
     #[cfg(unix)] process_group: Option<u32>,
     #[cfg(unix)] ignore_sigint: bool,
-) -> Result<std::process::Child, CreftError> {
+) -> Result<(std::process::Child, Option<tempfile::TempDir>), CreftError> {
     // Stdio is not Copy, so we apply stdin/stdout directly rather than
     // using a reusable closure (which would require Fn, not FnOnce).
     let apply_common = |cmd: &mut std::process::Command| {
@@ -287,6 +287,47 @@ fn spawn_block(
             cmd.env(k, v);
         }
         cmd.stderr(std::process::Stdio::inherit());
+    };
+
+    // For node blocks with deps, install packages into a temp directory first
+    // so that require() / import() can resolve them via NODE_PATH. The tempdir
+    // must remain alive until the child exits; it is returned to the caller.
+    //
+    // A minimal package.json is written before running `npm install` so that
+    // npm anchors the node_modules directory to this temp dir rather than
+    // walking up the directory tree to find an existing package.json.
+    let (node_deps_dir, node_modules_path): (
+        Option<tempfile::TempDir>,
+        Option<std::path::PathBuf>,
+    ) = if !block.deps.is_empty() && matches!(block.lang.as_str(), "node" | "javascript" | "js") {
+        let dir = tempfile::tempdir().map_err(CreftError::Io)?;
+        // Write a stub package.json so npm installs into this directory.
+        let pkg_json = dir.path().join("package.json");
+        std::fs::write(&pkg_json, r#"{"private":true}"#).map_err(CreftError::Io)?;
+        let status = std::process::Command::new("npm")
+            .arg("install")
+            .args(&block.deps)
+            .current_dir(dir.path())
+            .status()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    CreftError::InterpreterNotFound(
+                        "npm (install Node.js). Run 'creft doctor' to check.".to_string(),
+                    )
+                } else {
+                    CreftError::Io(e)
+                }
+            })?;
+        if !status.success() {
+            return Err(CreftError::Setup(format!(
+                "npm install failed for deps: {}",
+                block.deps.join(", ")
+            )));
+        }
+        let node_modules = dir.path().join("node_modules");
+        (Some(dir), Some(node_modules))
+    } else {
+        (None, None)
     };
 
     let mut cmd: std::process::Command = if !block.deps.is_empty() {
@@ -301,12 +342,11 @@ fn spawn_block(
                 c
             }
             "node" | "javascript" | "js" => {
-                let mut c = std::process::Command::new("npx");
-                c.arg("--yes");
-                for dep in &block.deps {
-                    c.arg(format!("--package={}", dep));
+                let mut c = std::process::Command::new("node");
+                if let Some(ref node_modules) = node_modules_path {
+                    c.env("NODE_PATH", node_modules);
                 }
-                c.arg("--").arg("node").arg(script_path);
+                c.arg(script_path);
                 c
             }
             "bash" | "sh" | "zsh" => {
@@ -376,28 +416,29 @@ fn spawn_block(
     }
 
     // Build a descriptive interpreter name for error messages.
-    // For deps-based blocks, name the package manager (uv/npx) since that
+    // For deps-based blocks, name the package manager (uv/npm) since that
     // is what actually needs to be on PATH.
     let interp_name = if !block.deps.is_empty() {
         match block.lang.as_str() {
             "python" | "python3" => {
                 "uv (install with: curl -LsSf https://astral.sh/uv/install.sh | sh)".to_string()
             }
-            "node" | "javascript" | "js" => "npx (install Node.js)".to_string(),
+            "node" | "javascript" | "js" => "npm (install Node.js)".to_string(),
             _ => interpreter(&block.lang).to_string(),
         }
     } else {
         interpreter(&block.lang).to_string()
     };
 
-    cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CreftError::InterpreterNotFound(format!("{interp_name}. Run 'creft doctor' to check."))
         } else {
             // E2BIG (large env) and other OS errors get actionable messages.
             crate::error::enrich_io_error(e, "CREFT_PREV")
         }
-    })
+    })?;
+    Ok((child, node_deps_dir))
 }
 
 /// Return the plain exit code for a process status, or `None` if the process
@@ -544,6 +585,8 @@ fn run_pipe_chain(
 
     // Pipe mode passes no CREFT_PREV/CREFT_BLOCK_N — output flows on stdin, not env.
     let env_vars: Vec<(&str, &str)> = extra_env.to_vec();
+    // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
+    let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
     let mut children: Vec<(std::process::Child, usize, String)> = Vec::with_capacity(n);
     let mut prev_stdout: Option<std::process::ChildStdout> = None;
     // PID of the first child, used as the process group ID for all pipe children.
@@ -579,7 +622,7 @@ fn run_pipe_chain(
         #[cfg(unix)]
         let sigint_ignored = i > 0;
 
-        let mut child = spawn_block(
+        let (mut child, node_deps_dir) = spawn_block(
             block,
             script_path,
             &env_vars,
@@ -601,7 +644,9 @@ fn run_pipe_chain(
                 }
             }
             drop(children.drain(..));
+            drop(node_deps_dirs.drain(..));
         })?;
+        node_deps_dirs.push(node_deps_dir);
 
         // After spawning block 0, record its PID as the process group ID.
         // (The pre_exec setpgid(0, 0) makes block 0's PID its own PGID.)
@@ -719,7 +764,7 @@ fn execute_block(
     let tmp = prepare_block_script(block, code)?;
     let tmp_path = tmp.path().to_path_buf();
 
-    let output = spawn_block(
+    let (child, _node_deps_dir) = spawn_block(
         block,
         &tmp_path,
         env_vars,
@@ -730,9 +775,10 @@ fn execute_block(
         None, // sequential mode: no process group management
         #[cfg(unix)]
         false, // sequential mode: do not suppress SIGINT
-    )?
-    .wait_with_output()
-    .map_err(CreftError::Io)?;
+    )?;
+    // _node_deps_dir kept alive here so the npm-installed node_modules directory
+    // is not deleted before the child process finishes.
+    let output = child.wait_with_output().map_err(CreftError::Io)?;
 
     if !output.status.success() {
         return Err(make_execution_error(block_idx, &block.lang, &output.status));

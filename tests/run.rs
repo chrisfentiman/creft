@@ -1439,6 +1439,46 @@ fn test_verbose_dry_run_shows_rendered_no_execute() {
     );
 }
 
+/// Node block with `# deps: left-pad` installs the package via npm and makes
+/// it available to `require()` via NODE_PATH. Verifies that module resolution
+/// works end-to-end after the npx→npm-install change.
+#[test]
+fn test_node_deps_available_for_require() {
+    if !helpers::tool_available("npm") {
+        eprintln!("skipping test_node_deps_available_for_require: npm not on PATH");
+        return;
+    }
+    if !helpers::tool_available("node") {
+        eprintln!("skipping test_node_deps_available_for_require: node not on PATH");
+        return;
+    }
+
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: node-leftpad\n",
+            "description: test node deps via npm install\n",
+            "---\n",
+            "\n",
+            "```node\n",
+            "// deps: left-pad\n",
+            "const lp = require('left-pad');\n",
+            "console.log(lp('hello', 10));\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["node-leftpad"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("     hello"));
+}
+
 /// `--verbose` with an optional arg omitted shows the empty substitution in stderr.
 #[test]
 fn test_verbose_without_args_shows_empty_defaults() {
