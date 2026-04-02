@@ -214,9 +214,11 @@ pub(super) struct SpongeChannels {
 /// back to `run_pipe_chain` so subsequent non-sponge blocks can join the process
 /// group.
 ///
-/// On cancellation (upstream exit 99), the sponge writes any buffered upstream
-/// bytes directly to stdout instead of using a channel. This eliminates the
-/// timing race where the main thread drains a channel before the sponge sends.
+/// On cancellation (upstream exit 99), the sponge returns any buffered upstream
+/// bytes as `Some(data)` via the `JoinHandle` return value. The main thread joins
+/// the handle and writes the data to stdout deterministically, eliminating the
+/// race where a direct stdout write from the sponge thread could lose data during
+/// process teardown.
 ///
 /// Note: during pipe execution `PipeSignalGuard` overwrites the signal-hook
 /// handler, so `ctx.is_cancelled()` will not fire from SIGINT during pipe
@@ -230,9 +232,9 @@ pub(super) fn sponge_stage(
     ctx: RunContext,
     block_idx: usize,
     channels: SpongeChannels,
-) {
+) -> Option<Vec<u8>> {
     let SpongeChannels { pgid_tx, reaper_tx } = channels;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<Vec<u8>> {
         // Keep raw bytes alongside the String so cancel paths can send the
         // exact bytes the sponge consumed, without re-encoding through lossy UTF-8.
         let raw_upstream_vec: Vec<u8> = match upstream {
@@ -256,18 +258,12 @@ pub(super) fn sponge_stage(
         let mut raw_upstream = Some(raw_upstream_vec);
 
         // If the pipeline was cancelled (upstream exit 99), bail without spawning
-        // the provider. Write buffered upstream bytes directly to stdout to recover
-        // exit-99 output that was consumed from the pipe buffer before cancel fired.
-        // Writing directly avoids the channel race where the main thread drains before
-        // the sponge sends.
+        // the provider. Return the buffered upstream bytes via the JoinHandle so the
+        // main thread can write them to stdout after joining — avoids the race where
+        // a direct thread write loses data during process teardown.
         if ctx.is_cancelled() {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
-            if !data.is_empty() {
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
-                let _ = lock.write_all(&data);
-            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -276,7 +272,7 @@ pub(super) fn sponge_stage(
                 lang: block.lang.clone(),
                 outcome: BlockOutcome::Cancelled,
             });
-            return;
+            return if data.is_empty() { None } else { Some(data) };
         }
 
         let ref_pairs: Vec<(&str, &str)> = bound_refs
@@ -297,7 +293,7 @@ pub(super) fn sponge_stage(
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
-                return;
+                return None;
             }
         };
 
@@ -316,7 +312,7 @@ pub(super) fn sponge_stage(
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
-                return;
+                return None;
             }
         };
         let runner = super::blocks::runner_for(&block.lang);
@@ -333,7 +329,7 @@ pub(super) fn sponge_stage(
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
-                return;
+                return None;
             }
         };
 
@@ -350,11 +346,6 @@ pub(super) fn sponge_stage(
         if ctx.is_cancelled() {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
-            if !data.is_empty() {
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
-                let _ = lock.write_all(&data);
-            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -363,7 +354,7 @@ pub(super) fn sponge_stage(
                 lang: block.lang.clone(),
                 outcome: BlockOutcome::Cancelled,
             });
-            return;
+            return if data.is_empty() { None } else { Some(data) };
         }
 
         // For the error message, use the provider name for LLM blocks so the
@@ -404,7 +395,7 @@ pub(super) fn sponge_stage(
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(e),
                 });
-                return;
+                return None;
             }
         };
 
@@ -453,15 +444,22 @@ pub(super) fn sponge_stage(
                 Err(e) => BlockOutcome::Error(e),
             },
         });
+
+        // Normal path: provider's output went through the pipe. No data to recover.
+        None
     }));
 
-    if result.is_err() {
-        // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
-        let _ = reaper_tx.send(ReaperResult {
-            block_idx,
-            lang: block.lang.clone(),
-            outcome: BlockOutcome::Error(std::io::Error::other("sponge thread panicked")),
-        });
+    match result {
+        Ok(captured) => captured,
+        Err(_) => {
+            // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
+            let _ = reaper_tx.send(ReaperResult {
+                block_idx,
+                lang: block.lang.clone(),
+                outcome: BlockOutcome::Error(std::io::Error::other("sponge thread panicked")),
+            });
+            None
+        }
     }
 }
 
@@ -539,6 +537,7 @@ struct WaitArgs {
     rx: std::sync::mpsc::Receiver<ReaperResult>,
     last_block_idx: usize,
     exit99_drains: std::collections::HashMap<usize, DupedPipeReader>,
+    sponge_handles: Vec<std::thread::JoinHandle<Option<Vec<u8>>>>,
 }
 
 /// Wait for all children in a Unix pipe chain using concurrent reaper threads
@@ -560,8 +559,9 @@ struct WaitArgs {
 /// the chain, its output has already been captured in the relay buffer and is
 /// flushed to the terminal. If the exit-99 block is a middle block, the
 /// duplicated pipe fd in `exit99_drains` is drained and flushed instead. Sponge
-/// stages write their buffered upstream bytes directly to stdout on cancellation,
-/// so no separate capture channel is needed.
+/// handles are joined here (before the relay thread) so that any captured
+/// upstream bytes returned by cancelled sponge threads are available for the
+/// output selection decision.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     args: WaitArgs,
@@ -576,6 +576,7 @@ fn wait_pipe_children_unix(
         rx,
         last_block_idx,
         mut exit99_drains,
+        sponge_handles,
     } = args;
     let cancel_relay = std::sync::Arc::clone(&cancel);
     // Never writes to the terminal — the main thread decides flush vs. discard.
@@ -711,6 +712,16 @@ fn wait_pipe_children_unix(
     // the relay thread's pipe to the last block.
     drop(exit99_drains);
 
+    // All reaper results received. Join sponge threads to collect any data they
+    // captured from the cancel path. Joining here is a synchronization barrier:
+    // after join() returns, the data is on the main thread's stack with no timing
+    // window. handle.join().ok().flatten(): Err (panic) → None, Ok(None) → None,
+    // Ok(Some(data)) → Some(data).
+    let sponge_captured: Option<Vec<u8>> = sponge_handles
+        .into_iter()
+        .filter_map(|h| h.join().ok().flatten())
+        .find(|d| !d.is_empty());
+
     // All reapers have exited. Join the relay thread to retrieve the buffered output.
     // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
     let relay_buffer = relay_handle.join().unwrap_or_default();
@@ -725,15 +736,16 @@ fn wait_pipe_children_unix(
         // Select output source by priority:
         // 1. Exit-99 block is last → relay buffer has its output.
         // 2. Dup'd fd drain → kernel pipe buffer residue (downstream didn't consume it).
-        // 3. Sponge wrote directly to stdout on cancellation — main thread writes nothing.
+        // 3. Sponge captured data → buffered upstream bytes returned via JoinHandle.
         let output: &[u8] = match exit99_idx {
             Some(idx) if idx == last_block_idx => &relay_buffer,
             Some(_) => {
-                // Middle or first block. Use dup'd fd drain if non-empty.
-                // If a sponge consumed the data, it already wrote to stdout directly.
+                // Middle or first block. Use dup'd fd drain if non-empty, then fall
+                // back to sponge captured data (upstream bytes the sponge buffered).
                 exit99_captured
                     .as_deref()
                     .filter(|d| !d.is_empty())
+                    .or(sponge_captured.as_deref().filter(|d| !d.is_empty()))
                     .unwrap_or(&[])
             }
             None => &[],
@@ -853,9 +865,10 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let (reaper_tx, reaper_rx) = std::sync::mpsc::channel::<ReaperResult>();
 
-    // Join handles for sponge threads — joined after all reaper results collected.
+    // Join handles for sponge threads — joined inside wait_pipe_children_unix
+    // so returned data is available when the output selection decision is made.
     #[cfg(unix)]
-    let mut sponge_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut sponge_handles: Vec<std::thread::JoinHandle<Option<Vec<u8>>>> = Vec::new();
 
     // Dup'd read ends of inter-block pipes, keyed by block index.
     // Only middle blocks (not the last) get entries. The last block's output
@@ -909,7 +922,7 @@ pub(super) fn run_pipe_chain(
                             pgid_tx,
                             reaper_tx: reaper_tx_clone,
                         },
-                    );
+                    )
                 })
                 .expect("failed to spawn sponge thread");
             sponge_handles.push(handle);
@@ -1080,7 +1093,7 @@ pub(super) fn run_pipe_chain(
         let tx = reaper_tx;
         let rx = reaper_rx;
         let child_pids: Vec<u32> = children.iter().map(|(c, _, _)| c.id()).collect();
-        let outcome = wait_pipe_children_unix(
+        wait_pipe_children_unix(
             WaitArgs {
                 children,
                 child_pids,
@@ -1090,14 +1103,10 @@ pub(super) fn run_pipe_chain(
                 rx,
                 last_block_idx: n - 1,
                 exit99_drains,
+                sponge_handles,
             },
             ctx.cancel_arc(),
-        )?;
-        // Join sponge threads — they finished before sending their reaper results.
-        for handle in sponge_handles {
-            let _ = handle.join();
-        }
-        outcome
+        )?
     };
 
     #[cfg(not(unix))]
