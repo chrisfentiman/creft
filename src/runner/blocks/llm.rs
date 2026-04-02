@@ -1,15 +1,30 @@
-use std::io::{Read as _, Write as _};
+use std::path::Path;
 
 use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig};
 
-use super::super::substitute::substitute;
-use super::super::{EARLY_EXIT, RunContext, exit_code_of, make_execution_error};
+use super::BlockRunner;
 
-#[cfg(unix)]
-use super::super::pipe::PipeStdout;
-#[cfg(unix)]
-use super::super::pipe::ReaperResult;
+/// Runner for LLM provider CLI commands.
+///
+/// Builds a provider CLI invocation (e.g. `claude -p`) from the block's
+/// `llm_config`. The prompt is delivered via stdin by the caller —
+/// `_script_path` is a dummy file that exists but is ignored.
+pub(super) struct LlmRunner;
+
+impl BlockRunner for LlmRunner {
+    fn build_command(
+        &self,
+        block: &CodeBlock,
+        _script_path: &Path,
+    ) -> Result<(std::process::Command, Option<tempfile::TempDir>), CreftError> {
+        let config = block
+            .llm_config
+            .as_ref()
+            .expect("LlmRunner called on block without llm_config; validation must gate this");
+        Ok((build_llm_command(config), None))
+    }
+}
 
 /// Build a `Command` for the given LLM provider.
 ///
@@ -80,256 +95,82 @@ pub(crate) fn build_llm_command(config: &LlmConfig) -> std::process::Command {
     cmd
 }
 
-/// Execute an LLM block by piping the prompt to the provider CLI.
-///
-/// Returns captured stdout as a `String`. Output is also printed to the terminal.
-pub(crate) fn execute_llm_block(
-    block: &CodeBlock,
-    prompt: &str,
-    block_idx: usize,
-    ctx: &RunContext,
-) -> Result<String, CreftError> {
-    // Check cancellation before spawning the provider — avoids starting a
-    // potentially long-running LLM call when SIGINT already fired.
-    if ctx.is_cancelled() {
-        return Err(CreftError::EarlyExit);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn make_config(provider: &str, model: &str, params: &str) -> LlmConfig {
+        LlmConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            params: params.to_string(),
+        }
     }
 
-    let config = block
-        .llm_config
-        .as_ref()
-        .expect("execute_llm_block called on block without llm_config; validation must gate this");
-
-    let provider = if config.provider.is_empty() {
-        "claude"
-    } else {
-        config.provider.as_str()
-    };
-
-    let mut cmd = build_llm_command(config);
-    cmd.current_dir(ctx.cwd());
-    for (k, v) in ctx.env_pairs() {
-        cmd.env(k, v);
-    }
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let mut child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            CreftError::LlmProviderNotFound(format!(
-                "'{}' not found on PATH. Install the provider CLI and ensure it is in your PATH.",
-                provider
-            ))
-        } else {
-            CreftError::Io(e)
-        }
-    })?;
-
-    // Write prompt to stdin, then drop to close it.
-    // LLM providers read the full prompt before producing output, so this is safe.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes()).map_err(CreftError::Io)?;
+    #[test]
+    fn build_llm_command_claude_default() {
+        let config = make_config("", "", "");
+        let cmd = build_llm_command(&config);
+        let prog = format!("{:?}", cmd.get_program());
+        assert_eq!(prog, "\"claude\"");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-p"]);
     }
 
-    let output = child.wait_with_output().map_err(CreftError::Io)?;
-
-    if exit_code_of(&output.status) == Some(EARLY_EXIT) {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        print!("{}", stdout);
-        return Err(CreftError::EarlyExit);
+    #[test]
+    fn build_llm_command_claude_with_model() {
+        let config = make_config("claude", "claude-opus-4-5", "");
+        let cmd = build_llm_command(&config);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-p", "--model", "claude-opus-4-5"]);
     }
 
-    if !output.status.success() {
-        return Err(make_execution_error(block_idx, &block.lang, &output.status));
+    #[test]
+    fn build_llm_command_gemini_with_model() {
+        let config = make_config("gemini", "gemini-pro", "");
+        let cmd = build_llm_command(&config);
+        let prog = format!("{:?}", cmd.get_program());
+        assert_eq!(prog, "\"gemini\"");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-p", "-m", "gemini-pro"]);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    print!("{}", stdout);
+    #[test]
+    fn build_llm_command_codex() {
+        let config = make_config("codex", "", "");
+        let cmd = build_llm_command(&config);
+        let prog = format!("{:?}", cmd.get_program());
+        assert_eq!(prog, "\"codex\"");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["exec", "-"]);
+    }
 
-    Ok(stdout)
-}
+    #[test]
+    fn build_llm_command_ollama_with_model() {
+        let config = make_config("ollama", "llama3", "");
+        let cmd = build_llm_command(&config);
+        let prog = format!("{:?}", cmd.get_program());
+        assert_eq!(prog, "\"ollama\"");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["run", "llama3"]);
+    }
 
-/// Sponge stage for an LLM block in a pipe chain.
-///
-/// Reads all upstream output (the "sponge"), performs template substitution with
-/// the buffered content as `{{prev}}`, spawns the LLM provider, and relays the
-/// provider's output to `pipe_writer`. Sends the provider's exit status through
-/// `reaper_tx` for the main thread to collect.
-///
-/// Runs on a dedicated thread (`creft-sponge-N`), owning the entire LLM
-/// provider lifecycle. From the pipe chain's perspective, the sponge is just
-/// another stage that produces output on a pipe fd.
-///
-/// When `upstream` is `None` (block 0), the sponge reads from the parent's
-/// stdin. When block 0 is a sponge, `pgid_tx` carries the provider's PID
-/// back to `run_pipe_chain` so subsequent non-sponge blocks can join the
-/// process group.
-///
-/// No `pre_exec` hooks are used. Sponge spawns use `posix_spawn()` (no
-/// `fork()`) to avoid EPERM failures from non-main threads in CI
-/// environments. The provider is not placed in the pipe chain's process
-/// group and does not have SIGINT ignored. The sponge thread manages the
-/// provider's lifecycle directly via pipe ownership and `child.wait()`.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn sponge_thread(
-    upstream: Option<PipeStdout>,
-    pipe_writer: os_pipe::PipeWriter,
-    prompt_template: String,
-    config: crate::model::LlmConfig,
-    bound_refs: Vec<(String, String)>,
-    ctx: RunContext,
-    block_idx: usize,
-    pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
-    reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let buffered = match upstream {
-            Some(mut reader) => {
-                let mut buf = Vec::new();
-                // Ignore read errors — if upstream crashed, reaper catches its exit status.
-                let _ = reader.read_to_end(&mut buf);
-                String::from_utf8_lossy(&buf).to_string()
-            }
-            None => {
-                // Block 0: read from parent stdin.
-                let mut buf = Vec::new();
-                let _ = std::io::stdin().lock().read_to_end(&mut buf);
-                String::from_utf8_lossy(&buf).to_string()
-            }
-        };
-        let trimmed = buffered.trim_end().to_string();
+    #[test]
+    fn build_llm_command_unknown_provider() {
+        let config = make_config("myprovider", "mymodel", "");
+        let cmd = build_llm_command(&config);
+        let prog = format!("{:?}", cmd.get_program());
+        assert_eq!(prog, "\"myprovider\"");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--model", "mymodel"]);
+    }
 
-        // Template substitution with buffered content as {{prev}}.
-        let ref_pairs: Vec<(&str, &str)> = bound_refs
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .chain(std::iter::once(("prev", trimmed.as_str())))
-            .collect();
-        let prompt = match substitute(&prompt_template, &ref_pairs, "llm") {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
-                drop(pipe_writer);
-                if let Some(tx) = pgid_tx {
-                    let _ = tx.send(Err(()));
-                }
-                let _ = reaper_tx.send(ReaperResult {
-                    block_idx,
-                    lang: "llm".to_string(),
-                    status: Err(std::io::Error::other(e.to_string())),
-                });
-                return;
-            }
-        };
-
-        let provider = if config.provider.is_empty() {
-            "claude"
-        } else {
-            config.provider.as_str()
-        };
-
-        let mut cmd = build_llm_command(&config);
-        cmd.current_dir(ctx.cwd());
-        for (k, v) in ctx.env_pairs() {
-            cmd.env(k, v);
-        }
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::inherit());
-
-        // No pre_exec hooks on sponge spawns. pre_exec forces Rust's Command
-        // to use fork()+exec() instead of posix_spawn(). fork() from non-main
-        // threads fails with EPERM in CI environments (GitHub Actions macOS
-        // launchd sessions, Ubuntu containers). Without pre_exec, posix_spawn()
-        // is used, which works reliably from any thread.
-        //
-        // Consequences of removing pre_exec:
-        // - No setpgid: provider is not in the pipe chain's process group.
-        //   exit 99 cleanup via killpg won't reach it, but the provider dies
-        //   naturally when pipes close. The sponge thread owns the Child handle.
-        // - No SIG_IGN: provider receives SIGINT on Ctrl+C. The sponge thread
-        //   sees stdout close, stops relaying, and reports the exit status.
-        //   The only user-visible effect is the provider may print an error to
-        //   stderr before dying.
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                    format!(
-                        "'{}' not found on PATH. Install the provider CLI.",
-                        provider
-                    )
-                } else {
-                    e.to_string()
-                };
-                eprintln!("error: sponge block {}: {}", block_idx + 1, msg);
-                drop(pipe_writer);
-                if let Some(tx) = pgid_tx {
-                    let _ = tx.send(Err(()));
-                }
-                let _ = reaper_tx.send(ReaperResult {
-                    block_idx,
-                    lang: "llm".to_string(),
-                    status: Err(e),
-                });
-                return;
-            }
-        };
-
-        // If this sponge created the process group, report the provider's PID as pgid.
-        if let Some(tx) = pgid_tx {
-            let _ = tx.send(Ok(child.id()));
-        }
-
-        if let Some(mut stdin) = child.stdin.take() {
-            // Ignore BrokenPipe — provider's exit status is the authoritative error signal.
-            let _ = stdin.write_all(prompt.as_bytes());
-        }
-
-        let mut pipe_writer = pipe_writer;
-        if let Some(mut stdout) = child.stdout.take() {
-            let mut buf = [0u8; 8192];
-            loop {
-                match stdout.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        // During pipe execution PipeSignalGuard overwrites the signal-hook
-                        // handler, so this check fires primarily for single-block LLM runs
-                        // and between sequential blocks. It will become the primary
-                        // cancellation path when PipeSignalGuard is replaced in a future phase.
-                        if ctx.is_cancelled() {
-                            break;
-                        }
-                        if pipe_writer.write_all(&buf[..n]).is_err() {
-                            // Downstream closed its stdin early — stop relaying.
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-        }
-        // Drop pipe_writer to signal EOF to the downstream block.
-        drop(pipe_writer);
-
-        let status = child.wait();
-        let _ = reaper_tx.send(ReaperResult {
-            block_idx,
-            lang: "llm".to_string(),
-            status,
-        });
-    }));
-
-    if result.is_err() {
-        // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
-        let _ = reaper_tx.send(ReaperResult {
-            block_idx,
-            lang: "llm".to_string(),
-            status: Err(std::io::Error::other("sponge thread panicked")),
-        });
+    #[test]
+    fn build_llm_command_params_split_on_whitespace() {
+        let config = make_config("claude", "", "--verbose --output json");
+        let cmd = build_llm_command(&config);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-p", "--verbose", "--output", "json"]);
     }
 }

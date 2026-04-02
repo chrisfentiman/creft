@@ -22,7 +22,15 @@ impl BlockRunner for ShellRunner {
             }
         }
         let interp = interpreter(&block.lang);
-        let mut c = std::process::Command::new(interp);
+        // Split on whitespace to handle multi-token interpreters like "npx tsx".
+        // interpreter() may return "npx tsx" for TypeScript blocks; constructing
+        // Command::new("npx tsx") would fail with NotFound since the binary name
+        // includes a space. Splitting gives Command::new("npx") with arg "tsx".
+        let parts: Vec<&str> = interp.split_whitespace().collect();
+        let mut c = std::process::Command::new(parts[0]);
+        for part in &parts[1..] {
+            c.arg(part);
+        }
         c.arg(script_path);
         Ok((c, None))
     }

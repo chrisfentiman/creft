@@ -13,9 +13,6 @@ mod shell;
 
 #[cfg(test)]
 pub(crate) use llm::build_llm_command;
-pub(crate) use llm::execute_llm_block;
-#[cfg(unix)]
-pub(super) use llm::sponge_thread;
 
 /// Trait for language-specific block command building.
 ///
@@ -44,9 +41,9 @@ pub(super) fn runner_for(lang: &str) -> Box<dyn BlockRunner> {
         "python" | "python3" => Box::new(python::PythonRunner),
         "node" | "javascript" | "js" => Box::new(node::NodeRunner),
         "ruby" | "rb" => Box::new(ruby::RubyRunner),
-        // LLM blocks do not go through spawn_block — they use sponge_thread or
-        // execute_llm_block directly. The fallback here covers any unknown
-        // language by using the interpreter() name as the command (shell behavior).
+        "llm" => Box::new(llm::LlmRunner),
+        // Unknown language: fall back to ShellRunner which uses interpreter()
+        // to resolve the command name (returns the lang tag verbatim for unknowns).
         _ => Box::new(shell::ShellRunner),
     }
 }
@@ -129,9 +126,22 @@ pub(crate) fn spawn_block(
     }
 
     // Build a descriptive interpreter name for error messages.
-    // For deps-based blocks, name the package manager (uv/npm) since that
-    // is what actually needs to be on PATH.
-    let interp_name = if !block.deps.is_empty() {
+    // For LLM blocks, name the provider CLI. For deps-based blocks, name the
+    // package manager (uv/npm) since that is what actually needs to be on PATH.
+    let interp_name = if block.lang == "llm" {
+        let provider = block
+            .llm_config
+            .as_ref()
+            .map(|c| {
+                if c.provider.is_empty() {
+                    "claude"
+                } else {
+                    c.provider.as_str()
+                }
+            })
+            .unwrap_or("claude");
+        format!("'{}' (LLM provider CLI)", provider)
+    } else if !block.deps.is_empty() {
         match block.lang.as_str() {
             "python" | "python3" => {
                 "uv (install with: curl -LsSf https://astral.sh/uv/install.sh | sh)".to_string()

@@ -87,8 +87,8 @@ impl RunContext {
         self.dry_run
     }
 
-    /// Borrow the environment variable vec for cloning or inspection.
-    pub(crate) fn env(&self) -> &Vec<(String, String)> {
+    /// Borrow the environment variable slice for cloning or inspection.
+    pub(crate) fn env(&self) -> &[(String, String)] {
         &self.env
     }
 }
@@ -399,6 +399,12 @@ fn execute_block(
     ctx: &RunContext,
     stdin_data: Option<&[u8]>,
 ) -> Result<String, CreftError> {
+    // Check cancellation before spawning any block — avoids starting a
+    // potentially long-running process when SIGINT already fired.
+    if ctx.is_cancelled() {
+        return Err(CreftError::EarlyExit);
+    }
+
     let tmp = prepare_block_script(block, code)?;
     let tmp_path = tmp.path().to_path_buf();
 
@@ -511,18 +517,18 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     let block = &cmd.blocks[0];
     let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
 
-    if block.lang == "llm" {
-        match blocks::execute_llm_block(block, &expanded, 0, ctx) {
-            Ok(_) => Ok(()),
-            Err(CreftError::EarlyExit) => Ok(()),
-            Err(e) => Err(e),
-        }
+    // Sponge blocks (LLM) receive their expanded content via stdin.
+    // Script-based blocks read from the temp file; stdin_data is None.
+    let stdin_data = if block.needs_sponge() {
+        Some(expanded.as_bytes())
     } else {
-        match execute_block(block, &expanded, 0, ctx, None) {
-            Ok(_) => Ok(()),
-            Err(CreftError::EarlyExit) => Ok(()),
-            Err(e) => Err(e),
-        }
+        None
+    };
+
+    match execute_block(block, &expanded, 0, ctx, stdin_data) {
+        Ok(_) => Ok(()),
+        Err(CreftError::EarlyExit) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -579,7 +585,7 @@ pub fn render_blocks(cmd: &ParsedCommand, bound_refs: &[(&str, &str)]) -> Result
 }
 
 /// Print the expanded code for each block without executing it.
-pub fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(), CreftError> {
+fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(), CreftError> {
     check_env(cmd)?;
     let (bound, _passthrough) = parse_and_bind(cmd, raw_args)?;
     let bound_refs: Vec<(&str, &str)> = bound
@@ -621,7 +627,7 @@ pub fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::{assert_eq, assert_ne};
+    use pretty_assertions::assert_eq;
 
     fn make_context() -> RunContext {
         RunContext::new(

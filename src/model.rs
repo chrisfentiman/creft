@@ -372,6 +372,18 @@ pub struct CodeBlock {
     pub llm_parse_error: Option<String>,
 }
 
+impl CodeBlock {
+    /// Whether this block requires buffered (sponge) execution in a pipe chain.
+    ///
+    /// Sponge stages buffer all upstream input before spawning the block's
+    /// process. This is needed when the block's input model requires the
+    /// complete input before it can begin (e.g., LLM providers that read
+    /// the full prompt from stdin before producing output).
+    pub fn needs_sponge(&self) -> bool {
+        self.lang == "llm"
+    }
+}
+
 /// A fully parsed skill ready for execution.
 #[derive(Debug, Clone)]
 pub struct ParsedCommand {
@@ -1210,5 +1222,40 @@ params: "--max-tokens 1000"
         let yaml = "name: hello\ndescription: test\nsequential: true\n";
         let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(def.name, "hello");
+    }
+
+    fn make_block(lang: &str) -> CodeBlock {
+        CodeBlock {
+            lang: lang.to_string(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        }
+    }
+
+    #[test]
+    fn test_needs_sponge_true_for_llm() {
+        assert!(make_block("llm").needs_sponge());
+    }
+
+    #[test]
+    fn test_needs_sponge_false_for_bash() {
+        assert!(!make_block("bash").needs_sponge());
+    }
+
+    #[test]
+    fn test_needs_sponge_false_for_python() {
+        assert!(!make_block("python").needs_sponge());
+    }
+
+    #[test]
+    fn test_needs_sponge_false_for_node() {
+        assert!(!make_block("node").needs_sponge());
+    }
+
+    #[test]
+    fn test_needs_sponge_false_for_unknown() {
+        assert!(!make_block("typescript").needs_sponge());
     }
 }

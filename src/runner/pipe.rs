@@ -1,18 +1,19 @@
+use std::io::Read as _;
+use std::io::Write as _;
+
 use crate::error::CreftError;
-use crate::model::ParsedCommand;
+use crate::model::{CodeBlock, ParsedCommand};
 
 use super::blocks::spawn_block;
 use super::substitute::substitute;
 use super::{EARLY_EXIT, RunContext, exit_code_of, make_execution_error, prepare_block_script};
 
 #[cfg(unix)]
-use super::blocks::sponge_thread;
-#[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
 /// A stdout handle from a pipe chain stage.
 ///
-/// Normal blocks produce a `ChildStdout`; sponge (LLM) stages produce a
+/// Normal blocks produce a `ChildStdout`; sponge stages produce a
 /// `PipeReader` from an `os_pipe::pipe()` pair. Both can be converted to
 /// `Stdio` for the next block's stdin, and both implement `Read` for the
 /// relay thread.
@@ -57,6 +58,249 @@ pub(crate) struct ReaperResult {
     pub(crate) status: Result<std::process::ExitStatus, std::io::Error>,
 }
 
+/// Communication channels for a sponge stage thread.
+///
+/// Groups the mpsc channels used to report back to the pipe orchestrator,
+/// keeping `sponge_stage`'s parameter count within clippy's limit.
+#[cfg(unix)]
+pub(super) struct SpongeChannels {
+    /// When this sponge is block 0, carries the spawned process's PID back to
+    /// `run_pipe_chain` so subsequent non-sponge blocks can join the process group.
+    /// `None` for non-first blocks (pgid is already set from block 0).
+    pub(super) pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
+    /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
+    pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
+}
+
+/// Sponge stage for a buffered block in a pipe chain.
+///
+/// Buffers all upstream output, performs template substitution with the
+/// buffered content as `{{prev}}`, builds a `Command` via the block's runner,
+/// spawns the process, pipes the expanded content to stdin, and relays the
+/// process's stdout to `pipe_writer`. Sends the process's exit status through
+/// `channels.reaper_tx`.
+///
+/// The sponge is generic — it works with any block type whose runner produces
+/// a command that reads its input from stdin. For LLM blocks, the runner builds
+/// the provider CLI command; future block types that need full upstream buffering
+/// before starting (e.g. `buffered: true` metadata) can reuse the same path.
+///
+/// No `pre_exec` hooks are used. Sponge spawns use `posix_spawn()` (no
+/// `fork()`) to avoid EPERM failures from non-main threads in CI environments
+/// (GitHub Actions macOS launchd sessions, Ubuntu containers). The spawned
+/// process is not placed in the pipe chain's process group and does not have
+/// SIGINT ignored. The sponge thread manages the process's lifecycle directly
+/// via pipe ownership and `child.wait()`.
+///
+/// When `upstream` is `None` (block 0), the sponge reads from the parent's
+/// stdin. When block 0 is a sponge, `channels.pgid_tx` carries the process PID
+/// back to `run_pipe_chain` so subsequent non-sponge blocks can join the process
+/// group.
+///
+/// Note: during pipe execution `PipeSignalGuard` overwrites the signal-hook
+/// handler, so `ctx.is_cancelled()` will not fire from SIGINT during pipe
+/// chains. The check is correct and will become the primary cancellation path
+/// when `PipeSignalGuard` is eventually replaced.
+#[cfg(unix)]
+pub(super) fn sponge_stage(
+    upstream: Option<PipeStdout>,
+    pipe_writer: os_pipe::PipeWriter,
+    block: &CodeBlock,
+    bound_refs: Vec<(String, String)>,
+    ctx: RunContext,
+    block_idx: usize,
+    channels: SpongeChannels,
+) {
+    let SpongeChannels { pgid_tx, reaper_tx } = channels;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Step 1: Buffer upstream input.
+        let buffered = match upstream {
+            Some(mut reader) => {
+                let mut buf = Vec::new();
+                // Ignore read errors — if upstream crashed, reaper catches its exit status.
+                let _ = reader.read_to_end(&mut buf);
+                String::from_utf8_lossy(&buf).to_string()
+            }
+            None => {
+                // Block 0: read from parent stdin.
+                let mut buf = Vec::new();
+                let _ = std::io::stdin().lock().read_to_end(&mut buf);
+                String::from_utf8_lossy(&buf).to_string()
+            }
+        };
+        let trimmed = buffered.trim_end().to_string();
+
+        // Step 2: Template substitution with buffered content as {{prev}}.
+        let ref_pairs: Vec<(&str, &str)> = bound_refs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .chain(std::iter::once(("prev", trimmed.as_str())))
+            .collect();
+        let expanded = match substitute(&block.code, &ref_pairs, &block.lang) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
+                drop(pipe_writer);
+                if let Some(tx) = pgid_tx {
+                    let _ = tx.send(Err(()));
+                }
+                let _ = reaper_tx.send(ReaperResult {
+                    block_idx,
+                    lang: block.lang.clone(),
+                    status: Err(std::io::Error::other(e.to_string())),
+                });
+                return;
+            }
+        };
+
+        // Step 3: Build command via the block's runner.
+        // prepare_block_script creates a temp file; LLM runners ignore it (prompt
+        // is delivered via stdin), but it must exist for the trait signature.
+        let tmp = match prepare_block_script(block, &expanded) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
+                drop(pipe_writer);
+                if let Some(tx) = pgid_tx {
+                    let _ = tx.send(Err(()));
+                }
+                let _ = reaper_tx.send(ReaperResult {
+                    block_idx,
+                    lang: block.lang.clone(),
+                    status: Err(std::io::Error::other(e.to_string())),
+                });
+                return;
+            }
+        };
+        let runner = super::blocks::runner_for(&block.lang);
+        let (mut cmd, _node_deps_dir) = match runner.build_command(block, tmp.path()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
+                drop(pipe_writer);
+                if let Some(tx) = pgid_tx {
+                    let _ = tx.send(Err(()));
+                }
+                let _ = reaper_tx.send(ReaperResult {
+                    block_idx,
+                    lang: block.lang.clone(),
+                    status: Err(std::io::Error::other(e.to_string())),
+                });
+                return;
+            }
+        };
+
+        // Step 4: Apply shared config.
+        // No pre_exec hooks — posix_spawn() compatibility for non-main threads.
+        cmd.current_dir(ctx.cwd());
+        for (k, v) in ctx.env_pairs() {
+            cmd.env(k, v);
+        }
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::inherit());
+
+        // Step 5: Spawn.
+        // For the error message, use the provider name for LLM blocks so the
+        // user knows which CLI is missing, not just "llm".
+        let display_name = if block.lang == "llm" {
+            block
+                .llm_config
+                .as_ref()
+                .map(|c| {
+                    if c.provider.is_empty() {
+                        "claude".to_string()
+                    } else {
+                        c.provider.clone()
+                    }
+                })
+                .unwrap_or_else(|| "claude".to_string())
+        } else {
+            block.lang.clone()
+        };
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "'{}' not found on PATH. Install the provider CLI.",
+                        display_name
+                    )
+                } else {
+                    e.to_string()
+                };
+                eprintln!("error: sponge block {}: {}", block_idx + 1, msg);
+                drop(pipe_writer);
+                if let Some(tx) = pgid_tx {
+                    let _ = tx.send(Err(()));
+                }
+                let _ = reaper_tx.send(ReaperResult {
+                    block_idx,
+                    lang: block.lang.clone(),
+                    status: Err(e),
+                });
+                return;
+            }
+        };
+
+        // When this sponge is block 0, report the child's PID.
+        if let Some(tx) = pgid_tx {
+            let _ = tx.send(Ok(child.id()));
+        }
+
+        // Step 6: Pipe expanded content to stdin.
+        if let Some(mut stdin) = child.stdin.take() {
+            // Ignore BrokenPipe — child's exit status is the authoritative error signal.
+            let _ = stdin.write_all(expanded.as_bytes());
+        }
+
+        // Step 7: Relay stdout to pipe_writer with cancellation checks.
+        let mut pipe_writer = pipe_writer;
+        if let Some(mut stdout) = child.stdout.take() {
+            let mut buf = [0u8; 8192];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        // During pipe execution PipeSignalGuard overwrites the signal-hook
+                        // handler, so this check fires primarily for single-block runs
+                        // and between sequential blocks. It will become the primary
+                        // cancellation path when PipeSignalGuard is replaced in a future phase.
+                        if ctx.is_cancelled() {
+                            break;
+                        }
+                        if pipe_writer.write_all(&buf[..n]).is_err() {
+                            // Downstream closed its stdin early — stop relaying.
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        // Drop pipe_writer to signal EOF to the downstream block.
+        drop(pipe_writer);
+
+        // Step 8: Wait and report.
+        let status = child.wait();
+        let _ = reaper_tx.send(ReaperResult {
+            block_idx,
+            lang: block.lang.clone(),
+            status,
+        });
+    }));
+
+    if result.is_err() {
+        // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
+        let _ = reaper_tx.send(ReaperResult {
+            block_idx,
+            lang: block.lang.clone(),
+            status: Err(std::io::Error::other("sponge thread panicked")),
+        });
+    }
+}
+
 /// Wait for all children in a Unix pipe chain using concurrent reaper threads
 /// and a buffered stdout relay.
 ///
@@ -74,12 +318,6 @@ pub(crate) struct ReaperResult {
 ///
 /// This design guarantees zero leakage: if any block exits 99, the relay buffer
 /// is discarded without ever writing to the terminal.
-///
-/// Note: side effects that occur unconditionally at block startup (before stdin
-/// is read) cannot be suppressed by exit 99, because all blocks are spawned
-/// concurrently before any are waited on. This is inherent to pipe architecture
-/// and applies equally to shell pipes (`false | touch /tmp/foo` creates the
-/// file despite `false` exiting 1).
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     children: Vec<(std::process::Child, usize, String)>,
@@ -88,8 +326,6 @@ fn wait_pipe_children_unix(
     tx: std::sync::mpsc::Sender<ReaperResult>,
     rx: std::sync::mpsc::Receiver<ReaperResult>,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
-    use std::io::Read as _;
-
     // Spawn relay thread: reads the last block's piped stdout into a buffer.
     // Never writes to the terminal — the main thread decides flush vs. discard.
     let relay_handle = std::thread::Builder::new()
@@ -163,7 +399,6 @@ fn wait_pipe_children_unix(
     let relay_buffer = relay_handle.join().unwrap_or_default();
 
     if !early_exit {
-        use std::io::Write as _;
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
         // Ignore write errors: creft's own stdout may be a broken pipe.
@@ -228,9 +463,10 @@ fn wait_pipe_children_fallback(
 /// last block's stdout is buffered by a relay thread; output is flushed to the
 /// terminal only after confirming no block exited 99.
 ///
-/// LLM blocks participate as sponge stages: each sponge thread reads all
-/// upstream output, performs template substitution, spawns the LLM provider,
-/// and relays the provider's stdout to the next block via an `os_pipe` pair.
+/// Blocks that return `true` from `needs_sponge()` participate as sponge stages:
+/// each sponge thread reads all upstream output, performs template substitution,
+/// spawns the block's process, and relays the process's stdout to the next block
+/// via an `os_pipe` pair.
 ///
 /// Returns Ok(()) if the last block exits successfully. Earlier blocks dying
 /// from SIGPIPE when the downstream consumer exits early is normal pipeline
@@ -242,12 +478,11 @@ pub(super) fn run_pipe_chain(
 ) -> Result<(), CreftError> {
     let n = cmd.blocks.len();
 
-    // Temp files for non-LLM blocks. LLM blocks do not use script files —
-    // the prompt is written directly to the provider's stdin by the sponge thread.
-    // Use Option<NamedTempFile> so the index aligns with block indices.
+    // Temp files for non-sponge blocks. Sponge blocks use prepare_block_script
+    // internally inside sponge_stage. Use Option so indices align with block indices.
     let mut temp_files: Vec<Option<tempfile::NamedTempFile>> = Vec::with_capacity(n);
     for block in &cmd.blocks {
-        if block.lang == "llm" {
+        if block.needs_sponge() {
             temp_files.push(None);
         } else {
             // In pipe mode, no "prev" template arg (output is on stdin).
@@ -281,7 +516,7 @@ pub(super) fn run_pipe_chain(
         let is_last = i == n - 1;
 
         #[cfg(unix)]
-        if block.lang == "llm" {
+        if block.needs_sponge() {
             let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(CreftError::Io)?;
 
             let upstream = prev_stdout.take();
@@ -300,42 +535,38 @@ pub(super) fn run_pipe_chain(
             };
             let pgid_tx = pgid_channel.as_ref().map(|(tx, _)| tx.clone());
 
-            let llm_config = block
-                .llm_config
-                .clone()
-                .expect("llm block without llm_config; validation must gate this");
+            let owned_block = block.clone();
             let owned_bound_refs: Vec<(String, String)> = bound_refs
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
             let ctx_clone = ctx.clone();
             let reaper_tx_clone = reaper_tx.clone();
-            let prompt_template = block.code.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("creft-sponge-{i}"))
                 .spawn(move || {
-                    sponge_thread(
+                    sponge_stage(
                         upstream,
                         pipe_writer,
-                        prompt_template,
-                        llm_config,
+                        &owned_block,
                         owned_bound_refs,
                         ctx_clone,
                         i,
-                        pgid_tx,
-                        reaper_tx_clone,
+                        SpongeChannels {
+                            pgid_tx,
+                            reaper_tx: reaper_tx_clone,
+                        },
                     );
                 })
                 .expect("failed to spawn sponge thread");
             sponge_handles.push(handle);
 
-            // If block 0 is a sponge, wait for the provider to spawn before
-            // continuing. The sponge's provider PID is not used as the process
-            // group ID — posix_spawn() is used (no pre_exec setpgid), so the
-            // provider is not a pgid leader. The first non-sponge block creates
-            // the process group instead. Provider failure is handled by the
-            // reaper channel — continue regardless.
+            // If block 0 is a sponge, wait for the process to spawn before
+            // continuing. The provider PID is not used as the process group ID —
+            // posix_spawn() is used (no pre_exec setpgid), so it is not a pgid
+            // leader. The first non-sponge block creates the process group instead.
+            // Provider failure is handled by the reaper channel — continue regardless.
             if is_pgid_creator && let Some((_, pgid_rx)) = pgid_channel {
                 let _ = pgid_rx.recv();
             }
@@ -353,7 +584,7 @@ pub(super) fn run_pipe_chain(
 
         let script_path = temp_files[i]
             .as_ref()
-            .expect("non-llm block must have temp file")
+            .expect("non-sponge block must have temp file")
             .path();
 
         let stdin_cfg = match prev_stdout.take() {
