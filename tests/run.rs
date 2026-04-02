@@ -1974,3 +1974,92 @@ fn test_legacy_sequential_true_ignored() {
         .success()
         .stdout(predicate::str::contains("got: piped"));
 }
+
+// ── exit-99 relay flush regression tests ─────────────────────────────────────
+
+/// When the LAST block in a pipe chain exits 99, its stdout must appear on the
+/// terminal. The relay buffer contains valid output from the exit-99 block and
+/// must be flushed, not discarded.
+///
+/// Regression guard for the stdout-swallowing bug: exit-99 output from the
+/// last block was previously discarded unconditionally.
+#[test]
+fn test_pipe_exit_99_last_block_stdout_preserved() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-last-stdout\n",
+            "description: last block exit 99 preserves stdout\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo upstream\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat >/dev/null\n",
+            "echo final-output\n",
+            "exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["exit99-last-stdout"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("final-output"));
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 5,
+        "pipe must terminate quickly (took {:?})",
+        elapsed
+    );
+}
+
+/// When the last block exits 99 after printing multiple lines, all lines must
+/// appear on stdout.
+///
+/// Regression guard: multi-line output from an exit-99 last block must not be
+/// truncated or dropped.
+#[test]
+fn test_pipe_exit_99_last_block_multiline_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-last-multiline\n",
+            "description: last block exit 99 preserves all lines\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo input\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat >/dev/null\n",
+            "echo line1\n",
+            "echo line2\n",
+            "echo line3\n",
+            "exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["exit99-last-multiline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("line1"))
+        .stdout(predicate::str::contains("line2"))
+        .stdout(predicate::str::contains("line3"));
+}

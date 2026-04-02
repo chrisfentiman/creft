@@ -50,12 +50,26 @@ pub(super) struct PipeResult {
     pub(super) status: std::process::ExitStatus,
 }
 
+/// Outcome of a single block in a pipe chain.
+///
+/// Replaces `Result<ExitStatus, io::Error>` in `ReaperResult` to accommodate
+/// blocks that were cancelled before spawning (e.g. upstream exit 99).
+#[cfg(unix)]
+pub(crate) enum BlockOutcome {
+    /// Block spawned and exited with a status.
+    Exited(std::process::ExitStatus),
+    /// Block failed to spawn or wait.
+    Error(std::io::Error),
+    /// Block was cancelled before spawning (upstream exit 99).
+    Cancelled,
+}
+
 /// Result from a single reaper thread (Unix pipe mode).
 #[cfg(unix)]
 pub(crate) struct ReaperResult {
     pub(crate) block_idx: usize,
     pub(crate) lang: String,
-    pub(crate) status: Result<std::process::ExitStatus, std::io::Error>,
+    pub(crate) outcome: BlockOutcome,
 }
 
 /// Communication channels for a sponge stage thread.
@@ -129,6 +143,21 @@ pub(super) fn sponge_stage(
         };
         let trimmed = buffered.trim_end().to_string();
 
+        // If the pipeline was cancelled (upstream exit 99), bail without spawning
+        // the provider. Send Cancelled outcome so the reaper count stays correct.
+        if ctx.is_cancelled() {
+            drop(pipe_writer);
+            if let Some(tx) = pgid_tx {
+                let _ = tx.send(Err(()));
+            }
+            let _ = reaper_tx.send(ReaperResult {
+                block_idx,
+                lang: block.lang.clone(),
+                outcome: BlockOutcome::Cancelled,
+            });
+            return;
+        }
+
         let ref_pairs: Vec<(&str, &str)> = bound_refs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -145,7 +174,7 @@ pub(super) fn sponge_stage(
                 let _ = reaper_tx.send(ReaperResult {
                     block_idx,
                     lang: block.lang.clone(),
-                    status: Err(std::io::Error::other(e.to_string())),
+                    outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
                 return;
             }
@@ -164,7 +193,7 @@ pub(super) fn sponge_stage(
                 let _ = reaper_tx.send(ReaperResult {
                     block_idx,
                     lang: block.lang.clone(),
-                    status: Err(std::io::Error::other(e.to_string())),
+                    outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
                 return;
             }
@@ -181,7 +210,7 @@ pub(super) fn sponge_stage(
                 let _ = reaper_tx.send(ReaperResult {
                     block_idx,
                     lang: block.lang.clone(),
-                    status: Err(std::io::Error::other(e.to_string())),
+                    outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
                 });
                 return;
             }
@@ -195,6 +224,20 @@ pub(super) fn sponge_stage(
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
+
+        // Second cancellation check — shrinks the race window to near-zero.
+        if ctx.is_cancelled() {
+            drop(pipe_writer);
+            if let Some(tx) = pgid_tx {
+                let _ = tx.send(Err(()));
+            }
+            let _ = reaper_tx.send(ReaperResult {
+                block_idx,
+                lang: block.lang.clone(),
+                outcome: BlockOutcome::Cancelled,
+            });
+            return;
+        }
 
         // For the error message, use the provider name for LLM blocks so the
         // user knows which CLI is missing, not just "llm".
@@ -232,7 +275,7 @@ pub(super) fn sponge_stage(
                 let _ = reaper_tx.send(ReaperResult {
                     block_idx,
                     lang: block.lang.clone(),
-                    status: Err(e),
+                    outcome: BlockOutcome::Error(e),
                 });
                 return;
             }
@@ -279,7 +322,10 @@ pub(super) fn sponge_stage(
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
-            status,
+            outcome: match status {
+                Ok(s) => BlockOutcome::Exited(s),
+                Err(e) => BlockOutcome::Error(e),
+            },
         });
     }));
 
@@ -288,7 +334,7 @@ pub(super) fn sponge_stage(
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
-            status: Err(std::io::Error::other("sponge thread panicked")),
+            outcome: BlockOutcome::Error(std::io::Error::other("sponge thread panicked")),
         });
     }
 }
@@ -317,6 +363,8 @@ fn wait_pipe_children_unix(
     child_pgid: Option<u32>,
     tx: std::sync::mpsc::Sender<ReaperResult>,
     rx: std::sync::mpsc::Receiver<ReaperResult>,
+    cancel: &std::sync::atomic::AtomicBool,
+    last_block_idx: usize,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
     // Never writes to the terminal — the main thread decides flush vs. discard.
     let relay_handle = std::thread::Builder::new()
@@ -348,7 +396,10 @@ fn wait_pipe_children_unix(
                 let _ = tx.send(ReaperResult {
                     block_idx,
                     lang,
-                    status,
+                    outcome: match status {
+                        Ok(s) => BlockOutcome::Exited(s),
+                        Err(e) => BlockOutcome::Error(e),
+                    },
                 });
             })
             .expect("failed to spawn reaper thread");
@@ -361,39 +412,62 @@ fn wait_pipe_children_unix(
     let mut early_exit = false;
 
     while let Ok(reaper_result) = rx.recv() {
-        let status = reaper_result.status.map_err(CreftError::Io)?;
-
-        if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
-            early_exit = true;
-            // Kill all processes in the pipe group so grandchildren are also killed.
-            if let Some(pgid) = child_pgid {
-                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                // pgid is valid (obtained from block 0's PID after spawn).
-                // Negative pgid means "all processes in process group pgid".
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+        match reaper_result.outcome {
+            BlockOutcome::Cancelled => {
+                // Sponge cancelled before spawning — not a failure, not an exit.
+                // Do not push to results; the block did not participate.
+                continue;
+            }
+            BlockOutcome::Error(e) => {
+                return Err(CreftError::Io(e));
+            }
+            BlockOutcome::Exited(status) => {
+                if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
+                    early_exit = true;
+                    // Kill all processes in the pipe group so grandchildren are also killed.
+                    if let Some(pgid) = child_pgid {
+                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                        // pgid is valid (obtained from block 0's PID after spawn).
+                        // Negative pgid means "all processes in process group pgid".
+                        unsafe {
+                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                        }
+                    }
+                    // Signal sponge threads to bail before spawning.
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+
+                results.push(PipeResult {
+                    block: reaper_result.block_idx,
+                    lang: reaper_result.lang,
+                    status,
+                });
             }
         }
-
-        results.push(PipeResult {
-            block: reaper_result.block_idx,
-            lang: reaper_result.lang,
-            status,
-        });
     }
 
     // All reapers have exited. Join the relay thread to retrieve the buffered output.
     // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
     let relay_buffer = relay_handle.join().unwrap_or_default();
 
-    if !early_exit {
+    if early_exit {
+        // Flush only if the exit-99 block is the last block. Its stdout IS the
+        // relay buffer, so the output is the intended final result.
+        // Output from a killed passthrough last block is partial and discarded.
+        let exit99_is_last = results
+            .iter()
+            .any(|r| r.block == last_block_idx && exit_code_of(&r.status) == Some(EARLY_EXIT));
+        if exit99_is_last && !relay_buffer.is_empty() {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let _ = lock.write_all(&relay_buffer);
+        }
+    } else {
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
         // Ignore write errors: creft's own stdout may be a broken pipe.
         let _ = lock.write_all(&relay_buffer);
     }
-    // If early_exit is true, relay_buffer drops here without writing. Zero leakage.
 
     // Sort by spawn order before post-loop checks; channel delivers in exit order.
     results.sort_by_key(|r| r.block);
@@ -694,7 +768,15 @@ pub(super) fn run_pipe_chain(
         // Drop the main-thread tx clone so rx closes when all senders (sponge + reaper) drop.
         let tx = reaper_tx;
         let rx = reaper_rx;
-        let outcome = wait_pipe_children_unix(children, last_stdout, child_pgid, tx, rx)?;
+        let outcome = wait_pipe_children_unix(
+            children,
+            last_stdout,
+            child_pgid,
+            tx,
+            rx,
+            ctx.cancel_token(),
+            n - 1,
+        )?;
         // Join sponge threads — they finished before sending their reaper results.
         for handle in sponge_handles {
             let _ = handle.join();
@@ -710,6 +792,9 @@ pub(super) fn run_pipe_chain(
     };
 
     if early_exit {
+        // Ensure the cancel token is set for any code that polls it after the
+        // pipe chain returns (e.g. non-Unix paths or callers of run_pipe_chain).
+        ctx.request_cancel();
         return Ok(());
     }
 

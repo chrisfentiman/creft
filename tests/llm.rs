@@ -535,3 +535,59 @@ args:\n  - name: greeting\n    required: true\n---\n\n\
         .stdout(predicate::str::contains("hello:"))
         .stdout(predicate::str::contains("data"));
 }
+
+/// When an upstream bash block exits 99, the downstream LLM sponge must NOT
+/// spawn its provider. The provider should never run.
+///
+/// Regression guard for Bug 1: before the fix, the sponge would read EOF and
+/// unconditionally spawn the provider with an empty prompt.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_prevents_sponge_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = creft_env();
+    let script_dir = tempfile::TempDir::new().unwrap();
+    let sentinel = script_dir.path().join("sentinel.txt");
+    let script_path = script_dir.path().join("mock-provider.sh");
+
+    // The mock provider creates a sentinel file when it runs, then reads stdin.
+    let script_content = format!("#!/bin/sh\ntouch {}\ncat\n", sentinel.to_string_lossy());
+    {
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        f.write_all(script_content.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let provider_path = script_path.to_string_lossy();
+    let skill = format!(
+        "---\nname: exit99-no-sponge\ndescription: upstream exit 99 prevents sponge spawn\n---\n\n\
+```bash\nexit 99\n```\n\n\
+```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n"
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill.as_str())
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["exit99-no-sponge"])
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+
+    assert!(
+        !sentinel.exists(),
+        "provider must not have been spawned (sentinel file found)",
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "must complete quickly when upstream exits 99 (took {:?})",
+        elapsed
+    );
+}

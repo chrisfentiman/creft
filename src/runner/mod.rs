@@ -91,6 +91,20 @@ impl RunContext {
     pub(crate) fn env(&self) -> &[(String, String)] {
         &self.env
     }
+
+    /// Request cancellation. Sets the shared cancel token to `true`.
+    ///
+    /// Safe to call from any thread. All clones of this context will observe
+    /// the cancellation on the next `is_cancelled()` poll.
+    pub(crate) fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Borrow the underlying cancel token for passing to functions that need
+    /// to signal cancellation without holding the full context.
+    pub(super) fn cancel_token(&self) -> &AtomicBool {
+        &self.cancel
+    }
 }
 
 /// Exit code that signals early successful return — skip remaining blocks.
@@ -1795,5 +1809,34 @@ mod tests {
         let config = llm_config("ollama", "mistral", "");
         let formatted = format_llm_command(&config);
         assert!(formatted.starts_with("ollama run mistral"));
+    }
+
+    #[test]
+    fn run_context_request_cancel_sets_flag() {
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        );
+        assert_eq!(ctx.is_cancelled(), false);
+        ctx.request_cancel();
+        assert_eq!(ctx.is_cancelled(), true);
+    }
+
+    #[test]
+    fn run_context_request_cancel_visible_to_clones() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let ctx = RunContext::new(
+            Arc::clone(&cancel),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        );
+        let cloned = ctx.clone();
+        ctx.request_cancel();
+        assert_eq!(cloned.is_cancelled(), true);
     }
 }
