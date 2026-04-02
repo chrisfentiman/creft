@@ -345,8 +345,8 @@ pub(super) fn sponge_stage(
 /// Each child is moved into its own reaper thread that calls `child.wait()` and
 /// sends the result through an mpsc channel. Results arrive in exit order, not
 /// spawn order. The last block's stdout is relayed into a buffer by a dedicated
-/// relay thread; output is only flushed to the terminal after all reapers have
-/// reported and no exit 99 was detected.
+/// relay thread; the buffer is flushed to the terminal only after all reapers
+/// have reported and the exit-99 check passes.
 ///
 /// The `tx`/`rx` channel pair is created by the caller (`run_pipe_chain`) so
 /// that sponge threads can also send results through the same channel before
@@ -354,8 +354,10 @@ pub(super) fn sponge_stage(
 /// calling this function so the channel closes when all reaper and sponge
 /// threads finish.
 ///
-/// This design guarantees zero leakage: if any block exits 99, the relay buffer
-/// is discarded without ever writing to the terminal.
+/// Relay buffer flush is selective: if an exit-99 block is the last block in
+/// the chain, its output has already been captured in the relay buffer and is
+/// flushed to the terminal. If the exit-99 block is not the last block, the
+/// relay buffer is discarded without writing to the terminal.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     children: Vec<(std::process::Child, usize, String)>,
