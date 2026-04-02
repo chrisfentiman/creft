@@ -545,7 +545,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
 /// Run a full parsed command using a `RunContext`.
 ///
 /// Returns immediately if cancellation has already been requested.
-pub(crate) fn run_with_ctx(
+pub(crate) fn run(
     cmd: &ParsedCommand,
     raw_args: &[String],
     ctx: &RunContext,
@@ -557,12 +557,12 @@ pub(crate) fn run_with_ctx(
 }
 
 /// Print the expanded code for each block without executing it, using a `RunContext`.
-pub(crate) fn dry_run_ctx(
+pub(crate) fn dry_run(
     cmd: &ParsedCommand,
     raw_args: &[String],
     ctx: &RunContext,
 ) -> Result<(), CreftError> {
-    dry_run(cmd, raw_args, ctx.cwd())
+    dry_run_inner(cmd, raw_args, ctx.cwd())
 }
 
 /// Write rendered (substituted) blocks to stderr for diagnostic inspection.
@@ -595,7 +595,7 @@ pub fn render_blocks(cmd: &ParsedCommand, bound_refs: &[(&str, &str)]) -> Result
 }
 
 /// Print the expanded code for each block without executing it.
-fn dry_run(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(), CreftError> {
+fn dry_run_inner(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result<(), CreftError> {
     check_env(cmd)?;
     let (bound, _passthrough) = parse_and_bind(cmd, raw_args)?;
     let bound_refs: Vec<(&str, &str)> = bound
@@ -671,7 +671,7 @@ mod tests {
             false,
             false,
         );
-        run_with_ctx(cmd, &args, &ctx)
+        run(cmd, &args, &ctx)
     }
 
     #[test]

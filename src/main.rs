@@ -251,9 +251,9 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
                     false,
                     true,
                 );
-                return runner::run_with_ctx(&cmd, &remaining, &native_ctx);
+                return runner::run(&cmd, &remaining, &native_ctx);
             } else {
-                return runner::dry_run_ctx(&cmd, &remaining, &run_ctx);
+                return runner::dry_run(&cmd, &remaining, &run_ctx);
             }
         }
 
@@ -264,7 +264,7 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
     }
 
     // --verbose only (render done above) or no flags: execute normally.
-    runner::run_with_ctx(&cmd, &remaining, &run_ctx)
+    runner::run(&cmd, &remaining, &run_ctx)
 }
 
 /// Show namespace help: a header line followed by the grouped skill listing.
