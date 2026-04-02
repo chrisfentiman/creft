@@ -953,12 +953,10 @@ mod tests {
     fn test_truncate_desc_over_max_truncated() {
         let s = "a".repeat(100);
         let result = truncate_desc(&s, 60);
-        // Result should end with "..."
         assert!(
             result.ends_with("..."),
             "truncated string should end with '...'; got: {result:?}"
         );
-        // Result should be at most 60 chars.
         assert!(
             result.chars().count() <= 60,
             "truncated string should be at most 60 chars; got {} chars",

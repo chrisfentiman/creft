@@ -43,12 +43,11 @@ pub(super) struct PipeSignalGuard {
 
 impl PipeSignalGuard {
     pub(super) fn new(child_pgid: u32) -> Self {
-        // Store the child pgid for the forwarding handler.
         PIPE_CHILD_PGID.store(child_pgid, std::sync::atomic::Ordering::SeqCst);
 
-        // Install the forwarding handler, saving the previous disposition for
-        // restoration in Drop. creft ignores SIGINT while waiting for children;
-        // the handler forwards any SIGINT to the child process group instead.
+        // creft ignores SIGINT while waiting for children; the handler
+        // forwards any SIGINT to the child process group instead. The
+        // previous disposition is saved here and restored in Drop.
         //
         // SAFETY: sigint_forward_handler is an extern "C" fn and is
         // async-signal-safe (only calls atomic load and kill). Casting to

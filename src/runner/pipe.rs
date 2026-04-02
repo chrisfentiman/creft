@@ -113,7 +113,6 @@ pub(super) fn sponge_stage(
 ) {
     let SpongeChannels { pgid_tx, reaper_tx } = channels;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Step 1: Buffer upstream input.
         let buffered = match upstream {
             Some(mut reader) => {
                 let mut buf = Vec::new();
@@ -130,7 +129,6 @@ pub(super) fn sponge_stage(
         };
         let trimmed = buffered.trim_end().to_string();
 
-        // Step 2: Template substitution with buffered content as {{prev}}.
         let ref_pairs: Vec<(&str, &str)> = bound_refs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -153,7 +151,6 @@ pub(super) fn sponge_stage(
             }
         };
 
-        // Step 3: Build command via the block's runner.
         // prepare_block_script creates a temp file; LLM runners ignore it (prompt
         // is delivered via stdin), but it must exist for the trait signature.
         let tmp = match prepare_block_script(block, &expanded) {
@@ -190,7 +187,6 @@ pub(super) fn sponge_stage(
             }
         };
 
-        // Step 4: Apply shared config.
         // No pre_exec hooks — posix_spawn() compatibility for non-main threads.
         cmd.current_dir(ctx.cwd());
         for (k, v) in ctx.env_pairs() {
@@ -200,7 +196,6 @@ pub(super) fn sponge_stage(
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
 
-        // Step 5: Spawn.
         // For the error message, use the provider name for LLM blocks so the
         // user knows which CLI is missing, not just "llm".
         let display_name = if block.lang == "llm" {
@@ -248,13 +243,11 @@ pub(super) fn sponge_stage(
             let _ = tx.send(Ok(child.id()));
         }
 
-        // Step 6: Pipe expanded content to stdin.
         if let Some(mut stdin) = child.stdin.take() {
             // Ignore BrokenPipe — child's exit status is the authoritative error signal.
             let _ = stdin.write_all(expanded.as_bytes());
         }
 
-        // Step 7: Relay stdout to pipe_writer with cancellation checks.
         let mut pipe_writer = pipe_writer;
         if let Some(mut stdout) = child.stdout.take() {
             let mut buf = [0u8; 8192];
@@ -282,7 +275,6 @@ pub(super) fn sponge_stage(
         // Drop pipe_writer to signal EOF to the downstream block.
         drop(pipe_writer);
 
-        // Step 8: Wait and report.
         let status = child.wait();
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
@@ -326,7 +318,6 @@ fn wait_pipe_children_unix(
     tx: std::sync::mpsc::Sender<ReaperResult>,
     rx: std::sync::mpsc::Receiver<ReaperResult>,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
-    // Spawn relay thread: reads the last block's piped stdout into a buffer.
     // Never writes to the terminal — the main thread decides flush vs. discard.
     let relay_handle = std::thread::Builder::new()
         .name("creft-relay".to_owned())
@@ -346,13 +337,11 @@ fn wait_pipe_children_unix(
         })
         .expect("failed to spawn relay thread");
 
-    // Spawn one reaper thread per child. Each thread owns the Child and calls wait().
     for (i, (child, block_idx, lang)) in children.into_iter().enumerate() {
         let tx = tx.clone();
         std::thread::Builder::new()
             .name(format!("creft-reaper-{i}"))
             .spawn(move || {
-                // child.wait() takes &mut self, so we need mut child.
                 let mut child = child;
                 let status = child.wait();
                 // Ignore send error: main thread dropped rx only if it panicked.
@@ -654,9 +643,6 @@ pub(super) fn run_pipe_chain(
             child_pgid = Some(child.id());
         }
 
-        // For intermediate blocks: pipe stdout feeds the next block's stdin.
-        // For the last block on Unix: take() its stdout for the relay thread.
-        // For the last block on non-Unix: stdout is already inherited.
         if !is_last {
             let stdout = child.stdout.take();
             if stdout.is_none() {
@@ -700,7 +686,6 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
-    // Dispatch to platform-specific wait implementation.
     #[cfg(unix)]
     let (results, early_exit) = {
         let last_stdout = last_child_stdout.ok_or_else(|| {

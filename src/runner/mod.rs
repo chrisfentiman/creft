@@ -110,7 +110,6 @@ fn build_clap_command(cmd: &ParsedCommand) -> clap::Command {
         .disable_help_flag(true)
         .disable_version_flag(true);
 
-    // Add defined positional args
     for arg_def in &cmd.def.args {
         let mut clap_arg = clap::Arg::new(arg_def.name.clone()).action(clap::ArgAction::Set);
         // An arg is required by clap only when the caller must provide it AND
@@ -121,7 +120,6 @@ fn build_clap_command(cmd: &ParsedCommand) -> clap::Command {
         clap_cmd = clap_cmd.arg(clap_arg);
     }
 
-    // Add defined flags
     for flag_def in &cmd.def.flags {
         let mut clap_arg = clap::Arg::new(flag_def.name.clone()).long(flag_def.name.clone());
         if let Some(short) = &flag_def.short
@@ -493,7 +491,6 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Multi-block skills always pipe. Single-block falls through to execute_block below.
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
@@ -513,7 +510,6 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         }
     }
 
-    // Single block execution.
     let block = &cmd.blocks[0];
     let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
 
@@ -688,11 +684,9 @@ mod tests {
         );
         let cloned = ctx.clone();
 
-        // Both instances share the same cancellation state.
         assert!(!ctx.is_cancelled());
         assert!(!cloned.is_cancelled());
 
-        // Setting the flag is visible in both the original and clone.
         cancel.store(true, Ordering::Relaxed);
         assert!(ctx.is_cancelled());
         assert!(cloned.is_cancelled());
@@ -732,7 +726,6 @@ mod tests {
 
     #[test]
     fn run_context_cancel_shared_via_arc() {
-        // Setting the flag via the original Arc is visible through is_cancelled().
         let cancel = Arc::new(AtomicBool::new(false));
         let ctx = RunContext::new(
             Arc::clone(&cancel),
