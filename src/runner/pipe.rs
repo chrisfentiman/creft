@@ -37,6 +37,59 @@ impl std::io::Read for DupedPipeReader {
     }
 }
 
+#[cfg(unix)]
+impl DupedPipeReader {
+    /// Drain available bytes from the pipe using poll() with a per-iteration
+    /// timeout, collecting into `out`. Returns when the pipe is empty or all
+    /// write ends are closed (EOF). Never blocks indefinitely: if no data
+    /// arrives within `timeout_ms` milliseconds per poll call, drain stops.
+    ///
+    /// This prevents the drain from hanging when an orphaned grandchild of
+    /// the exit-99 block still holds the pipe's write end open after the
+    /// process group was killed.
+    fn drain_with_timeout(&mut self, out: &mut Vec<u8>, timeout_ms: i32) {
+        use std::os::unix::io::AsRawFd as _;
+        let raw_fd = self.fd.as_raw_fd();
+        let mut buf = [0u8; 8192];
+        loop {
+            let mut pfd = libc::pollfd {
+                fd: raw_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll with a single pollfd and bounded timeout is standard POSIX.
+            // raw_fd is valid for the lifetime of this call (owned by self.fd).
+            let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+            if ret == 0 {
+                // Timeout — no data within the window; stop draining to avoid
+                // blocking on a grandchild that still holds the write end.
+                break;
+            }
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                // SAFETY: raw_fd is valid; buf is a valid mutable slice.
+                // read(2) is async-signal-safe and returns ≥0 on success.
+                let n =
+                    unsafe { libc::read(raw_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    // EOF (0) or error (<0) — done.
+                    break;
+                }
+                out.extend_from_slice(&buf[..n as usize]);
+            }
+            if pfd.revents & libc::POLLERR != 0 {
+                break;
+            }
+        }
+    }
+}
+
 /// Duplicate the read end of an inter-block pipe so its kernel buffer stays
 /// alive after the downstream process is killed.
 ///
@@ -636,7 +689,9 @@ fn wait_pipe_children_unix(
                     // Drain errors are ignored — same behavior as today if drain is absent.
                     if let Some(mut drain_reader) = exit99_drains.remove(&reaper_result.block_idx) {
                         let mut buf = Vec::new();
-                        let _ = drain_reader.read_to_end(&mut buf);
+                        // Use poll()-based drain to avoid blocking if an orphaned
+                        // grandchild still holds the pipe write end open after killpg.
+                        drain_reader.drain_with_timeout(&mut buf, 500);
                         if !buf.is_empty() {
                             exit99_captured = Some(buf);
                         }
