@@ -652,7 +652,7 @@ mod tests {
         )
     }
 
-    /// Test helper: run a command with the given env and cwd, using a fresh (never-cancelled) RunContext.
+    // Run a command with the given env and cwd using a fresh RunContext.
     fn run_for_test(
         cmd: &ParsedCommand,
         raw_args: &[&str],
@@ -725,21 +725,6 @@ mod tests {
 
     #[test]
     fn run_context_is_cancelled_true_after_flag_set() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let ctx = RunContext::new(
-            Arc::clone(&cancel),
-            std::path::PathBuf::from("/tmp"),
-            vec![],
-            false,
-            false,
-        );
-        assert!(!ctx.is_cancelled());
-        cancel.store(true, Ordering::Relaxed);
-        assert!(ctx.is_cancelled());
-    }
-
-    #[test]
-    fn run_context_cancel_shared_via_arc() {
         let cancel = Arc::new(AtomicBool::new(false));
         let ctx = RunContext::new(
             Arc::clone(&cancel),

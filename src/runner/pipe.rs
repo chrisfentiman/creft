@@ -182,8 +182,7 @@ pub(super) struct SpongeChannels {
 ///
 /// Note: during pipe execution `PipeSignalGuard` overwrites the signal-hook
 /// handler, so `ctx.is_cancelled()` will not fire from SIGINT during pipe
-/// chains. The check is correct and will become the primary cancellation path
-/// when `PipeSignalGuard` is eventually replaced.
+/// chains.
 #[cfg(unix)]
 pub(super) fn sponge_stage(
     upstream: Option<PipeStdout>,
@@ -386,10 +385,9 @@ pub(super) fn sponge_stage(
                 match stdout.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        // During pipe execution PipeSignalGuard overwrites the signal-hook
-                        // handler, so this check fires primarily for single-block runs
-                        // and between sequential blocks. It will become the primary
-                        // cancellation path when PipeSignalGuard is replaced in a future phase.
+                        // PipeSignalGuard overwrites the signal-hook handler during pipe
+                        // execution, so this check fires only when the guard is absent
+                        // (single-block sponge runs).
                         if ctx.is_cancelled() {
                             break;
                         }
