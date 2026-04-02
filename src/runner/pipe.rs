@@ -123,20 +123,6 @@ pub(crate) struct ReaperResult {
     pub(crate) outcome: BlockOutcome,
 }
 
-/// Captured upstream content from a cancelled sponge stage.
-///
-/// When a sponge reads all upstream input via `read_to_end` and then detects
-/// cancellation (upstream exit 99), it sends the buffered content here rather
-/// than discarding it. This recovers exit-99 output that the sponge consumed
-/// from the kernel pipe buffer before the cancel token could fire.
-#[cfg(unix)]
-pub(super) struct SpongeCapture {
-    /// Index of the sponge block that captured the data.
-    block_idx: usize,
-    /// Raw upstream bytes the sponge buffered.
-    data: Vec<u8>,
-}
-
 /// Communication channels for a sponge stage thread.
 ///
 /// Groups the mpsc channels used to report back to the pipe orchestrator,
@@ -149,10 +135,6 @@ pub(super) struct SpongeChannels {
     pub(super) pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
     pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-    /// Sends upstream bytes back to the main thread when the sponge detects
-    /// cancellation after buffering. The main thread uses this to recover
-    /// exit-99 output the sponge consumed from the kernel pipe buffer.
-    pub(super) capture_tx: std::sync::mpsc::Sender<SpongeCapture>,
 }
 
 /// Sponge stage for a buffered block in a pipe chain.
@@ -180,6 +162,10 @@ pub(super) struct SpongeChannels {
 /// back to `run_pipe_chain` so subsequent non-sponge blocks can join the process
 /// group.
 ///
+/// On cancellation (upstream exit 99), the sponge writes any buffered upstream
+/// bytes directly to stdout instead of using a channel. This eliminates the
+/// timing race where the main thread drains a channel before the sponge sends.
+///
 /// Note: during pipe execution `PipeSignalGuard` overwrites the signal-hook
 /// handler, so `ctx.is_cancelled()` will not fire from SIGINT during pipe
 /// chains.
@@ -193,11 +179,7 @@ pub(super) fn sponge_stage(
     block_idx: usize,
     channels: SpongeChannels,
 ) {
-    let SpongeChannels {
-        pgid_tx,
-        reaper_tx,
-        capture_tx,
-    } = channels;
+    let SpongeChannels { pgid_tx, reaper_tx } = channels;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Keep raw bytes alongside the String so cancel paths can send the
         // exact bytes the sponge consumed, without re-encoding through lossy UTF-8.
@@ -222,14 +204,18 @@ pub(super) fn sponge_stage(
         let mut raw_upstream = Some(raw_upstream_vec);
 
         // If the pipeline was cancelled (upstream exit 99), bail without spawning
-        // the provider. Send the buffered upstream bytes so the main thread can
-        // recover the exit-99 block's output that we consumed from the pipe.
+        // the provider. Write buffered upstream bytes directly to stdout to recover
+        // exit-99 output that was consumed from the pipe buffer before cancel fired.
+        // Writing directly avoids the channel race where the main thread drains before
+        // the sponge sends.
         if ctx.is_cancelled() {
             drop(pipe_writer);
-            let _ = capture_tx.send(SpongeCapture {
-                block_idx,
-                data: raw_upstream.take().unwrap_or_default(),
-            });
+            let data = raw_upstream.take().unwrap_or_default();
+            if !data.is_empty() {
+                let stdout = std::io::stdout();
+                let mut lock = stdout.lock();
+                let _ = lock.write_all(&data);
+            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -311,10 +297,12 @@ pub(super) fn sponge_stage(
         // Second cancellation check — shrinks the race window to near-zero.
         if ctx.is_cancelled() {
             drop(pipe_writer);
-            let _ = capture_tx.send(SpongeCapture {
-                block_idx,
-                data: raw_upstream.take().unwrap_or_default(),
-            });
+            let data = raw_upstream.take().unwrap_or_default();
+            if !data.is_empty() {
+                let stdout = std::io::stdout();
+                let mut lock = stdout.lock();
+                let _ = lock.write_all(&data);
+            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -436,9 +424,6 @@ struct WaitArgs {
     rx: std::sync::mpsc::Receiver<ReaperResult>,
     last_block_idx: usize,
     exit99_drains: std::collections::HashMap<usize, DupedPipeReader>,
-    /// Receives buffered upstream bytes from sponge threads that were cancelled
-    /// after buffering. Drained after all reapers finish to recover exit-99 output.
-    capture_rx: std::sync::mpsc::Receiver<SpongeCapture>,
 }
 
 /// Wait for all children in a Unix pipe chain using concurrent reaper threads
@@ -459,7 +444,9 @@ struct WaitArgs {
 /// Relay buffer flush is selective: if an exit-99 block is the last block in
 /// the chain, its output has already been captured in the relay buffer and is
 /// flushed to the terminal. If the exit-99 block is a middle block, the
-/// duplicated pipe fd in `exit99_drains` is drained and flushed instead.
+/// duplicated pipe fd in `exit99_drains` is drained and flushed instead. Sponge
+/// stages write their buffered upstream bytes directly to stdout on cancellation,
+/// so no separate capture channel is needed.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     args: WaitArgs,
@@ -473,7 +460,6 @@ fn wait_pipe_children_unix(
         rx,
         last_block_idx,
         mut exit99_drains,
-        capture_rx,
     } = args;
     // Never writes to the terminal — the main thread decides flush vs. discard.
     let relay_handle = std::thread::Builder::new()
@@ -578,14 +564,6 @@ fn wait_pipe_children_unix(
     // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
     let relay_buffer = relay_handle.join().unwrap_or_default();
 
-    // Drain sponge capture channel. Non-blocking: all sponge threads have finished
-    // by this point (their reaper results have all been received before we exit the
-    // rx.recv() loop, and captures are sent before reaper results in the cancel path).
-    let mut sponge_captures: Vec<SpongeCapture> = Vec::new();
-    while let Ok(cap) = capture_rx.try_recv() {
-        sponge_captures.push(cap);
-    }
-
     if early_exit {
         // Find which block exited 99. If none found (shouldn't happen), output nothing.
         let exit99_idx = results
@@ -594,25 +572,17 @@ fn wait_pipe_children_unix(
             .map(|r| r.block);
 
         // Select output source by priority:
-        // 1. Exit-99 block is last → relay buffer has its output
-        // 2. Dup'd fd drain → kernel pipe buffer residue (downstream didn't consume it)
-        // 3. Sponge capture → downstream sponge consumed the data before cancel fired
-        //
-        // Sources 2 and 3 are mutually exclusive in practice: if a sponge consumed
-        // the pipe data, the dup'd fd is empty, and vice versa.
+        // 1. Exit-99 block is last → relay buffer has its output.
+        // 2. Dup'd fd drain → kernel pipe buffer residue (downstream didn't consume it).
+        // 3. Sponge wrote directly to stdout on cancellation — main thread writes nothing.
         let output: &[u8] = match exit99_idx {
             Some(idx) if idx == last_block_idx => &relay_buffer,
-            Some(idx) => {
-                // Middle or first block. Try dup'd fd drain first, then sponge capture.
+            Some(_) => {
+                // Middle or first block. Use dup'd fd drain if non-empty.
+                // If a sponge consumed the data, it already wrote to stdout directly.
                 exit99_captured
                     .as_deref()
                     .filter(|d| !d.is_empty())
-                    .or_else(|| {
-                        sponge_captures
-                            .iter()
-                            .find(|c| c.block_idx > idx && !c.data.is_empty())
-                            .map(|c| c.data.as_slice())
-                    })
                     .unwrap_or(&[])
             }
             None => &[],
@@ -732,13 +702,6 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let (reaper_tx, reaper_rx) = std::sync::mpsc::channel::<ReaperResult>();
 
-    // Sponge capture channel: sponge threads send buffered upstream bytes here
-    // when cancelled, so the main thread can recover exit-99 output the sponge
-    // consumed from the kernel pipe buffer. Main thread's sender is dropped
-    // before wait_pipe_children_unix so the channel closes when all sponges finish.
-    #[cfg(unix)]
-    let (capture_tx, capture_rx) = std::sync::mpsc::channel::<SpongeCapture>();
-
     // Join handles for sponge threads — joined after all reaper results collected.
     #[cfg(unix)]
     let mut sponge_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -780,7 +743,6 @@ pub(super) fn run_pipe_chain(
                 .collect();
             let ctx_clone = ctx.clone();
             let reaper_tx_clone = reaper_tx.clone();
-            let capture_tx_clone = capture_tx.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("creft-sponge-{i}"))
@@ -795,7 +757,6 @@ pub(super) fn run_pipe_chain(
                         SpongeChannels {
                             pgid_tx,
                             reaper_tx: reaper_tx_clone,
-                            capture_tx: capture_tx_clone,
                         },
                     );
                 })
@@ -979,13 +940,10 @@ pub(super) fn run_pipe_chain(
         let last_stdout = last_child_stdout.ok_or_else(|| {
             CreftError::Setup("internal: failed to capture last block stdout".to_owned())
         })?;
-        // Drop the main-thread tx clones so channels close when all senders
+        // Drop the main-thread tx clone so the channel closes when all senders
         // (sponge + reaper threads) drop their own clones.
         let tx = reaper_tx;
         let rx = reaper_rx;
-        // Main thread doesn't send captures — drop its sender so the channel closes
-        // when all sponge threads finish.
-        drop(capture_tx);
         let outcome = wait_pipe_children_unix(
             WaitArgs {
                 children,
@@ -995,7 +953,6 @@ pub(super) fn run_pipe_chain(
                 rx,
                 last_block_idx: n - 1,
                 exit99_drains,
-                capture_rx,
             },
             ctx.cancel_token(),
         )?;
@@ -1111,24 +1068,5 @@ mod tests {
             .read_to_end(&mut buf)
             .expect("read from dup'd fd must succeed");
         assert_eq!(buf, b"hello from pipe");
-    }
-
-    /// Verify the SpongeCapture channel round-trips block index and raw bytes correctly.
-    #[cfg(unix)]
-    #[test]
-    fn test_sponge_capture_channel_send_receive() {
-        let (tx, rx) = std::sync::mpsc::channel::<SpongeCapture>();
-        let data = b"captured-by-sponge\n".to_vec();
-        tx.send(SpongeCapture {
-            block_idx: 1,
-            data: data.clone(),
-        })
-        .expect("send must succeed");
-        drop(tx);
-        let cap = rx.recv().expect("recv must succeed");
-        assert_eq!(cap.block_idx, 1);
-        assert_eq!(cap.data, data);
-        // Channel should be empty after the single item.
-        assert!(rx.try_recv().is_err());
     }
 }
