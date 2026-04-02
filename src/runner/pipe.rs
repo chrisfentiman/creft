@@ -413,11 +413,74 @@ pub(super) fn sponge_stage(
     }
 }
 
+/// Parent-side setpgid for the POSIX double-setpgid pattern.
+///
+/// Called after spawn() returns. The child also calls setpgid in pre_exec.
+/// Whichever runs first wins; the loser gets a harmless EACCES or ESRCH.
+#[cfg(unix)]
+fn parent_setpgid(child_pid: u32, pgid: u32) {
+    // SAFETY: setpgid is async-signal-safe and both PIDs are valid
+    // (just-spawned child, known group leader).
+    let ret = unsafe { libc::setpgid(child_pid as libc::pid_t, pgid as libc::pid_t) };
+    if ret == -1 {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            // EACCES: child already exec'd and set its own pgid.
+            // ESRCH: child already exited.
+            Some(libc::EACCES) | Some(libc::ESRCH) => {}
+            _ => {
+                eprintln!(
+                    "warning: parent setpgid({}, {}) failed: {}",
+                    child_pid, pgid, err
+                );
+            }
+        }
+    }
+}
+
+/// Attempt killpg. Returns true if the group was successfully signaled.
+#[cfg(unix)]
+fn kill_group(pgid: Option<u32>) -> bool {
+    if let Some(pgid) = pgid {
+        // SAFETY: kill(-pgid, SIGKILL) is standard POSIX.
+        // Negative first argument means "signal all processes in process group pgid".
+        let ret = unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) };
+        ret == 0
+    } else {
+        false
+    }
+}
+
+/// Kill the pipe chain's process group, falling back to per-process kills.
+#[cfg(unix)]
+fn kill_pipe_group(pgid: Option<u32>, children: &[(std::process::Child, usize, String)]) {
+    if kill_group(pgid) {
+        return;
+    }
+    for (child, _, _) in children {
+        // SAFETY: kill(pid, SIGKILL) is standard POSIX. Harmless ESRCH if already dead.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+/// Kill the pipe chain's process group, falling back to per-PID kills.
+#[cfg(unix)]
+fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
+    if kill_group(pgid) {
+        return;
+    }
+    for &pid in pids {
+        // SAFETY: kill(pid, SIGKILL) is standard POSIX. Harmless ESRCH if already dead.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
 /// Arguments for `wait_pipe_children_unix`, grouped to stay within clippy's
 /// argument count limit.
 #[cfg(unix)]
 struct WaitArgs {
     children: Vec<(std::process::Child, usize, String)>,
+    child_pids: Vec<u32>,
     last_stdout: PipeStdout,
     child_pgid: Option<u32>,
     tx: std::sync::mpsc::Sender<ReaperResult>,
@@ -450,10 +513,11 @@ struct WaitArgs {
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     args: WaitArgs,
-    cancel: &std::sync::atomic::AtomicBool,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
     let WaitArgs {
         children,
+        child_pids,
         last_stdout,
         child_pgid,
         tx,
@@ -461,19 +525,58 @@ fn wait_pipe_children_unix(
         last_block_idx,
         mut exit99_drains,
     } = args;
+    let cancel_relay = std::sync::Arc::clone(&cancel);
     // Never writes to the terminal — the main thread decides flush vs. discard.
+    // Uses poll() with 100ms timeout so the cancel flag is checked between iterations.
+    // This ensures the relay exits promptly when killpg kills the child but an orphaned
+    // grandchild still holds the pipe's write end open.
     let relay_handle = std::thread::Builder::new()
         .name("creft-relay".to_owned())
         .spawn(move || {
+            use std::os::unix::io::AsRawFd as _;
             let mut reader = last_stdout;
+            let raw_fd = match &reader {
+                PipeStdout::Child(c) => c.as_raw_fd(),
+                PipeStdout::Pipe(p) => p.as_raw_fd(),
+            };
             let mut buf = [0u8; 8192];
             let mut output: Vec<u8> = Vec::new();
             loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => output.extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+                let mut pfd = libc::pollfd {
+                    fd: raw_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: poll with a single fd and a 100ms timeout is standard POSIX.
+                let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+
+                if cancel_relay.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                if ret == 0 {
+                    // Timeout — no data yet, loop to check cancel again.
+                    continue;
+                }
+                if ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                // POLLHUP: all write ends closed — drain remaining data, then break.
+                // POLLIN: data available — read it.
+                // On macOS, POLLHUP may be set without POLLIN when the write end closes.
+                if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => output.extend_from_slice(&buf[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                if pfd.revents & libc::POLLERR != 0 {
+                    break;
                 }
             }
             output
@@ -522,14 +625,8 @@ fn wait_pipe_children_unix(
                 if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
                     early_exit = true;
                     // Kill all processes in the pipe group so grandchildren are also killed.
-                    if let Some(pgid) = child_pgid {
-                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                        // pgid is valid (obtained from block 0's PID after spawn).
-                        // Negative pgid means "all processes in process group pgid".
-                        unsafe {
-                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                        }
-                    }
+                    // Falls back to per-PID kills if killpg fails.
+                    kill_pipe_group_by_pids(child_pgid, &child_pids);
                     // Signal sponge threads to bail before spawning.
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -780,13 +877,7 @@ pub(super) fn run_pipe_chain(
                 // Dup the read end so the kernel buffer survives if the downstream
                 // block is killed on exit 99. Failure kills already-spawned children.
                 let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
-                    if let Some(pgid) = child_pgid {
-                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                        // pgid is valid (obtained from block 0's PID after spawn).
-                        unsafe {
-                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                        }
-                    }
+                    kill_pipe_group(child_pgid, &children);
                     drop(children.drain(..));
                     drop(node_deps_dirs.drain(..));
                 })?;
@@ -851,13 +942,7 @@ pub(super) fn run_pipe_chain(
         )
         .inspect_err(|_| {
             #[cfg(unix)]
-            if let Some(pgid) = child_pgid {
-                // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                // pgid is valid (we got it from child.id() which is always non-zero).
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                }
-            }
+            kill_pipe_group(child_pgid, &children);
             drop(children.drain(..));
             drop(node_deps_dirs.drain(..));
         })?;
@@ -870,19 +955,21 @@ pub(super) fn run_pipe_chain(
             child_pgid = Some(child.id());
         }
 
+        // POSIX double-setpgid: parent calls setpgid after spawn returns,
+        // child also calls it in pre_exec. Whichever runs first wins.
+        #[cfg(unix)]
+        parent_setpgid(
+            child.id(),
+            child_pgid.expect("child_pgid set above or just set"),
+        );
+
         if !is_last {
             let stdout = child.stdout.take();
             if stdout.is_none() {
                 // Stdio::piped() must always yield a ChildStdout — this path is unreachable
                 // under normal conditions, but guard against it to avoid a silent hang.
                 #[cfg(unix)]
-                if let Some(pgid) = child_pgid {
-                    // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                    // pgid is valid (we got it from child.id() which is always non-zero).
-                    unsafe {
-                        libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                    }
-                }
+                kill_pipe_group(child_pgid, &children);
                 drop(children.drain(..));
                 return Err(CreftError::Setup(format!(
                     "internal: failed to capture stdout for block {} ({})",
@@ -895,13 +982,7 @@ pub(super) fn run_pipe_chain(
                 // Dup the read end before passing it to the next block as stdin.
                 // The kernel buffer stays alive after the downstream block is killed.
                 let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
-                    if let Some(pgid) = child_pgid {
-                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
-                        // pgid is valid (we got it from child.id() which is always non-zero).
-                        unsafe {
-                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
-                        }
-                    }
+                    kill_pipe_group(child_pgid, &children);
                     drop(children.drain(..));
                     drop(node_deps_dirs.drain(..));
                 })?;
@@ -944,9 +1025,11 @@ pub(super) fn run_pipe_chain(
         // (sponge + reaper threads) drop their own clones.
         let tx = reaper_tx;
         let rx = reaper_rx;
+        let child_pids: Vec<u32> = children.iter().map(|(c, _, _)| c.id()).collect();
         let outcome = wait_pipe_children_unix(
             WaitArgs {
                 children,
+                child_pids,
                 last_stdout,
                 child_pgid,
                 tx,
@@ -954,7 +1037,7 @@ pub(super) fn run_pipe_chain(
                 last_block_idx: n - 1,
                 exit99_drains,
             },
-            ctx.cancel_token(),
+            ctx.cancel_arc(),
         )?;
         // Join sponge threads — they finished before sending their reaper results.
         for handle in sponge_handles {

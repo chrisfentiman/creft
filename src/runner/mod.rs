@@ -100,10 +100,10 @@ impl RunContext {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Borrow the underlying cancel token for passing to functions that need
-    /// to signal cancellation without holding the full context.
-    pub(super) fn cancel_token(&self) -> &AtomicBool {
-        &self.cancel
+    /// Clone the underlying cancel Arc for passing to threads that require
+    /// `'static` lifetime (e.g. relay threads in pipe chains).
+    pub(super) fn cancel_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
     }
 }
 
