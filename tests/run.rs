@@ -2063,3 +2063,193 @@ fn test_pipe_exit_99_last_block_multiline_stdout() {
         .stdout(predicate::str::contains("line2"))
         .stdout(predicate::str::contains("line3"));
 }
+
+// ── middle-block exit-99 stdout capture tests ─────────────────────────────────
+
+/// When a middle block in a 3-block pipe chain exits 99 after writing to
+/// stdout, its output must appear on creft's stdout.
+///
+/// Regression guard: before this fix, the middle block's output was in the
+/// inter-block pipe buffer but was silently discarded when the downstream
+/// block was killed.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_middle_block_stdout_captured() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-mid-capture\n",
+            "description: middle block exit 99 stdout is captured\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"input\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat; echo \"middle-output\"; exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 5; cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["exit99-mid-capture"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("middle-output"));
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must terminate quickly after middle block exits 99 (took {:?})",
+        elapsed
+    );
+}
+
+/// When the first block in a multi-block chain exits 99, its stdout must
+/// appear on creft's stdout.
+///
+/// Block 0 is treated as a "middle" block from the output-capture perspective:
+/// it's not the last block, so its output is in an inter-block pipe and must
+/// be recovered via the dup'd fd.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_first_block_stdout_captured() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-first-capture\n",
+            "description: first block exit 99 stdout is captured\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"first-output\"; exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 5; cat\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 5; cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["exit99-first-capture"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("first-output"));
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 2,
+        "pipe must terminate quickly after first block exits 99 (took {:?})",
+        elapsed
+    );
+}
+
+/// When a middle block exits 99 after printing multiple lines, all lines must
+/// appear on stdout.
+///
+/// Regression guard: multi-line output from a middle exit-99 block must not
+/// be truncated or partially captured.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_middle_block_multiline_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-mid-multiline\n",
+            "description: middle block exit 99 captures all lines\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"input\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat >/dev/null; echo \"line1\"; echo \"line2\"; echo \"line3\"; exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 5; cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["exit99-mid-multiline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("line1"))
+        .stdout(predicate::str::contains("line2"))
+        .stdout(predicate::str::contains("line3"));
+}
+
+/// When a middle block exits 99 without writing anything to stdout, creft
+/// must return 0 with no output and no crash.
+///
+/// Regression guard: the drain path must handle the empty-output case without
+/// writing spurious content or panicking.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_middle_block_no_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit99-mid-no-stdout\n",
+            "description: middle block exit 99 with no stdout\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"input\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat >/dev/null; exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "sleep 5; cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["exit99-mid-no-stdout"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        output.is_empty(),
+        "stdout must be empty when middle block exits 99 with no output; got: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}

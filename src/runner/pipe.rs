@@ -11,6 +11,57 @@ use super::{EARLY_EXIT, RunContext, exit_code_of, make_execution_error, prepare_
 #[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
+/// A duplicated pipe file descriptor that implements `Read`.
+///
+/// Created by `dup_pipe_stdout` to hold a second handle to an inter-block pipe
+/// buffer. Kept alive so the kernel pipe buffer survives after the downstream
+/// block is killed. On exit 99, drain this reader to recover the exit-99
+/// block's unread output.
+#[cfg(unix)]
+struct DupedPipeReader {
+    fd: std::os::unix::io::OwnedFd,
+}
+
+#[cfg(unix)]
+impl std::io::Read for DupedPipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::io::AsRawFd as _;
+        // SAFETY: fd is valid and owned by this struct. read(2) is a standard
+        // POSIX call that reads up to buf.len() bytes from the fd.
+        let ret = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        if ret < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(ret as usize)
+        }
+    }
+}
+
+/// Duplicate the read end of an inter-block pipe so its kernel buffer stays
+/// alive after the downstream process is killed.
+///
+/// # Errors
+///
+/// Returns an error if `dup(2)` fails (e.g. EMFILE — too many open fds).
+#[cfg(unix)]
+fn dup_pipe_stdout(stdout: &PipeStdout) -> std::io::Result<DupedPipeReader> {
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    let raw_fd = match stdout {
+        PipeStdout::Child(c) => c.as_raw_fd(),
+        PipeStdout::Pipe(p) => p.as_raw_fd(),
+    };
+    // SAFETY: raw_fd is valid (obtained from a live ChildStdout or PipeReader).
+    // dup(2) returns a new fd that the caller owns exclusively. No other code
+    // holds or closes this new fd. OwnedFd will close it on drop.
+    let duped = unsafe { libc::dup(raw_fd) };
+    if duped < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: duped is a freshly allocated fd from dup(2) that we own exclusively.
+    let owned = unsafe { OwnedFd::from_raw_fd(duped) };
+    Ok(DupedPipeReader { fd: owned })
+}
+
 /// A stdout handle from a pipe chain stage.
 ///
 /// Normal blocks produce a `ChildStdout`; sponge stages produce a
@@ -339,6 +390,19 @@ pub(super) fn sponge_stage(
     }
 }
 
+/// Arguments for `wait_pipe_children_unix`, grouped to stay within clippy's
+/// argument count limit.
+#[cfg(unix)]
+struct WaitArgs {
+    children: Vec<(std::process::Child, usize, String)>,
+    last_stdout: PipeStdout,
+    child_pgid: Option<u32>,
+    tx: std::sync::mpsc::Sender<ReaperResult>,
+    rx: std::sync::mpsc::Receiver<ReaperResult>,
+    last_block_idx: usize,
+    exit99_drains: std::collections::HashMap<usize, DupedPipeReader>,
+}
+
 /// Wait for all children in a Unix pipe chain using concurrent reaper threads
 /// and a buffered stdout relay.
 ///
@@ -356,18 +420,22 @@ pub(super) fn sponge_stage(
 ///
 /// Relay buffer flush is selective: if an exit-99 block is the last block in
 /// the chain, its output has already been captured in the relay buffer and is
-/// flushed to the terminal. If the exit-99 block is not the last block, the
-/// relay buffer is discarded without writing to the terminal.
+/// flushed to the terminal. If the exit-99 block is a middle block, the
+/// duplicated pipe fd in `exit99_drains` is drained and flushed instead.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
-    children: Vec<(std::process::Child, usize, String)>,
-    last_stdout: PipeStdout,
-    child_pgid: Option<u32>,
-    tx: std::sync::mpsc::Sender<ReaperResult>,
-    rx: std::sync::mpsc::Receiver<ReaperResult>,
+    args: WaitArgs,
     cancel: &std::sync::atomic::AtomicBool,
-    last_block_idx: usize,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
+    let WaitArgs {
+        children,
+        last_stdout,
+        child_pgid,
+        tx,
+        rx,
+        last_block_idx,
+        mut exit99_drains,
+    } = args;
     // Never writes to the terminal — the main thread decides flush vs. discard.
     let relay_handle = std::thread::Builder::new()
         .name("creft-relay".to_owned())
@@ -412,6 +480,8 @@ fn wait_pipe_children_unix(
 
     let mut results: Vec<PipeResult> = Vec::new();
     let mut early_exit = false;
+    // Captured stdout from a middle-block exit 99, recovered via the dup'd fd.
+    let mut exit99_captured: Option<Vec<u8>> = None;
 
     while let Ok(reaper_result) = rx.recv() {
         match reaper_result.outcome {
@@ -437,6 +507,18 @@ fn wait_pipe_children_unix(
                     }
                     // Signal sponge threads to bail before spawning.
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    // Drain the dup'd pipe fd for this block (if it's not the last block).
+                    // The exit-99 block has already exited, so its write end is closed and
+                    // read_to_end returns promptly with whatever remains in the pipe buffer.
+                    // Drain errors are ignored — same behavior as today if drain is absent.
+                    if let Some(mut drain_reader) = exit99_drains.remove(&reaper_result.block_idx) {
+                        let mut buf = Vec::new();
+                        let _ = drain_reader.read_to_end(&mut buf);
+                        if !buf.is_empty() {
+                            exit99_captured = Some(buf);
+                        }
+                    }
                 }
 
                 results.push(PipeResult {
@@ -448,14 +530,18 @@ fn wait_pipe_children_unix(
         }
     }
 
+    // Close all remaining dup'd fds (those not consumed by drain above).
+    // These are independent inter-block pipes; dropping them does not affect
+    // the relay thread's pipe to the last block.
+    drop(exit99_drains);
+
     // All reapers have exited. Join the relay thread to retrieve the buffered output.
     // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
     let relay_buffer = relay_handle.join().unwrap_or_default();
 
     if early_exit {
-        // Flush only if the exit-99 block is the last block. Its stdout IS the
-        // relay buffer, so the output is the intended final result.
-        // Output from a killed passthrough last block is partial and discarded.
+        // If the exit-99 block is the last block, its stdout IS the relay buffer.
+        // If it's a middle block, use the output drained from the dup'd pipe fd.
         let exit99_is_last = results
             .iter()
             .any(|r| r.block == last_block_idx && exit_code_of(&r.status) == Some(EARLY_EXIT));
@@ -463,6 +549,12 @@ fn wait_pipe_children_unix(
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
             let _ = lock.write_all(&relay_buffer);
+        } else if let Some(captured) = exit99_captured
+            && !captured.is_empty()
+        {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let _ = lock.write_all(&captured);
         }
     } else {
         let stdout = std::io::stdout();
@@ -577,6 +669,13 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let mut sponge_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
+    // Dup'd read ends of inter-block pipes, keyed by block index.
+    // Only middle blocks (not the last) get entries. The last block's output
+    // is captured by the relay thread; duping it would create a competing reader.
+    #[cfg(unix)]
+    let mut exit99_drains: std::collections::HashMap<usize, DupedPipeReader> =
+        std::collections::HashMap::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -640,7 +739,22 @@ pub(super) fn run_pipe_chain(
 
             // The pipe_reader is the "stdout" of this sponge stage.
             if !is_last {
-                prev_stdout = Some(PipeStdout::Pipe(pipe_reader));
+                let pipe_stdout = PipeStdout::Pipe(pipe_reader);
+                // Dup the read end so the kernel buffer survives if the downstream
+                // block is killed on exit 99. Failure kills already-spawned children.
+                let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
+                    if let Some(pgid) = child_pgid {
+                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                        // pgid is valid (obtained from block 0's PID after spawn).
+                        unsafe {
+                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                        }
+                    }
+                    drop(children.drain(..));
+                    drop(node_deps_dirs.drain(..));
+                })?;
+                exit99_drains.insert(i, duped);
+                prev_stdout = Some(pipe_stdout);
             } else {
                 last_child_stdout = Some(PipeStdout::Pipe(pipe_reader));
             }
@@ -738,7 +852,29 @@ pub(super) fn run_pipe_chain(
                     i, block.lang
                 )));
             }
-            prev_stdout = stdout.map(PipeStdout::Child);
+            #[cfg(unix)]
+            {
+                let pipe_stdout = PipeStdout::Child(stdout.expect("checked above"));
+                // Dup the read end before passing it to the next block as stdin.
+                // The kernel buffer stays alive after the downstream block is killed.
+                let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
+                    if let Some(pgid) = child_pgid {
+                        // SAFETY: kill(-pgid, SIGKILL) is a standard POSIX call.
+                        // pgid is valid (we got it from child.id() which is always non-zero).
+                        unsafe {
+                            libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+                        }
+                    }
+                    drop(children.drain(..));
+                    drop(node_deps_dirs.drain(..));
+                })?;
+                exit99_drains.insert(i, duped);
+                prev_stdout = Some(pipe_stdout);
+            }
+            #[cfg(not(unix))]
+            {
+                prev_stdout = stdout.map(PipeStdout::Child);
+            }
         } else {
             // Last block: extract its stdout for the relay thread (Unix only).
             // Must be done before the child is moved into the reaper thread.
@@ -771,13 +907,16 @@ pub(super) fn run_pipe_chain(
         let tx = reaper_tx;
         let rx = reaper_rx;
         let outcome = wait_pipe_children_unix(
-            children,
-            last_stdout,
-            child_pgid,
-            tx,
-            rx,
+            WaitArgs {
+                children,
+                last_stdout,
+                child_pgid,
+                tx,
+                rx,
+                last_block_idx: n - 1,
+                exit99_drains,
+            },
             ctx.cancel_token(),
-            n - 1,
         )?;
         // Join sponge threads — they finished before sending their reaper results.
         for handle in sponge_handles {
@@ -856,4 +995,40 @@ pub(super) fn run_pipe_chain(
         .unwrap_or(last);
 
     Err(make_execution_error(root.block, &root.lang, &root.status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    /// Verify that `dup_pipe_stdout` creates a readable copy of the pipe fd:
+    /// after the original is consumed via `into_stdio()`, the dup'd fd can
+    /// still read the data written to the write end.
+    #[cfg(unix)]
+    #[test]
+    fn test_dup_pipe_stdout_returns_readable_fd() {
+        use std::io::Write as _;
+        let (pipe_reader, mut pipe_writer) = os_pipe::pipe().expect("pipe creation must succeed");
+        let pipe_stdout = PipeStdout::Pipe(pipe_reader);
+
+        // Dup before consuming the original.
+        let mut duped = dup_pipe_stdout(&pipe_stdout).expect("dup must succeed");
+
+        // Consume the original into a Stdio (simulates passing to next block's stdin).
+        let _stdio = pipe_stdout.into_stdio();
+
+        // Write data to the write end, then close it so the reader sees EOF.
+        pipe_writer
+            .write_all(b"hello from pipe")
+            .expect("write must succeed");
+        drop(pipe_writer);
+
+        // The dup'd fd must still be able to read the data.
+        let mut buf = Vec::new();
+        duped
+            .read_to_end(&mut buf)
+            .expect("read from dup'd fd must succeed");
+        assert_eq!(buf, b"hello from pipe");
+    }
 }
