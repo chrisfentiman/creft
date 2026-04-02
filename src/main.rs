@@ -14,6 +14,8 @@ mod style;
 mod validate;
 
 use std::io::{IsTerminal, Read};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use clap::Parser;
 use error::CreftError;
@@ -208,14 +210,23 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
     let cwd_str = cwd.to_string_lossy().to_string();
     let cmd = store::load_from(ctx, &name, &source)?;
 
-    let mut extra_env: Vec<(&str, &str)> = Vec::new();
+    let mut extra_env: Vec<(String, String)> = Vec::new();
     if store::is_local_source(&source) {
         // Local-scope skills receive their project root so they can reference
         // project-relative paths without hard-coding the directory.
-        extra_env.push(("CREFT_PROJECT_ROOT", &cwd_str));
+        extra_env.push(("CREFT_PROJECT_ROOT".to_string(), cwd_str));
     }
 
-    if verbose || dry_run {
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Register the cancel flag with the SIGINT handler. Failure is intentionally
+    // ignored — worst case the cancel token is never set, and cancellation falls
+    // back to pipe closure (the existing behavior).
+    #[cfg(unix)]
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
+
+    let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run);
+
+    if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.
         let (bound, _) = runner::parse_and_bind(&cmd, &remaining)?;
         let bound_refs: Vec<(&str, &str)> = bound
@@ -223,30 +234,37 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        if verbose {
+        if run_ctx.is_verbose() {
             runner::render_blocks(&cmd, &bound_refs)?;
         }
 
-        if dry_run && !verbose {
-            // Pure dry-run path (existing behavior).
+        if run_ctx.is_dry_run() && !run_ctx.is_verbose() {
+            // Pure dry-run path: either delegate to native dry-run or print-only.
             if cmd.def.supports_feature("dry-run") {
-                extra_env.push(("CREFT_DRY_RUN", "1"));
-                return runner::run_with_env(&cmd, &remaining, &extra_env, &cwd);
+                // Skill handles dry-run natively — inject the env var and execute.
+                let mut env = run_ctx.env().to_vec();
+                env.push(("CREFT_DRY_RUN".to_string(), "1".to_string()));
+                let native_ctx = runner::RunContext::new(
+                    Arc::clone(&cancel),
+                    run_ctx.cwd().to_path_buf(),
+                    env,
+                    false,
+                    true,
+                );
+                return runner::run(&cmd, &remaining, &native_ctx);
             } else {
-                return runner::dry_run(&cmd, &remaining, &cwd);
+                return runner::dry_run(&cmd, &remaining, &run_ctx);
             }
         }
 
-        if dry_run {
+        if run_ctx.is_dry_run() {
             // --verbose --dry-run: rendered above, do not execute.
             return Ok(());
         }
-
-        // --verbose only: render already done above, now execute normally.
-        runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
-    } else {
-        runner::run_with_env(&cmd, &remaining, &extra_env, &cwd)
     }
+
+    // --verbose only (render done above) or no flags: execute normally.
+    runner::run(&cmd, &remaining, &run_ctx)
 }
 
 /// Show namespace help: a header line followed by the grouped skill listing.
@@ -935,12 +953,10 @@ mod tests {
     fn test_truncate_desc_over_max_truncated() {
         let s = "a".repeat(100);
         let result = truncate_desc(&s, 60);
-        // Result should end with "..."
         assert!(
             result.ends_with("..."),
             "truncated string should end with '...'; got: {result:?}"
         );
-        // Result should be at most 60 chars.
         assert!(
             result.chars().count() <= 60,
             "truncated string should be at most 60 chars; got {} chars",
