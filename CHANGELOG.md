@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/chrisfentiman/creft/compare/creft-v0.2.0...creft-v0.2.1) (2026-04-02)
+
+
+### Features
+
+* **runner:** RunContext, module split, BlockRunner trait, unified exit 99 ([8e33674](https://github.com/chrisfentiman/creft/commit/8e33674d1405e565445f14762b27f17352ab6cae))
+
 ## [0.2.0](https://github.com/chrisfentiman/creft/compare/creft-v0.1.9...creft-v0.2.0) (2026-04-01)
 
 
