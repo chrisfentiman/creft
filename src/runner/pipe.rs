@@ -75,8 +75,7 @@ impl DupedPipeReader {
             if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 // SAFETY: raw_fd is valid; buf is a valid mutable slice.
                 // read(2) is async-signal-safe and returns ≥0 on success.
-                let n =
-                    unsafe { libc::read(raw_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                let n = unsafe { libc::read(raw_fd, buf.as_mut_ptr().cast(), buf.len()) };
                 if n <= 0 {
                     // EOF (0) or error (<0) — done.
                     break;
