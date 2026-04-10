@@ -50,7 +50,7 @@ pub enum BuiltinCommand {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
-        /// Show all commands in flat list (no namespace grouping)
+        /// Show all commands in flat list, including hidden `_`-prefixed commands
         #[arg(long)]
         all: bool,
         /// Namespace path to drill into

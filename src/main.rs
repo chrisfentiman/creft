@@ -483,9 +483,10 @@ fn cmd_list(
         return Ok(());
     }
 
-    // Suppress hidden commands unless the user explicitly named a hidden prefix.
+    // Suppress hidden commands unless the user explicitly named a hidden prefix or
+    // passed --all (which opts into seeing everything).
     let explicit_hidden = prefix.iter().any(|p| p.starts_with('_'));
-    let visible: Vec<_> = if explicit_hidden {
+    let visible: Vec<_> = if explicit_hidden || show_all {
         tag_filtered
     } else {
         tag_filtered
