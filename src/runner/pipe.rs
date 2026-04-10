@@ -187,31 +187,36 @@ pub(super) struct SpongeChannels {
     pub(super) pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
     pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-    /// Receiver for direct cancellation from the upstream block's reaper.
-    /// Receiving `()` means upstream exited 99; the sponge should not spawn.
+    /// Receiver for the upstream block's exit-99 determination.
+    /// The reaper sends `true` if upstream exited 99, `false` otherwise.
     /// `None` when this sponge is block 0 or upstream is also a sponge.
-    pub(super) cancel_rx: Option<std::sync::mpsc::Receiver<()>>,
+    pub(super) cancel_rx: Option<std::sync::mpsc::Receiver<bool>>,
 }
 
-/// Check whether this sponge should cancel (upstream exit 99 or SIGINT).
+/// Block until the upstream reaper reports whether the upstream block exited 99.
 ///
-/// Checks the direct reaper channel first (fast path for exit 99),
-/// then falls back to the shared cancel flag (SIGINT path).
+/// Returns `true` if the sponge should cancel (upstream exit 99 or SIGINT
+/// already fired). Returns `false` if the sponge should proceed.
 ///
-/// The reaper thread sends `()` explicitly on exit 99. `Ok(())` means cancelled;
-/// `Err(Empty)` means not yet; `Err(Disconnected)` means the reaper exited
-/// normally without sending (the sponge should proceed).
+/// When `cancel_rx` is `None` (block 0 or upstream is a sponge), falls back
+/// to the shared cancel flag only.
 #[cfg(unix)]
-fn is_sponge_cancelled(
+fn should_cancel_sponge(
     ctx: &RunContext,
-    cancel_rx: &Option<std::sync::mpsc::Receiver<()>>,
+    cancel_rx: &Option<std::sync::mpsc::Receiver<bool>>,
 ) -> bool {
-    if let Some(rx) = cancel_rx
-        && rx.try_recv().is_ok()
-    {
+    if ctx.is_cancelled() {
         return true;
     }
-    ctx.is_cancelled()
+    match cancel_rx {
+        Some(rx) => {
+            // Block until the reaper sends its determination. The reaper
+            // always sends: true (exit 99) or false (normal exit). RecvError
+            // means the reaper panicked — proceed rather than silently cancel.
+            rx.recv().unwrap_or(false)
+        }
+        None => false,
+    }
 }
 
 /// Sponge stage for a buffered block in a pipe chain.
@@ -290,7 +295,7 @@ pub(super) fn sponge_stage(
         // spawning the provider. Return the buffered upstream bytes via the JoinHandle
         // so the main thread can write them to stdout after joining — avoids the race
         // where a direct thread write loses data during process teardown.
-        if is_sponge_cancelled(&ctx, &cancel_rx) {
+        if should_cancel_sponge(&ctx, &cancel_rx) {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
             if let Some(tx) = pgid_tx {
@@ -371,8 +376,10 @@ pub(super) fn sponge_stage(
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
 
-        // Second cancellation check — belt-and-suspenders narrowing of the window.
-        if is_sponge_cancelled(&ctx, &cancel_rx) {
+        // Second cancellation check — catches SIGINT that arrived during template
+        // expansion and command building. The channel verdict was consumed by the
+        // first check; calling recv() again would block forever.
+        if ctx.is_cancelled() {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
             if let Some(tx) = pgid_tx {
@@ -538,7 +545,7 @@ fn kill_pipe_group(
         std::process::Child,
         usize,
         String,
-        Option<std::sync::mpsc::Sender<()>>,
+        Option<std::sync::mpsc::Sender<bool>>,
     )],
 ) {
     if kill_group(pgid) {
@@ -570,7 +577,7 @@ struct WaitArgs {
         std::process::Child,
         usize,
         String,
-        Option<std::sync::mpsc::Sender<()>>,
+        Option<std::sync::mpsc::Sender<bool>>,
     )>,
     child_pids: Vec<u32>,
     last_stdout: PipeStdout,
@@ -687,14 +694,12 @@ fn wait_pipe_children_unix(
                 let status = child.wait();
                 let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
                     == Some(crate::runner::EARLY_EXIT);
-                if exit_99 {
-                    // Send the cancellation signal to the downstream sponge thread
-                    // directly before the ReaperResult goes through the main thread.
-                    // This is the 1-hop path: reaper -> sponge, no main thread involved.
-                    // Ignore send error: sponge already exited or cancelled independently.
-                    if let Some(tx) = cancel_tx {
-                        let _ = tx.send(());
-                    }
+                // Always send the exit-99 determination to the downstream sponge so
+                // it can unblock from recv(). Send before the ReaperResult so the
+                // sponge unblocks before the main thread begins its kill/cancel cascade.
+                // Ignore send error: sponge already exited or was never spawned.
+                if let Some(cancel) = cancel_tx {
+                    let _ = cancel.send(exit_99);
                 }
                 // Ignore send error: main thread dropped rx only if it panicked.
                 let _ = tx.send(ReaperResult {
@@ -908,7 +913,7 @@ pub(super) fn run_pipe_chain(
         std::process::Child,
         usize,
         String,
-        Option<std::sync::mpsc::Sender<()>>,
+        Option<std::sync::mpsc::Sender<bool>>,
     )> = Vec::with_capacity(n);
     let mut prev_stdout: Option<PipeStdout> = None;
     // PID of the first child, used as the process group ID for all pipe children.
@@ -939,8 +944,10 @@ pub(super) fn run_pipe_chain(
     // Created when a non-sponge block precedes a sponge block; the sender goes
     // into the children tuple for the upstream block's reaper thread.
     #[cfg(unix)]
-    let mut sponge_cancel_rxs: std::collections::HashMap<usize, std::sync::mpsc::Receiver<()>> =
-        std::collections::HashMap::new();
+    let mut sponge_cancel_rxs: std::collections::HashMap<
+        usize,
+        std::sync::mpsc::Receiver<bool>,
+    > = std::collections::HashMap::new();
 
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
@@ -1144,10 +1151,10 @@ pub(super) fn run_pipe_chain(
         // The sender is held by this block's reaper thread and dropped on exit 99.
         // The receiver is stored and later passed to the sponge thread via SpongeChannels.
         #[cfg(unix)]
-        let cancel_tx: Option<std::sync::mpsc::Sender<()>> = {
+        let cancel_tx: Option<std::sync::mpsc::Sender<bool>> = {
             let next_is_sponge = cmd.blocks.get(i + 1).is_some_and(|b| b.needs_sponge());
             if next_is_sponge {
-                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let (tx, rx) = std::sync::mpsc::channel::<bool>();
                 sponge_cancel_rxs.insert(i + 1, rx);
                 Some(tx)
             } else {
