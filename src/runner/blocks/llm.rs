@@ -18,10 +18,9 @@ impl BlockRunner for LlmRunner {
         block: &CodeBlock,
         _script_path: &Path,
     ) -> Result<(std::process::Command, Option<tempfile::TempDir>), CreftError> {
-        let config = block
-            .llm_config
-            .as_ref()
-            .expect("LlmRunner called on block without llm_config; validation must gate this");
+        let config = block.llm_config.as_ref().ok_or_else(|| {
+            CreftError::Setup("llm block is missing provider configuration".into())
+        })?;
         Ok((build_llm_command(config), None))
     }
 }
@@ -97,6 +96,8 @@ pub(crate) fn build_llm_command(config: &LlmConfig) -> std::process::Command {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use pretty_assertions::assert_eq;
 
@@ -172,5 +173,26 @@ mod tests {
         let cmd = build_llm_command(&config);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["-p", "--verbose", "--output", "json"]);
+    }
+
+    #[test]
+    fn build_command_returns_error_when_llm_config_absent() {
+        let block = CodeBlock {
+            lang: "llm".to_string(),
+            code: "say hello".to_string(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        let result = LlmRunner.build_command(&block, Path::new("/tmp/dummy"));
+        match result {
+            Err(CreftError::Setup(msg)) => {
+                assert!(
+                    msg.contains("missing provider configuration"),
+                    "expected error message to mention 'missing provider configuration', got: {msg}"
+                );
+            }
+            other => panic!("expected Err(CreftError::Setup(...)), got {other:?}"),
+        }
     }
 }
