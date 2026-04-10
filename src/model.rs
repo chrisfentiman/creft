@@ -589,6 +589,25 @@ mod tests {
         assert_eq!(def.name_parts(), vec!["gh", "issue-body"]);
     }
 
+    #[rstest]
+    #[case::hidden_top_level("_internal", true)]
+    #[case::hidden_subcommand("hooks _guard", true)]
+    #[case::hidden_namespace("_private mycommand", true)]
+    #[case::underscore_mid_word("my_command", false)]
+    #[case::visible("visible", false)]
+    fn is_hidden_matches_underscore_prefix_tokens(#[case] name: &str, #[case] expected: bool) {
+        let def = CommandDef {
+            name: name.into(),
+            description: "test".into(),
+            args: vec![],
+            flags: vec![],
+            env: vec![],
+            tags: vec![],
+            supports: vec![],
+        };
+        assert_eq!(def.is_hidden(), expected);
+    }
+
     #[test]
     fn test_help_text() {
         let cmd = ParsedCommand {

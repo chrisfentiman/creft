@@ -1087,6 +1087,65 @@ fn test_namespace_help_skill_takes_priority() {
     );
 }
 
+/// `creft hooks --help` suppresses hidden subcommands when `hooks` is both a skill and namespace.
+///
+/// The `--help` subcommand listing at `main.rs:176-180` must filter `is_hidden()` commands.
+/// This test ensures a regression in that filter (e.g. removing it) fails loudly.
+#[test]
+fn help_subcommand_listing_suppresses_hidden_subcommands() {
+    let dir = creft_env();
+
+    // A skill that acts as both a skill and a namespace prefix.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks\ndescription: Manage hooks\n---\n\n```bash\necho hooks\n```\n",
+        )
+        .assert()
+        .success();
+
+    // A visible subcommand under hooks.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks deploy\ndescription: Deploy hook\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .assert()
+        .success();
+
+    // A hidden subcommand under hooks — must not appear in help output.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks _guard\ndescription: Internal guard\n---\n\n```bash\necho guard\n```\n",
+        )
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["hooks", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    assert!(
+        stdout.contains("hooks deploy"),
+        "visible subcommand should appear in --help subcommand listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("hooks _guard"),
+        "hidden subcommand must be suppressed from --help subcommand listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("_guard"),
+        "hidden subcommand token must not appear anywhere in --help output; got: {stdout:?}"
+    );
+}
+
 // ── list UX improvements ──────────────────────────────────────────────────────
 
 /// `creft list` at root level prints "Skills:" header.
