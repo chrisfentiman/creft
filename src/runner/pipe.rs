@@ -687,6 +687,7 @@ fn wait_pipe_children_unix(
 
     for (i, (child, block_idx, lang, cancel_tx)) in children.into_iter().enumerate() {
         let tx = tx.clone();
+        let pgid = child_pgid; // Option<u32> is Copy — no Arc needed
         std::thread::Builder::new()
             .name(format!("creft-reaper-{i}"))
             .spawn(move || {
@@ -694,6 +695,11 @@ fn wait_pipe_children_unix(
                 let status = child.wait();
                 let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
                     == Some(crate::runner::EARLY_EXIT);
+                // Kill the process group immediately on exit 99, before any channel hop.
+                // The main thread's kill at line 740 is a redundant safety net.
+                if exit_99 {
+                    kill_group(pgid);
+                }
                 // Always send the exit-99 determination to the downstream sponge so
                 // it can unblock from recv(). Send before the ReaperResult so the
                 // sponge unblocks before the main thread begins its kill/cancel cascade.
