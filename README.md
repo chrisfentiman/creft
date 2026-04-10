@@ -70,7 +70,7 @@ $ creft linecount
   doctor.rs                 1883
 ```
 
-Multi-block skills pipe stdout between blocks using OS file descriptors. Concurrent, not buffered.
+Multi-block skills pipe stdout between blocks using OS file descriptors. Concurrent, not buffered. Use an `llm` block to send pipeline output to an AI provider (Claude, Gemini, Codex, Ollama) as a step in the chain.
 
 ## Add structure
 
@@ -105,12 +105,14 @@ aws ecs update-service --cluster {{env}} --service app --force-new-deployment
 ```
 ````
 
-Args with regex validation. Typed flags. Required env vars. Docs blocks for `--help`. Dependencies installed on the fly via `uv`/`npx`. All declared in one file.
+Args with regex validation. Typed flags. Required env vars. Docs blocks for `--help`. Dependencies installed on the fly via `uv`/`npm`. All declared in one file.
+
+For the full frontmatter schema, exit code semantics, LLM blocks, and dependency declarations, run `creft add --help`.
 
 ## Teach your agent
 
 ```sh
-creft up              # auto-detect: Claude Code, Cursor, Windsurf, Copilot, Codex, Gemini
+creft up              # auto-detect: Claude Code, Cursor, Windsurf, Aider, Copilot, Codex, Gemini
 ```
 
 After setup, agents discover skills (`creft list`), run them (`creft <name>`), and author new ones (`creft add`).
