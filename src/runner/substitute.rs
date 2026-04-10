@@ -1,10 +1,5 @@
-use std::sync::LazyLock;
-
 use crate::error::CreftError;
-
-static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_-]*)(?:\|([^}]*))?\}\}").unwrap()
-});
+use crate::model::PLACEHOLDER_RE;
 
 /// Returns `true` if the language tag uses a shell interpreter that performs
 /// word splitting and metacharacter expansion on substituted values.

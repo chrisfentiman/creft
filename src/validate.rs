@@ -5,14 +5,9 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::doctor;
-use crate::model::{AppContext, CodeBlock, CommandDef};
+use crate::model::{AppContext, CodeBlock, CommandDef, PLACEHOLDER_RE};
 use crate::registry_config::{self, HttpMethod, RegistryEndpoint};
 use crate::store;
-
-// Duplicated from runner.rs to avoid coupling validate to runner.
-static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_-]*)(?:\|([^}]*))?\}\}").unwrap()
-});
 
 /// Outcome of validating a parsed skill.
 #[derive(Debug)]

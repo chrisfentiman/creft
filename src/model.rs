@@ -1,9 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::CreftError;
 use crate::style::bold;
+
+/// Matches `{{name}}` and `{{name|default}}` placeholders in skill templates.
+pub(crate) static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_-]*)(?:\|([^}]*))?\}\}").unwrap()
+});
 
 /// Resolved environment context for the creft CLI.
 ///
