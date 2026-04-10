@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/chrisfentiman/creft/compare/creft-v0.2.2...creft-v0.2.3) (2026-04-10)
+
+
+### Features
+
+* **list:** hidden commands with _-prefix convention ([c3e973e](https://github.com/chrisfentiman/creft/commit/c3e973e463321f75c5a7bf102caec7d7ebf9ec46))
+
 ## [0.2.2](https://github.com/chrisfentiman/creft/compare/creft-v0.2.1...creft-v0.2.2) (2026-04-10)
 
 
