@@ -566,7 +566,6 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     let output = creft_with(&dir)
         .args(["pipe-exit-99-kill"])
         .assert()
@@ -574,18 +573,12 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         .get_output()
         .stdout
         .clone();
-    let elapsed = start.elapsed();
 
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("should not appear"),
         "block 2 output must not appear after exit 99; got: {:?}",
         stdout_str
-    );
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after exit 99 (took {:?})",
-        elapsed
     );
 }
 

@@ -1332,6 +1332,9 @@ mod tests {
 
     #[test]
     fn test_global_check_returns_results() {
+        if crate::doctor::which_path("bash").is_none() {
+            return;
+        }
         let ctx =
             crate::model::AppContext::from_env().expect("AppContext::from_env() failed in test");
         let results = run_global_check(&ctx);
@@ -1343,6 +1346,9 @@ mod tests {
 
     #[test]
     fn test_global_check_includes_bash() {
+        if crate::doctor::which_path("bash").is_none() {
+            return;
+        }
         let ctx =
             crate::model::AppContext::from_env().expect("AppContext::from_env() failed in test");
         let results = run_global_check(&ctx);
@@ -1354,6 +1360,9 @@ mod tests {
 
     #[test]
     fn test_global_check_includes_packages() {
+        if crate::doctor::which_path("bash").is_none() {
+            return;
+        }
         let ctx =
             crate::model::AppContext::from_env().expect("AppContext::from_env() failed in test");
         let results = run_global_check(&ctx);
