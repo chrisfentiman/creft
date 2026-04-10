@@ -1205,8 +1205,10 @@ pub(super) fn run_pipe_chain(
 
     #[cfg(not(unix))]
     let (results, early_exit) = {
-        let children_opt: Vec<Option<(std::process::Child, usize, String)>> =
-            children.into_iter().map(Some).collect();
+        let children_opt: Vec<Option<(std::process::Child, usize, String)>> = children
+            .into_iter()
+            .map(|(c, i, l, _)| Some((c, i, l)))
+            .collect();
         wait_pipe_children_fallback(children_opt)?
     };
 
