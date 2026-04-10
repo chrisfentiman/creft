@@ -173,7 +173,11 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
                 // If this command also acts as a namespace prefix, list its
                 // direct subcommands so users can discover them from --help.
                 if store::has_subcommands(ctx, &name)? {
-                    let subcommands = store::list_direct_subcommands(ctx, &name)?;
+                    let all_subcommands = store::list_direct_subcommands(ctx, &name)?;
+                    let subcommands: Vec<_> = all_subcommands
+                        .into_iter()
+                        .filter(|(def, _)| !def.is_hidden())
+                        .collect();
                     if !subcommands.is_empty() {
                         println!();
                         println!("{}", style::bold("Subcommands:", ansi));
@@ -273,7 +277,19 @@ fn run_user_command(ctx: &model::AppContext, args: &[String]) -> Result<(), Cref
 /// namespace prefix rather than an individual skill.
 fn cmd_namespace_help(ctx: &model::AppContext, prefix: &[&str]) -> Result<(), CreftError> {
     let ansi = style::use_ansi();
-    let skills = store::list_namespace_skills(ctx, prefix)?;
+    let all_skills = store::list_namespace_skills(ctx, prefix)?;
+
+    // Suppress hidden skills unless the user explicitly named a hidden prefix.
+    let explicit_hidden = prefix.iter().any(|p| p.starts_with('_'));
+    let skills: Vec<_> = if explicit_hidden {
+        all_skills
+    } else {
+        all_skills
+            .into_iter()
+            .filter(|(def, _)| !def.is_hidden())
+            .collect()
+    };
+
     let skill_count = skills.len();
     let plural = if skill_count == 1 { "skill" } else { "skills" };
     let prefix_str = prefix.join(" ");
@@ -467,11 +483,23 @@ fn cmd_list(
         return Ok(());
     }
 
+    // Suppress hidden commands unless the user explicitly named a hidden prefix or
+    // passed --all (which opts into seeing everything).
+    let explicit_hidden = prefix.iter().any(|p| p.starts_with('_'));
+    let visible: Vec<_> = if explicit_hidden || show_all {
+        tag_filtered
+    } else {
+        tag_filtered
+            .into_iter()
+            .filter(|(def, _)| !def.is_hidden())
+            .collect()
+    };
+
     if show_all {
         let flat: Vec<_> = if prefix.is_empty() {
-            tag_filtered
+            visible
         } else {
-            tag_filtered
+            visible
                 .into_iter()
                 .filter(|(def, _)| {
                     let parts = def.name_parts();
@@ -503,7 +531,7 @@ fn cmd_list(
         return Ok(());
     }
 
-    let entries = store::group_by_namespace(tag_filtered, &prefix);
+    let entries = store::group_by_namespace(visible, &prefix);
 
     if entries.is_empty() {
         eprintln!("no commands found. use 'creft add' to create one.");

@@ -408,6 +408,14 @@ impl CommandDef {
     pub fn name_parts(&self) -> Vec<&str> {
         self.name.split_whitespace().collect()
     }
+
+    /// A command is hidden if any token in its name starts with `_`.
+    ///
+    /// Hidden commands are excluded from `creft list` output but remain
+    /// fully functional for execution, show, cat, edit, and rm.
+    pub fn is_hidden(&self) -> bool {
+        self.name_parts().iter().any(|part| part.starts_with('_'))
+    }
 }
 
 impl ParsedCommand {
@@ -579,6 +587,25 @@ mod tests {
             supports: vec![],
         };
         assert_eq!(def.name_parts(), vec!["gh", "issue-body"]);
+    }
+
+    #[rstest]
+    #[case::hidden_top_level("_internal", true)]
+    #[case::hidden_subcommand("hooks _guard", true)]
+    #[case::hidden_namespace("_private mycommand", true)]
+    #[case::underscore_mid_word("my_command", false)]
+    #[case::visible("visible", false)]
+    fn is_hidden_matches_underscore_prefix_tokens(#[case] name: &str, #[case] expected: bool) {
+        let def = CommandDef {
+            name: name.into(),
+            description: "test".into(),
+            args: vec![],
+            flags: vec![],
+            env: vec![],
+            tags: vec![],
+            supports: vec![],
+        };
+        assert_eq!(def.is_hidden(), expected);
     }
 
     #[test]

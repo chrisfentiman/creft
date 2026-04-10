@@ -568,6 +568,184 @@ fn test_list_short_description_not_truncated() {
         .stdout(predicate::str::contains("...").not());
 }
 
+// ── hidden command tests ───────────────────────────────────────────────────────
+
+/// A top-level command whose name starts with `_` is excluded from `creft list`.
+#[test]
+fn hidden_top_level_command_excluded_from_list() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: _internal\ndescription: private\n---\n\n```bash\necho internal\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: visible\ndescription: public\n---\n\n```bash\necho visible\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("visible"))
+        .stdout(predicate::str::contains("_internal").not());
+}
+
+/// A hidden subcommand is excluded from `creft list <namespace>`, but the namespace
+/// itself still appears at top level when it has at least one visible command.
+/// The skill count for the namespace reflects only visible commands.
+#[test]
+fn hidden_subcommand_excluded_from_namespace_drill_in() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .assert()
+        .success();
+
+    // Top-level list: hooks namespace appears with count of 1 (only visible command).
+    let top_output = creft_with(&dir)
+        .args(["list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let top_stdout = String::from_utf8_lossy(&top_output);
+    assert!(
+        top_stdout.contains("hooks"),
+        "hooks namespace should appear in top-level list; got: {top_stdout:?}"
+    );
+    assert!(
+        top_stdout.contains("1 skill"),
+        "hooks namespace should show 1 skill (hidden guard excluded); got: {top_stdout:?}"
+    );
+
+    // Drill-in: hooks deploy appears, hooks _guard does not.
+    creft_with(&dir)
+        .args(["list", "hooks"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hooks deploy"))
+        .stdout(predicate::str::contains("hooks _guard").not());
+}
+
+/// A namespace whose own token starts with `_` is entirely excluded from `creft list`.
+#[test]
+fn hidden_namespace_excluded_from_list() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: _private mycommand\ndescription: secret\n---\n\n```bash\necho secret\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_private").not());
+}
+
+/// `creft list _private` (explicit hidden prefix) shows hidden commands under that namespace.
+#[test]
+fn explicit_hidden_prefix_shows_hidden_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: _private mycommand\ndescription: secret\n---\n\n```bash\necho secret\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list", "_private"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_private mycommand"));
+}
+
+/// A hidden command executes normally when called by name.
+#[test]
+fn hidden_command_executes_normally() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: _internal\ndescription: private\n---\n\n```bash\necho hidden-output\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["_internal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hidden-output"));
+}
+
+/// `creft show _internal` works normally on a hidden command.
+#[test]
+fn show_works_on_hidden_command() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: _internal\ndescription: private\n---\n\n```bash\necho hidden-output\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["show", "_internal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name: _internal"));
+}
+
+/// `creft list --tag ops` excludes hidden commands even when they match the tag.
+#[test]
+fn tag_filter_excludes_hidden_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: _internal\ndescription: private\ntags:\n  - ops\n---\n\n```bash\necho internal\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: visible\ndescription: public\ntags:\n  - ops\n---\n\n```bash\necho visible\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list", "--tag", "ops"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("visible"))
+        .stdout(predicate::str::contains("_internal").not());
+}
+
 /// `creft list` with namespaced skills shows the help footer at root level.
 #[test]
 fn test_list_shows_footer_with_namespaces() {
@@ -644,6 +822,117 @@ fn test_list_footer_always_shown_at_root() {
         .stdout(predicate::str::contains(
             "See 'creft <skill> --help' for details.",
         ));
+}
+
+// ── creft list --all hidden command tests ─────────────────────────────────────
+
+/// `creft list --all` shows hidden `_`-prefixed commands alongside visible ones.
+#[test]
+fn list_all_includes_hidden_top_level_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: _internal\ndescription: private\n---\n\n```bash\necho internal\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: visible\ndescription: public\n---\n\n```bash\necho visible\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("visible"))
+        .stdout(predicate::str::contains("_internal"));
+}
+
+/// `creft list --all` shows hidden namespaced commands that are normally suppressed.
+#[test]
+fn list_all_includes_hidden_namespaced_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hooks deploy"))
+        .stdout(predicate::str::contains("hooks _guard"));
+}
+
+/// `creft list <namespace> --all` shows hidden commands within the namespace.
+#[test]
+fn list_namespace_all_includes_hidden_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .assert()
+        .success();
+
+    // --all must precede the namespace positional arg — trailing_var_arg captures
+    // everything after the first positional, so flags placed after are treated as
+    // namespace tokens rather than parsed as options.
+    creft_with(&dir)
+        .args(["list", "--all", "hooks"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hooks deploy"))
+        .stdout(predicate::str::contains("hooks _guard"));
+}
+
+/// `creft list --all` shows hidden commands even when a tag filter is applied.
+#[test]
+fn list_all_with_tag_includes_hidden_matching_commands() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: _internal\ndescription: private\ntags:\n  - ops\n---\n\n```bash\necho internal\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: visible\ndescription: public\ntags:\n  - ops\n---\n\n```bash\necho visible\n```\n")
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["list", "--all", "--tag", "ops"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("visible"))
+        .stdout(predicate::str::contains("_internal"));
 }
 
 /// `creft list --all` does NOT show the footer (flat mode only).
@@ -795,6 +1084,65 @@ fn test_namespace_help_skill_takes_priority() {
     assert!(
         !stdout.contains("2 skills"),
         "namespace listing should not appear when skill takes priority; got: {stdout:?}"
+    );
+}
+
+/// `creft hooks --help` suppresses hidden subcommands when `hooks` is both a skill and namespace.
+///
+/// The `--help` subcommand listing at `main.rs:176-180` must filter `is_hidden()` commands.
+/// This test ensures a regression in that filter (e.g. removing it) fails loudly.
+#[test]
+fn help_subcommand_listing_suppresses_hidden_subcommands() {
+    let dir = creft_env();
+
+    // A skill that acts as both a skill and a namespace prefix.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks\ndescription: Manage hooks\n---\n\n```bash\necho hooks\n```\n",
+        )
+        .assert()
+        .success();
+
+    // A visible subcommand under hooks.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks deploy\ndescription: Deploy hook\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .assert()
+        .success();
+
+    // A hidden subcommand under hooks — must not appear in help output.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: hooks _guard\ndescription: Internal guard\n---\n\n```bash\necho guard\n```\n",
+        )
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["hooks", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    assert!(
+        stdout.contains("hooks deploy"),
+        "visible subcommand should appear in --help subcommand listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("hooks _guard"),
+        "hidden subcommand must be suppressed from --help subcommand listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("_guard"),
+        "hidden subcommand token must not appear anywhere in --help output; got: {stdout:?}"
     );
 }
 
