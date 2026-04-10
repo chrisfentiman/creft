@@ -1884,9 +1884,10 @@ fn test_pipe_exit_99_fast_downstream_no_output() {
 /// Verify that downstream blocks with stdin-dependent side effects are killed
 /// before those side effects occur when an upstream block exits 99.
 ///
-/// Block 1 reads from stdin before running any side effect. With exit 99 from
-/// block 0, the pipe closes (EOF), block 1 gets SIGKILL from killpg, and the
-/// sentinel file is never created.
+/// Block 1 reads from stdin, then sleeps 500ms before touching the sentinel.
+/// The sleep gives the reaper-side kill chain (microseconds of latency) ample
+/// time to deliver SIGKILL before the side effect completes. The sentinel file
+/// must never be created.
 #[test]
 fn test_pipe_exit_99_no_side_effects() {
     let dir = creft_env();
@@ -1906,7 +1907,7 @@ fn test_pipe_exit_99_no_side_effects() {
             "```\n",
             "\n",
             "```bash\n",
-            "read line; touch \"$CREFT_SENTINEL\"\n",
+            "read line; sleep 0.5; touch \"$CREFT_SENTINEL\"\n",
             "```\n",
         ))
         .assert()
