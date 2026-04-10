@@ -179,6 +179,116 @@ fn stderr_from_failed_last_pipe_block_appears_in_error_output() {
     );
 }
 
+// ── verbose mode: stderr from successful blocks is surfaced ───────────────────
+
+/// With `--verbose`, stderr from a successful block must appear on the parent's
+/// stderr prefixed with `[block N stderr]` so multi-block output is attributable.
+#[test]
+fn verbose_shows_stderr_from_successful_block() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: verbose-stderr-success\n",
+            "description: writes stderr then succeeds; visible under verbose\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo provider-diagnostic >&2\n",
+            "echo stdout-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["verbose-stderr-success", "--verbose"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "block must succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[block 1 stderr]"),
+        "verbose stderr must include block prefix; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("provider-diagnostic"),
+        "verbose stderr must include the child's stderr content; got: {stderr:?}"
+    );
+}
+
+/// Without `--verbose`, stderr from a successful block must not appear on the
+/// parent's terminal. The terminal stays clean.
+#[test]
+fn non_verbose_hides_stderr_from_successful_block() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: non-verbose-stderr-success\n",
+            "description: writes stderr then succeeds; hidden without verbose\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo silent-diagnostic >&2\n",
+            "echo stdout-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["non-verbose-stderr-success"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("silent-diagnostic").not());
+}
+
+/// In a pipe chain with `--verbose`, stderr from all blocks appears in the
+/// parent's stderr with `[block N stderr]` prefixes.
+#[test]
+fn verbose_shows_stderr_from_pipe_chain_blocks() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: verbose-pipe-stderr\n",
+            "description: pipe chain where each block writes stderr\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo block-one-diag >&2\n",
+            "echo hello\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "echo block-two-diag >&2\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["verbose-pipe-stderr", "--verbose"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "pipe chain must succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("block-one-diag") || stderr.contains("block-two-diag"),
+        "verbose stderr must include at least one block's diagnostic output; got: {stderr:?}"
+    );
+}
+
 // ── stdout is unaffected ───────────────────────────────────────────────────────
 
 /// Capturing stderr must not interfere with stdout: block output still reaches

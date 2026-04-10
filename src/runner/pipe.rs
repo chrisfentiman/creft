@@ -493,6 +493,17 @@ pub(super) fn sponge_stage(
         };
 
         let status = child.wait();
+
+        // On success with --verbose, emit the captured stderr so users debugging
+        // provider behavior can see what the child wrote.
+        if ctx.is_verbose()
+            && status.as_ref().ok().is_some_and(|s| s.success())
+            && !captured_stderr.is_empty()
+        {
+            let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
+            let _ = std::io::stderr().write_all(&captured_stderr);
+        }
+
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
@@ -1324,6 +1335,19 @@ pub(super) fn run_pipe_chain(
         return Ok(());
     }
 
+    // Under --verbose, emit captured stderr for every block that produced any,
+    // regardless of exit status. This lets users see what the child wrote even
+    // when the block succeeded. The `[block N stderr]` prefix makes multi-block
+    // output attributable.
+    if ctx.is_verbose() {
+        for r in &results {
+            if !r.stderr.is_empty() {
+                let _ = writeln!(std::io::stderr(), "[block {} stderr]", r.block + 1);
+                let _ = std::io::stderr().write_all(&r.stderr);
+            }
+        }
+    }
+
     // Last block success wins: earlier blocks dying from SIGPIPE (consumer exited
     // early) is normal pipeline behavior, not an error.
     let last = results.last().expect("at least one block");
@@ -1338,7 +1362,9 @@ pub(super) fn run_pipe_chain(
         .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
         .unwrap_or(last);
 
-    if !root.stderr.is_empty() {
+    // When not in verbose mode, the root block's stderr has not yet been emitted.
+    // In verbose mode it was already written above with the block prefix.
+    if !ctx.is_verbose() && !root.stderr.is_empty() {
         let _ = std::io::stderr().write_all(&root.stderr);
     }
 

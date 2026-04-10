@@ -478,6 +478,10 @@ fn execute_block(
         // Print any output produced before the early exit so it is not lost.
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         print!("{}", stdout);
+        if ctx.is_verbose() && !output.stderr.is_empty() {
+            let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
+            let _ = std::io::stderr().write_all(&output.stderr);
+        }
         return Err(CreftError::EarlyExit);
     }
 
@@ -490,6 +494,11 @@ fn execute_block(
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     print!("{}", stdout);
+
+    if ctx.is_verbose() && !output.stderr.is_empty() {
+        let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
+        let _ = std::io::stderr().write_all(&output.stderr);
+    }
 
     Ok(stdout)
 }
