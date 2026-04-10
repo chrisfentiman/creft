@@ -93,7 +93,7 @@ Code Blocks:
 
   Dependencies (first line comment):
     # deps: requests, pandas          Python (uses uv run --with)
-    // deps: lodash, chalk            Node (uses npx --package=)
+    // deps: lodash, chalk            Node (uses npm install + NODE_PATH)
     # deps: jq, yq                    Shell (warns if not on PATH)
 
 Template Placeholders:
@@ -273,7 +273,7 @@ Exit Codes:
 
 Global Check:
   Checks interpreters (bash, python3, node, ruby), tools (git, shellcheck,
-  uv, npx), AI providers (claude, gemini, codex, ollama -- all optional),
+  uv, npm), AI providers (claude, gemini, codex, ollama -- all optional),
   storage directories, and installed package manifests.
 
 Skill Check:
