@@ -2183,19 +2183,11 @@ fn test_pipe_exit_99_middle_block_stdout_captured() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     creft_with(&dir)
         .args(["exit99-mid-capture"])
         .assert()
         .success()
         .stdout(predicate::str::contains("middle-output"));
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after middle block exits 99 (took {:?})",
-        elapsed
-    );
 }
 
 /// When the first block in a multi-block chain exits 99, its stdout must

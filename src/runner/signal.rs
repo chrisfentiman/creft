@@ -81,6 +81,8 @@ impl Drop for PipeSignalGuard {
 mod tests {
     use std::sync::atomic::Ordering;
 
+    use pretty_assertions::assert_eq;
+
     use super::{PIPE_CHILD_PGID, PipeSignalGuard};
 
     /// Verifies that `PipeSignalGuard` stores the process group ID on
