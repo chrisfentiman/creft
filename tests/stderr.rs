@@ -284,8 +284,8 @@ fn verbose_shows_stderr_from_pipe_chain_blocks() {
     assert!(output.status.success(), "pipe chain must succeed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("block-one-diag") || stderr.contains("block-two-diag"),
-        "verbose stderr must include at least one block's diagnostic output; got: {stderr:?}"
+        stderr.contains("block-one-diag") && stderr.contains("block-two-diag"),
+        "verbose stderr must include both blocks' diagnostic output; got: {stderr:?}"
     );
 }
 

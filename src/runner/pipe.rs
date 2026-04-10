@@ -494,16 +494,6 @@ pub(super) fn sponge_stage(
 
         let status = child.wait();
 
-        // On success with --verbose, emit the captured stderr so users debugging
-        // provider behavior can see what the child wrote.
-        if ctx.is_verbose()
-            && status.as_ref().ok().is_some_and(|s| s.success())
-            && !captured_stderr.is_empty()
-        {
-            let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
-            let _ = std::io::stderr().write_all(&captured_stderr);
-        }
-
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
