@@ -408,6 +408,14 @@ impl CommandDef {
     pub fn name_parts(&self) -> Vec<&str> {
         self.name.split_whitespace().collect()
     }
+
+    /// A command is hidden if any token in its name starts with `_`.
+    ///
+    /// Hidden commands are excluded from `creft list` output but remain
+    /// fully functional for execution, show, cat, edit, and rm.
+    pub fn is_hidden(&self) -> bool {
+        self.name_parts().iter().any(|part| part.starts_with('_'))
+    }
 }
 
 impl ParsedCommand {
