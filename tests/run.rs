@@ -104,6 +104,95 @@ fn test_namespaced_command() {
         .stdout(predicate::str::contains("issue-output"));
 }
 
+/// A 4-token command (`hooks guard refs config`) routes to the deepest matching
+/// file even when a shorter 3-token file (`hooks guard refs`) also exists.
+/// Longest-match must win.
+#[test]
+fn test_four_token_command_routes_over_three_token_match() {
+    let dir = creft_env();
+
+    // Register the 3-token command first.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs\n",
+            "description: guard refs\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    // Register the 4-token command.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs config\n",
+            "description: guard refs config\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-config-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    // The 4-token invocation must route to the 4-token command, not the 3-token one.
+    creft_with(&dir)
+        .args(["hooks", "guard", "refs", "config"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refs-config-output"));
+}
+
+/// The 3-token command still resolves correctly when the 4-token command also exists.
+#[test]
+fn test_three_token_command_still_resolves_when_four_token_sibling_exists() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs\n",
+            "description: guard refs\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs config\n",
+            "description: guard refs config\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-config-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["hooks", "guard", "refs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refs-output"));
+}
+
 // ── optional args tests ────────────────────────────────────────────────────────
 
 /// A skill with `required: false` and a template default `{{count|5}}` runs

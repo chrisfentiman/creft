@@ -621,7 +621,7 @@ fn resolve_in_single_scope(
     let first = &args[0];
 
     // Try longest owned-command match first: "gh issue-body" before "gh".
-    for len in (1..=args.len().min(3)).rev() {
+    for len in (1..=args.len()).rev() {
         let candidate = args[..len].join(" ");
         let path = name_to_path_in(ctx, &candidate, scope)?;
         if path.exists() {
@@ -645,7 +645,7 @@ fn resolve_in_single_scope(
     // Check for flat files with spaces and migrate them.
     // Start at len=2: single-token args (len=1) are individual CLI tokens and
     // cannot contain spaces, so they can never match a space-delimited flat file.
-    for len in (2..=args.len().min(3)).rev() {
+    for len in (2..=args.len()).rev() {
         let candidate = args[..len].join(" ");
         // candidate always has spaces at len>=2, so contains(' ') is always true —
         // kept as a defensive guard.
