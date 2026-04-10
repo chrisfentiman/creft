@@ -151,6 +151,8 @@ pub(super) struct PipeResult {
     pub(super) block: usize,
     pub(super) lang: String,
     pub(super) status: std::process::ExitStatus,
+    /// Captured stderr bytes from the child process.
+    pub(super) stderr: Vec<u8>,
 }
 
 /// Outcome of a single block in a pipe chain.
@@ -173,6 +175,8 @@ pub(crate) struct ReaperResult {
     pub(crate) block_idx: usize,
     pub(crate) lang: String,
     pub(crate) outcome: BlockOutcome,
+    /// Captured stderr bytes from the child process.
+    pub(crate) stderr: Vec<u8>,
 }
 
 /// Communication channels for a sponge stage thread.
@@ -305,6 +309,7 @@ pub(super) fn sponge_stage(
                 block_idx,
                 lang: block.lang.clone(),
                 outcome: BlockOutcome::Cancelled,
+                stderr: vec![],
             });
             return if data.is_empty() { None } else { Some(data) };
         }
@@ -326,6 +331,7 @@ pub(super) fn sponge_stage(
                     block_idx,
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
+                    stderr: vec![],
                 });
                 return None;
             }
@@ -345,6 +351,7 @@ pub(super) fn sponge_stage(
                     block_idx,
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
+                    stderr: vec![],
                 });
                 return None;
             }
@@ -362,6 +369,7 @@ pub(super) fn sponge_stage(
                     block_idx,
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
+                    stderr: vec![],
                 });
                 return None;
             }
@@ -374,7 +382,7 @@ pub(super) fn sponge_stage(
         }
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::inherit());
+        cmd.stderr(std::process::Stdio::piped());
 
         // Second cancellation check — catches SIGINT that arrived during template
         // expansion and command building. The channel verdict was consumed by the
@@ -389,6 +397,7 @@ pub(super) fn sponge_stage(
                 block_idx,
                 lang: block.lang.clone(),
                 outcome: BlockOutcome::Cancelled,
+                stderr: vec![],
             });
             return if data.is_empty() { None } else { Some(data) };
         }
@@ -430,6 +439,7 @@ pub(super) fn sponge_stage(
                     block_idx,
                     lang: block.lang.clone(),
                     outcome: BlockOutcome::Error(e),
+                    stderr: vec![],
                 });
                 return None;
             }
@@ -471,7 +481,19 @@ pub(super) fn sponge_stage(
         // Drop pipe_writer to signal EOF to the downstream block.
         drop(pipe_writer);
 
+        // Drain stderr before wait() to prevent deadlock: if the child filled the
+        // OS stderr pipe buffer (~64KB) it would block on write(), and wait() would
+        // never return.
+        let captured_stderr = {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child.stderr.take() {
+                let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+            }
+            buf
+        };
+
         let status = child.wait();
+
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
@@ -479,6 +501,7 @@ pub(super) fn sponge_stage(
                 Ok(s) => BlockOutcome::Exited(s),
                 Err(e) => BlockOutcome::Error(e),
             },
+            stderr: captured_stderr,
         });
 
         // Normal path: provider's output went through the pipe. No data to recover.
@@ -493,6 +516,7 @@ pub(super) fn sponge_stage(
                 block_idx,
                 lang: block.lang.clone(),
                 outcome: BlockOutcome::Error(std::io::Error::other("sponge thread panicked")),
+                stderr: vec![],
             });
             None
         }
@@ -692,11 +716,20 @@ fn wait_pipe_children_unix(
             .name(format!("creft-reaper-{i}"))
             .spawn(move || {
                 let mut child = child;
+                // Drain stderr before wait() to prevent deadlock: a child that fills
+                // the stderr pipe buffer blocks on write(), and wait() never returns.
+                let captured_stderr = {
+                    let mut buf = Vec::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+                    }
+                    buf
+                };
                 let status = child.wait();
                 let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
                     == Some(crate::runner::EARLY_EXIT);
                 // Kill the process group immediately on exit 99, before any channel hop.
-                // The main thread's kill at line 740 is a redundant safety net.
+                // The main thread's kill is a redundant safety net.
                 if exit_99 {
                     kill_group(pgid);
                 }
@@ -715,6 +748,7 @@ fn wait_pipe_children_unix(
                         Ok(s) => BlockOutcome::Exited(s),
                         Err(e) => BlockOutcome::Error(e),
                     },
+                    stderr: captured_stderr,
                 });
             })
             .expect("failed to spawn reaper thread");
@@ -766,6 +800,7 @@ fn wait_pipe_children_unix(
                     block: reaper_result.block_idx,
                     lang: reaper_result.lang,
                     status,
+                    stderr: reaper_result.stderr,
                 });
             }
         }
@@ -848,12 +883,27 @@ fn wait_pipe_children_fallback(
 
     for i in 0..children.len() {
         let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
+        // Drain stderr before wait() to prevent deadlock: a child that fills the
+        // stderr pipe buffer blocks on write(), and wait() never returns.
+        let captured_stderr = {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child.stderr.take() {
+                let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+            }
+            buf
+        };
         let status = child.wait().map_err(CreftError::Io)?;
 
         if exit_code_of(&status) == Some(EARLY_EXIT) {
             for remaining in children.iter_mut().skip(i + 1) {
                 if let Some((mut c, _, _)) = remaining.take() {
                     let _ = c.kill();
+                    // Drain stderr from killed children to prevent deadlock.
+                    // The bytes are discarded — killed children's output is not actionable.
+                    if let Some(mut err) = c.stderr.take() {
+                        let mut discard = Vec::new();
+                        let _ = std::io::Read::read_to_end(&mut err, &mut discard);
+                    }
                     let _ = c.wait();
                 }
             }
@@ -862,6 +912,7 @@ fn wait_pipe_children_fallback(
                 block: block_idx,
                 lang,
                 status,
+                stderr: captured_stderr,
             });
             break;
         }
@@ -870,6 +921,7 @@ fn wait_pipe_children_fallback(
             block: block_idx,
             lang,
             status,
+            stderr: captured_stderr,
         });
     }
 
@@ -1273,6 +1325,19 @@ pub(super) fn run_pipe_chain(
         return Ok(());
     }
 
+    // Under --verbose, emit captured stderr for every block that produced any,
+    // regardless of exit status. This lets users see what the child wrote even
+    // when the block succeeded. The `[block N stderr]` prefix makes multi-block
+    // output attributable.
+    if ctx.is_verbose() {
+        for r in &results {
+            if !r.stderr.is_empty() {
+                let _ = writeln!(std::io::stderr(), "[block {} stderr]", r.block + 1);
+                let _ = std::io::stderr().write_all(&r.stderr);
+            }
+        }
+    }
+
     // Last block success wins: earlier blocks dying from SIGPIPE (consumer exited
     // early) is normal pipeline behavior, not an error.
     let last = results.last().expect("at least one block");
@@ -1286,6 +1351,12 @@ pub(super) fn run_pipe_chain(
         .iter()
         .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
         .unwrap_or(last);
+
+    // When not in verbose mode, the root block's stderr has not yet been emitted.
+    // In verbose mode it was already written above with the block prefix.
+    if !ctx.is_verbose() && !root.stderr.is_empty() {
+        let _ = std::io::stderr().write_all(&root.stderr);
+    }
 
     Err(make_execution_error(root.block, &root.lang, &root.status))
 }
