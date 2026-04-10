@@ -545,6 +545,7 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
+    use rstest::rstest;
 
     #[test]
     fn test_name_parts_simple() {
@@ -1234,28 +1235,13 @@ params: "--max-tokens 1000"
         }
     }
 
-    #[test]
-    fn test_needs_sponge_true_for_llm() {
-        assert!(make_block("llm").needs_sponge());
-    }
-
-    #[test]
-    fn test_needs_sponge_false_for_bash() {
-        assert!(!make_block("bash").needs_sponge());
-    }
-
-    #[test]
-    fn test_needs_sponge_false_for_python() {
-        assert!(!make_block("python").needs_sponge());
-    }
-
-    #[test]
-    fn test_needs_sponge_false_for_node() {
-        assert!(!make_block("node").needs_sponge());
-    }
-
-    #[test]
-    fn test_needs_sponge_false_for_unknown() {
-        assert!(!make_block("typescript").needs_sponge());
+    #[rstest]
+    #[case::llm("llm", true)]
+    #[case::bash("bash", false)]
+    #[case::python("python", false)]
+    #[case::node("node", false)]
+    #[case::unknown_language("typescript", false)]
+    fn needs_sponge(#[case] lang: &str, #[case] expected: bool) {
+        assert_eq!(make_block(lang).needs_sponge(), expected);
     }
 }
