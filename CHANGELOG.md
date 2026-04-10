@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/chrisfentiman/creft/compare/creft-v0.2.3...creft-v0.2.4) (2026-04-10)
+
+
+### Bug Fixes
+
+* **runner:** eliminate flaky exit-99 pipe tests ([f722c64](https://github.com/chrisfentiman/creft/commit/f722c64aedf18d3436c2b7c1fb57368110fe3f32))
+
 ## [0.2.3](https://github.com/chrisfentiman/creft/compare/creft-v0.2.2...creft-v0.2.3) (2026-04-10)
 
 
