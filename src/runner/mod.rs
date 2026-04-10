@@ -482,6 +482,9 @@ fn execute_block(
     }
 
     if !output.status.success() {
+        if !output.stderr.is_empty() {
+            let _ = std::io::stderr().write_all(&output.stderr);
+        }
         return Err(make_execution_error(block_idx, &block.lang, &output.status));
     }
 

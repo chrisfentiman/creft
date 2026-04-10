@@ -123,7 +123,9 @@ mod tests {
 /// on Unix, process group setup and SIGINT handling.
 ///
 /// `stdin_cfg` and `stdout_cfg` control the stdio configuration.
-/// stderr is always inherited.
+/// stderr is always piped so child process output does not contaminate the
+/// terminal. On failure the caller should surface `child.stderr`; on success
+/// it should discard it.
 ///
 /// `process_group`: Unix-only parameter. When `Some(pgid)`, the child is
 /// placed into the specified process group via `setpgid(0, pgid)` in a
@@ -158,7 +160,7 @@ pub(crate) fn spawn_block(
     }
     cmd.stdin(stdin_cfg);
     cmd.stdout(stdout_cfg);
-    cmd.stderr(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::piped());
 
     // Both operations must happen between fork() and exec() — exactly when
     // pre_exec() runs. setpgid(2) and signal(2) are both async-signal-safe.
