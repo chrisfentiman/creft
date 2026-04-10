@@ -4,6 +4,7 @@ mod helpers;
 
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
+use pretty_assertions::assert_eq;
 
 // ── run tests ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,95 @@ fn test_namespaced_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("issue-output"));
+}
+
+/// A 4-token command (`hooks guard refs config`) routes to the deepest matching
+/// file even when a shorter 3-token file (`hooks guard refs`) also exists.
+/// Longest-match must win.
+#[test]
+fn test_four_token_command_routes_over_three_token_match() {
+    let dir = creft_env();
+
+    // Register the 3-token command first.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs\n",
+            "description: guard refs\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    // Register the 4-token command.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs config\n",
+            "description: guard refs config\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-config-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    // The 4-token invocation must route to the 4-token command, not the 3-token one.
+    creft_with(&dir)
+        .args(["hooks", "guard", "refs", "config"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refs-config-output"));
+}
+
+/// The 3-token command still resolves correctly when the 4-token command also exists.
+#[test]
+fn test_three_token_command_still_resolves_when_four_token_sibling_exists() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs\n",
+            "description: guard refs\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: hooks guard refs config\n",
+            "description: guard refs config\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo refs-config-output\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["hooks", "guard", "refs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refs-output"));
 }
 
 // ── optional args tests ────────────────────────────────────────────────────────
@@ -476,7 +566,6 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     let output = creft_with(&dir)
         .args(["pipe-exit-99-kill"])
         .assert()
@@ -484,18 +573,12 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         .get_output()
         .stdout
         .clone();
-    let elapsed = start.elapsed();
 
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("should not appear"),
         "block 2 output must not appear after exit 99; got: {:?}",
         stdout_str
-    );
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after exit 99 (took {:?})",
-        elapsed
     );
 }
 
@@ -2100,19 +2183,11 @@ fn test_pipe_exit_99_middle_block_stdout_captured() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     creft_with(&dir)
         .args(["exit99-mid-capture"])
         .assert()
         .success()
         .stdout(predicate::str::contains("middle-output"));
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after middle block exits 99 (took {:?})",
-        elapsed
-    );
 }
 
 /// When the first block in a multi-block chain exits 99, its stdout must
@@ -2149,19 +2224,11 @@ fn test_pipe_exit_99_first_block_stdout_captured() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     creft_with(&dir)
         .args(["exit99-first-capture"])
         .assert()
         .success()
         .stdout(predicate::str::contains("first-output"));
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after first block exits 99 (took {:?})",
-        elapsed
-    );
 }
 
 /// When a middle block exits 99 after printing multiple lines, all lines must

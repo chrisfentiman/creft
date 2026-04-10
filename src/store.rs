@@ -621,7 +621,7 @@ fn resolve_in_single_scope(
     let first = &args[0];
 
     // Try longest owned-command match first: "gh issue-body" before "gh".
-    for len in (1..=args.len().min(3)).rev() {
+    for len in (1..=args.len()).rev() {
         let candidate = args[..len].join(" ");
         let path = name_to_path_in(ctx, &candidate, scope)?;
         if path.exists() {
@@ -645,7 +645,7 @@ fn resolve_in_single_scope(
     // Check for flat files with spaces and migrate them.
     // Start at len=2: single-token args (len=1) are individual CLI tokens and
     // cannot contain spaces, so they can never match a space-delimited flat file.
-    for len in (2..=args.len().min(3)).rev() {
+    for len in (2..=args.len()).rev() {
         let candidate = args[..len].join(" ");
         // candidate always has spaces at len>=2, so contains(' ') is always true —
         // kept as a defensive guard.
@@ -749,6 +749,7 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
+    use rstest::rstest;
 
     #[test]
     fn test_is_reserved() {
@@ -818,42 +819,15 @@ mod tests {
 
     // --- validate_path_token unit tests ---
 
-    #[test]
-    fn test_validate_path_token_rejects_dot() {
+    #[rstest]
+    #[case::dot(".")]
+    #[case::dotdot("..")]
+    #[case::slash("a/b")]
+    #[case::backslash("a\\b")]
+    #[case::empty("")]
+    fn validate_path_token_rejects_invalid(#[case] input: &str) {
         assert!(matches!(
-            validate_path_token("."),
-            Err(CreftError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_path_token_rejects_dotdot() {
-        assert!(matches!(
-            validate_path_token(".."),
-            Err(CreftError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_path_token_rejects_slash() {
-        assert!(matches!(
-            validate_path_token("a/b"),
-            Err(CreftError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_path_token_rejects_backslash() {
-        assert!(matches!(
-            validate_path_token("a\\b"),
-            Err(CreftError::InvalidName(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_path_token_rejects_empty() {
-        assert!(matches!(
-            validate_path_token(""),
+            validate_path_token(input),
             Err(CreftError::InvalidName(_))
         ));
     }

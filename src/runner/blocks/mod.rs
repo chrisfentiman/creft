@@ -11,9 +11,6 @@ mod python;
 mod ruby;
 mod shell;
 
-#[cfg(test)]
-pub(crate) use llm::build_llm_command;
-
 /// Trait for language-specific block command building.
 ///
 /// Each implementation knows how to construct a `Command` for its language
@@ -45,6 +42,77 @@ pub(super) fn runner_for(lang: &str) -> Box<dyn BlockRunner> {
         // Unknown language: fall back to ShellRunner which uses interpreter()
         // to resolve the command name (returns the lang tag verbatim for unknowns).
         _ => Box::new(shell::ShellRunner),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    use crate::model::{CodeBlock, LlmConfig};
+
+    use super::runner_for;
+
+    fn make_block(lang: &str) -> CodeBlock {
+        CodeBlock {
+            lang: lang.to_string(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        }
+    }
+
+    fn make_llm_block(provider: &str) -> CodeBlock {
+        CodeBlock {
+            lang: "llm".to_string(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: Some(LlmConfig {
+                provider: provider.to_string(),
+                model: String::new(),
+                params: String::new(),
+            }),
+            llm_parse_error: None,
+        }
+    }
+
+    /// Calls `runner_for(lang)`, then `build_command` with a minimal block and
+    /// a dummy path. Returns the command's program as a String.
+    fn program_for(lang: &str) -> String {
+        let runner = runner_for(lang);
+        let block = make_block(lang);
+        let script = Path::new("/tmp/test_script");
+        let (cmd, _) = runner.build_command(&block, script).unwrap();
+        cmd.get_program().to_str().unwrap().to_string()
+    }
+
+    #[rstest]
+    #[case::bash("bash", "bash")]
+    #[case::sh("sh", "sh")]
+    #[case::zsh("zsh", "zsh")]
+    #[case::python("python", "python3")]
+    #[case::python3("python3", "python3")]
+    #[case::node("node", "node")]
+    #[case::javascript("javascript", "node")]
+    #[case::js("js", "node")]
+    #[case::ruby("ruby", "ruby")]
+    #[case::rb("rb", "ruby")]
+    #[case::unknown("mylangtag", "mylangtag")]
+    fn runner_for_dispatches_to_expected_program(#[case] lang: &str, #[case] expected: &str) {
+        assert_eq!(program_for(lang), expected);
+    }
+
+    #[test]
+    fn runner_for_llm_uses_provider_as_program() {
+        let runner = runner_for("llm");
+        let block = make_llm_block("claude");
+        let script = Path::new("/tmp/test_script");
+        let (cmd, _) = runner.build_command(&block, script).unwrap();
+        assert_eq!(cmd.get_program().to_str().unwrap(), "claude");
     }
 }
 

@@ -187,6 +187,36 @@ pub(super) struct SpongeChannels {
     pub(super) pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
     pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
+    /// Receiver for the upstream block's exit-99 determination.
+    /// The reaper sends `true` if upstream exited 99, `false` otherwise.
+    /// `None` when this sponge is block 0 or upstream is also a sponge.
+    pub(super) cancel_rx: Option<std::sync::mpsc::Receiver<bool>>,
+}
+
+/// Block until the upstream reaper reports whether the upstream block exited 99.
+///
+/// Returns `true` if the sponge should cancel (upstream exit 99 or SIGINT
+/// already fired). Returns `false` if the sponge should proceed.
+///
+/// When `cancel_rx` is `None` (block 0 or upstream is a sponge), falls back
+/// to the shared cancel flag only.
+#[cfg(unix)]
+fn should_cancel_sponge(
+    ctx: &RunContext,
+    cancel_rx: &Option<std::sync::mpsc::Receiver<bool>>,
+) -> bool {
+    if ctx.is_cancelled() {
+        return true;
+    }
+    match cancel_rx {
+        Some(rx) => {
+            // Block until the reaper sends its determination. The reaper
+            // always sends: true (exit 99) or false (normal exit). RecvError
+            // means the reaper panicked — proceed rather than silently cancel.
+            rx.recv().unwrap_or(false)
+        }
+        None => false,
+    }
 }
 
 /// Sponge stage for a buffered block in a pipe chain.
@@ -233,7 +263,11 @@ pub(super) fn sponge_stage(
     block_idx: usize,
     channels: SpongeChannels,
 ) -> Option<Vec<u8>> {
-    let SpongeChannels { pgid_tx, reaper_tx } = channels;
+    let SpongeChannels {
+        pgid_tx,
+        reaper_tx,
+        cancel_rx,
+    } = channels;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<Vec<u8>> {
         // Keep raw bytes alongside the String so cancel paths can send the
         // exact bytes the sponge consumed, without re-encoding through lossy UTF-8.
@@ -257,11 +291,11 @@ pub(super) fn sponge_stage(
         // takes the vec; second check takes whatever is left.
         let mut raw_upstream = Some(raw_upstream_vec);
 
-        // If the pipeline was cancelled (upstream exit 99), bail without spawning
-        // the provider. Return the buffered upstream bytes via the JoinHandle so the
-        // main thread can write them to stdout after joining — avoids the race where
-        // a direct thread write loses data during process teardown.
-        if ctx.is_cancelled() {
+        // If the pipeline was cancelled (upstream exit 99 or SIGINT), bail without
+        // spawning the provider. Return the buffered upstream bytes via the JoinHandle
+        // so the main thread can write them to stdout after joining — avoids the race
+        // where a direct thread write loses data during process teardown.
+        if should_cancel_sponge(&ctx, &cancel_rx) {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
             if let Some(tx) = pgid_tx {
@@ -342,7 +376,9 @@ pub(super) fn sponge_stage(
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
 
-        // Second cancellation check — shrinks the race window to near-zero.
+        // Second cancellation check — catches SIGINT that arrived during template
+        // expansion and command building. The channel verdict was consumed by the
+        // first check; calling recv() again would block forever.
         if ctx.is_cancelled() {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
@@ -503,11 +539,19 @@ fn kill_group(pgid: Option<u32>) -> bool {
 
 /// Kill the pipe chain's process group, falling back to per-process kills.
 #[cfg(unix)]
-fn kill_pipe_group(pgid: Option<u32>, children: &[(std::process::Child, usize, String)]) {
+fn kill_pipe_group(
+    pgid: Option<u32>,
+    children: &[(
+        std::process::Child,
+        usize,
+        String,
+        Option<std::sync::mpsc::Sender<bool>>,
+    )],
+) {
     if kill_group(pgid) {
         return;
     }
-    for (child, _, _) in children {
+    for (child, _, _, _) in children {
         // SAFETY: kill(pid, SIGKILL) is standard POSIX. Harmless ESRCH if already dead.
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
     }
@@ -529,7 +573,12 @@ fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
 /// argument count limit.
 #[cfg(unix)]
 struct WaitArgs {
-    children: Vec<(std::process::Child, usize, String)>,
+    children: Vec<(
+        std::process::Child,
+        usize,
+        String,
+        Option<std::sync::mpsc::Sender<bool>>,
+    )>,
     child_pids: Vec<u32>,
     last_stdout: PipeStdout,
     child_pgid: Option<u32>,
@@ -636,13 +685,22 @@ fn wait_pipe_children_unix(
         })
         .expect("failed to spawn relay thread");
 
-    for (i, (child, block_idx, lang)) in children.into_iter().enumerate() {
+    for (i, (child, block_idx, lang, cancel_tx)) in children.into_iter().enumerate() {
         let tx = tx.clone();
         std::thread::Builder::new()
             .name(format!("creft-reaper-{i}"))
             .spawn(move || {
                 let mut child = child;
                 let status = child.wait();
+                let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
+                    == Some(crate::runner::EARLY_EXIT);
+                // Always send the exit-99 determination to the downstream sponge so
+                // it can unblock from recv(). Send before the ReaperResult so the
+                // sponge unblocks before the main thread begins its kill/cancel cascade.
+                // Ignore send error: sponge already exited or was never spawned.
+                if let Some(cancel) = cancel_tx {
+                    let _ = cancel.send(exit_99);
+                }
                 // Ignore send error: main thread dropped rx only if it panicked.
                 let _ = tx.send(ReaperResult {
                     block_idx,
@@ -851,7 +909,12 @@ pub(super) fn run_pipe_chain(
 
     // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
     let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
-    let mut children: Vec<(std::process::Child, usize, String)> = Vec::with_capacity(n);
+    let mut children: Vec<(
+        std::process::Child,
+        usize,
+        String,
+        Option<std::sync::mpsc::Sender<bool>>,
+    )> = Vec::with_capacity(n);
     let mut prev_stdout: Option<PipeStdout> = None;
     // PID of the first child, used as the process group ID for all pipe children.
     #[cfg(unix)]
@@ -877,6 +940,15 @@ pub(super) fn run_pipe_chain(
     let mut exit99_drains: std::collections::HashMap<usize, DupedPipeReader> =
         std::collections::HashMap::new();
 
+    // Cancel receivers for sponge blocks, keyed by sponge block index.
+    // Created when a non-sponge block precedes a sponge block; the sender goes
+    // into the children tuple for the upstream block's reaper thread.
+    #[cfg(unix)]
+    let mut sponge_cancel_rxs: std::collections::HashMap<
+        usize,
+        std::sync::mpsc::Receiver<bool>,
+    > = std::collections::HashMap::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -900,6 +972,11 @@ pub(super) fn run_pipe_chain(
             };
             let pgid_tx = pgid_channel.as_ref().map(|(tx, _)| tx.clone());
 
+            // Retrieve the cancel receiver placed here by the upstream non-sponge
+            // block's spawn logic. None when block 0 is a sponge (no upstream
+            // reaper) or when the upstream is itself a sponge.
+            let cancel_rx = sponge_cancel_rxs.remove(&i);
+
             let owned_block = block.clone();
             let owned_bound_refs: Vec<(String, String)> = bound_refs
                 .iter()
@@ -921,6 +998,7 @@ pub(super) fn run_pipe_chain(
                         SpongeChannels {
                             pgid_tx,
                             reaper_tx: reaper_tx_clone,
+                            cancel_rx,
                         },
                     )
                 })
@@ -1069,7 +1147,30 @@ pub(super) fn run_pipe_chain(
             }
         }
 
-        children.push((child, i, block.lang.clone()));
+        // When the next block is a sponge, create a direct cancellation channel.
+        // The sender is held by this block's reaper thread and dropped on exit 99.
+        // The receiver is stored and later passed to the sponge thread via SpongeChannels.
+        #[cfg(unix)]
+        let cancel_tx: Option<std::sync::mpsc::Sender<bool>> = {
+            let next_is_sponge = cmd.blocks.get(i + 1).is_some_and(|b| b.needs_sponge());
+            if next_is_sponge {
+                let (tx, rx) = std::sync::mpsc::channel::<bool>();
+                sponge_cancel_rxs.insert(i + 1, rx);
+                Some(tx)
+            } else {
+                None
+            }
+        };
+
+        children.push((
+            child,
+            i,
+            block.lang.clone(),
+            #[cfg(unix)]
+            cancel_tx,
+            #[cfg(not(unix))]
+            None,
+        ));
     }
 
     // Install SIGINT handler for the pipe chain duration (Unix only).
@@ -1092,7 +1193,7 @@ pub(super) fn run_pipe_chain(
         // (sponge + reaper threads) drop their own clones.
         let tx = reaper_tx;
         let rx = reaper_rx;
-        let child_pids: Vec<u32> = children.iter().map(|(c, _, _)| c.id()).collect();
+        let child_pids: Vec<u32> = children.iter().map(|(c, _, _, _)| c.id()).collect();
         wait_pipe_children_unix(
             WaitArgs {
                 children,
@@ -1111,8 +1212,10 @@ pub(super) fn run_pipe_chain(
 
     #[cfg(not(unix))]
     let (results, early_exit) = {
-        let children_opt: Vec<Option<(std::process::Child, usize, String)>> =
-            children.into_iter().map(Some).collect();
+        let children_opt: Vec<Option<(std::process::Child, usize, String)>> = children
+            .into_iter()
+            .map(|(c, i, l, _)| Some((c, i, l)))
+            .collect();
         wait_pipe_children_fallback(children_opt)?
     };
 

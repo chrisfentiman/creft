@@ -638,6 +638,7 @@ fn dry_run_inner(cmd: &ParsedCommand, raw_args: &[String], cwd: &Path) -> Result
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     fn make_context() -> RunContext {
         RunContext::new(
@@ -736,14 +737,6 @@ mod tests {
         assert!(!ctx.is_cancelled());
         cancel.store(true, Ordering::Relaxed);
         assert!(ctx.is_cancelled());
-    }
-
-    #[test]
-    fn test_interpreter_mapping() {
-        assert_eq!(interpreter("bash"), "bash");
-        assert_eq!(interpreter("python"), "python3");
-        assert_eq!(interpreter("node"), "node");
-        assert_eq!(interpreter("unknown"), "unknown");
     }
 
     use crate::model::{Arg, CodeBlock, CommandDef, Flag};
@@ -1319,18 +1312,19 @@ mod tests {
 
     // ---- interpreter mapping for ts/ruby/perl ----
 
-    #[test]
-    fn test_interpreter_mapping_all() {
-        assert_eq!(interpreter("sh"), "sh");
-        assert_eq!(interpreter("zsh"), "zsh");
-        assert_eq!(interpreter("python3"), "python3");
-        assert_eq!(interpreter("javascript"), "node");
-        assert_eq!(interpreter("js"), "node");
-        assert_eq!(interpreter("typescript"), "npx tsx");
-        assert_eq!(interpreter("ts"), "npx tsx");
-        assert_eq!(interpreter("ruby"), "ruby");
-        assert_eq!(interpreter("rb"), "ruby");
-        assert_eq!(interpreter("perl"), "perl");
+    #[rstest]
+    #[case::sh("sh", "sh")]
+    #[case::zsh("zsh", "zsh")]
+    #[case::python3("python3", "python3")]
+    #[case::javascript("javascript", "node")]
+    #[case::js("js", "node")]
+    #[case::typescript("typescript", "npx tsx")]
+    #[case::ts("ts", "npx tsx")]
+    #[case::ruby("ruby", "ruby")]
+    #[case::rb("rb", "ruby")]
+    #[case::perl("perl", "perl")]
+    fn interpreter_maps_lang_to_executable(#[case] lang: &str, #[case] expected: &str) {
+        assert_eq!(interpreter(lang), expected);
     }
 
     // ---- stdin thread: pipe mode tests ----
@@ -1679,123 +1673,6 @@ mod tests {
         assert_eq!(err.exit_code(), 143, "128 + 15 (SIGTERM) = 143");
     }
 
-    // ── build_llm_command tests ──────────────────────────────────────────────────
-
-    fn llm_config(provider: &str, model: &str, params: &str) -> LlmConfig {
-        LlmConfig {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            params: params.to_string(),
-        }
-    }
-
-    // We test build_llm_command via format_llm_command (same logic, string form).
-    // Direct Command inspection is not stable across Rust versions.
-
-    #[test]
-    fn test_build_llm_command_claude_default() {
-        let config = llm_config("claude", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "claude -p");
-    }
-
-    #[test]
-    fn test_build_llm_command_claude_with_model() {
-        let config = llm_config("claude", "haiku", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "claude -p --model haiku");
-    }
-
-    #[test]
-    fn test_build_llm_command_gemini() {
-        let config = llm_config("gemini", "flash", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "gemini -p -m flash");
-    }
-
-    #[test]
-    fn test_build_llm_command_gemini_no_model() {
-        let config = llm_config("gemini", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "gemini -p");
-    }
-
-    #[test]
-    fn test_build_llm_command_codex() {
-        let config = llm_config("codex", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "codex exec -");
-    }
-
-    #[test]
-    fn test_build_llm_command_ollama() {
-        let config = llm_config("ollama", "llama3", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "ollama run llama3");
-    }
-
-    #[test]
-    fn test_build_llm_command_ollama_no_model() {
-        let config = llm_config("ollama", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "ollama run");
-    }
-
-    #[test]
-    fn test_build_llm_command_unknown_provider() {
-        let config = llm_config("myai", "gpt4", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "myai --model gpt4");
-    }
-
-    #[test]
-    fn test_build_llm_command_unknown_provider_no_model() {
-        let config = llm_config("myai", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "myai");
-    }
-
-    #[test]
-    fn test_build_llm_command_params_split() {
-        let config = llm_config("claude", "", "--max-tokens 500");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "claude -p --max-tokens 500");
-    }
-
-    #[test]
-    fn test_build_llm_command_empty_provider_defaults_claude() {
-        let config = llm_config("", "", "");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "claude -p");
-    }
-
-    #[test]
-    fn test_build_llm_command_params_multiple_tokens() {
-        let config = llm_config("gemini", "flash", "--timeout 30 --retry 3");
-        let s = format_llm_command(&config);
-        assert_eq!(s, "gemini -p -m flash --timeout 30 --retry 3");
-    }
-
-    // Verify that build_llm_command actually constructs a Command with the right binary.
-    #[test]
-    fn test_build_llm_command_returns_correct_binary_claude() {
-        let config = llm_config("claude", "", "");
-        let _cmd = blocks::build_llm_command(&config);
-        // Verify the binary name via format_llm_command which mirrors the match exactly.
-        let formatted = format_llm_command(&config);
-        assert!(
-            formatted.starts_with("claude"),
-            "claude binary should be first"
-        );
-    }
-
-    #[test]
-    fn test_build_llm_command_returns_correct_binary_ollama() {
-        let config = llm_config("ollama", "mistral", "");
-        let formatted = format_llm_command(&config);
-        assert!(formatted.starts_with("ollama run mistral"));
-    }
-
     #[test]
     fn run_context_request_cancel_sets_flag() {
         let ctx = RunContext::new(
@@ -1823,5 +1700,47 @@ mod tests {
         let cloned = ctx.clone();
         ctx.request_cancel();
         assert_eq!(cloned.is_cancelled(), true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn make_execution_error_signal_returns_execution_signaled() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw value N means the process was killed by signal N.
+        let status = std::process::ExitStatus::from_raw(9);
+        let err = make_execution_error(2, "bash", &status);
+        assert!(
+            matches!(
+                err,
+                crate::error::CreftError::ExecutionSignaled {
+                    block: 2,
+                    signal: 9,
+                    ..
+                }
+            ),
+            "signal kill should produce ExecutionSignaled, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn make_execution_error_exit_code_returns_execution_failed() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw value N << 8 means the process exited with code N.
+        let status = std::process::ExitStatus::from_raw(42 << 8);
+        let err = make_execution_error(1, "python", &status);
+        assert!(
+            matches!(
+                err,
+                crate::error::CreftError::ExecutionFailed {
+                    block: 1,
+                    code: 42,
+                    ..
+                }
+            ),
+            "non-zero exit code should produce ExecutionFailed, got: {:?}",
+            err
+        );
     }
 }
