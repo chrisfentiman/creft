@@ -1107,6 +1107,7 @@ fn describe_source(source: &SkillSource) -> String {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     // ── which_path tests ──────────────────────────────────────────────────────
 
@@ -1841,33 +1842,35 @@ mod tests {
 
     // ── status_marker ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_status_marker_all_variants() {
-        assert_eq!(status_marker(CheckStatus::Ok), "[ok]");
-        assert_eq!(status_marker(CheckStatus::Fail), "[!!]");
-        assert_eq!(status_marker(CheckStatus::Warn), "[ww]");
-        assert_eq!(status_marker(CheckStatus::Info), "[ii]");
-        assert_eq!(status_marker(CheckStatus::Optional), "[--]");
+    #[rstest]
+    #[case::ok(CheckStatus::Ok, "[ok]")]
+    #[case::fail(CheckStatus::Fail, "[!!]")]
+    #[case::warn(CheckStatus::Warn, "[ww]")]
+    #[case::info(CheckStatus::Info, "[ii]")]
+    #[case::optional(CheckStatus::Optional, "[--]")]
+    fn status_marker_formats_variant(#[case] status: CheckStatus, #[case] expected: &str) {
+        assert_eq!(status_marker(status), expected);
     }
 
     // ── interpreter_for_lang ───────────────────────────────────────────────────
 
-    #[test]
-    fn test_interpreter_for_lang_all() {
-        assert_eq!(interpreter_for_lang("bash"), Some("bash"));
-        assert_eq!(interpreter_for_lang("sh"), Some("sh"));
-        assert_eq!(interpreter_for_lang("zsh"), Some("zsh"));
-        assert_eq!(interpreter_for_lang("python"), Some("python3"));
-        assert_eq!(interpreter_for_lang("python3"), Some("python3"));
-        assert_eq!(interpreter_for_lang("node"), Some("node"));
-        assert_eq!(interpreter_for_lang("js"), Some("node"));
-        assert_eq!(interpreter_for_lang("javascript"), Some("node"));
-        assert_eq!(interpreter_for_lang("typescript"), Some("npx"));
-        assert_eq!(interpreter_for_lang("ts"), Some("npx"));
-        assert_eq!(interpreter_for_lang("ruby"), Some("ruby"));
-        assert_eq!(interpreter_for_lang("rb"), Some("ruby"));
-        assert_eq!(interpreter_for_lang("perl"), Some("perl"));
-        assert_eq!(interpreter_for_lang("unknown"), None);
+    #[rstest]
+    #[case::bash("bash", Some("bash"))]
+    #[case::sh("sh", Some("sh"))]
+    #[case::zsh("zsh", Some("zsh"))]
+    #[case::python("python", Some("python3"))]
+    #[case::python3("python3", Some("python3"))]
+    #[case::node("node", Some("node"))]
+    #[case::js("js", Some("node"))]
+    #[case::javascript("javascript", Some("node"))]
+    #[case::typescript("typescript", Some("npx"))]
+    #[case::ts("ts", Some("npx"))]
+    #[case::ruby("ruby", Some("ruby"))]
+    #[case::rb("rb", Some("ruby"))]
+    #[case::perl("perl", Some("perl"))]
+    #[case::unknown("unknown", None)]
+    fn interpreter_for_lang_maps_correctly(#[case] lang: &str, #[case] expected: Option<&str>) {
+        assert_eq!(interpreter_for_lang(lang), expected);
     }
 
     // ── check_block_deps ──────────────────────────────────────────────────────

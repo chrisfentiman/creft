@@ -485,6 +485,7 @@ fn install_gemini(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
     use tempfile::TempDir;
 
     /// Construct an AppContext for tests that don't need a real home directory.
@@ -535,22 +536,6 @@ mod tests {
     }
 
     // ── Detection ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_detect_gemini_by_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("GEMINI.md"), "# test").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Gemini));
-    }
-
-    #[test]
-    fn test_detect_gemini_by_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".gemini")).unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Gemini));
-    }
 
     #[test]
     fn test_detect_no_gemini_when_absent() {
@@ -724,84 +709,38 @@ mod tests {
 
     // ── detect_systems: detection by directory/file markers ──────────────────
 
-    #[test]
-    fn test_detect_cursor_by_directory() {
+    /// `is_dir` controls whether to create a directory or file for the marker.
+    #[rstest]
+    #[case::gemini_file("GEMINI.md", false, System::Gemini, "# test")]
+    #[case::gemini_directory(".gemini", true, System::Gemini, "")]
+    #[case::cursor_directory(".cursor", true, System::Cursor, "")]
+    #[case::cursor_rules_file(".cursorrules", false, System::Cursor, "rules")]
+    #[case::windsurf_directory(".windsurf", true, System::Windsurf, "")]
+    #[case::windsurf_rules_file(".windsurfrules", false, System::Windsurf, "rules")]
+    #[case::aider_conf_file(".aider.conf.yml", false, System::Aider, "model: gpt-4")]
+    #[case::aider_conventions_file("CONVENTIONS.md", false, System::Aider, "# conventions")]
+    #[case::copilot_github_directory(".github", true, System::Copilot, "")]
+    #[case::codex_agents_file("AGENTS.md", false, System::Codex, "# agents")]
+    #[case::codex_directory(".codex", true, System::Codex, "")]
+    #[case::claude_code_directory(".claude", true, System::ClaudeCode, "")]
+    fn detect_systems_recognizes_marker(
+        #[case] marker: &str,
+        #[case] is_dir: bool,
+        #[case] expected: System,
+        #[case] content: &str,
+    ) {
         let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".cursor")).unwrap();
+        let path = dir.path().join(marker);
+        if is_dir {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, content).unwrap();
+        }
         let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Cursor));
-    }
-
-    #[test]
-    fn test_detect_cursor_by_cursorrules_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".cursorrules"), "rules").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Cursor));
-    }
-
-    #[test]
-    fn test_detect_windsurf_by_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".windsurf")).unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Windsurf));
-    }
-
-    #[test]
-    fn test_detect_windsurf_by_windsurfrules_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".windsurfrules"), "rules").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Windsurf));
-    }
-
-    #[test]
-    fn test_detect_aider_by_conf_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".aider.conf.yml"), "model: gpt-4").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Aider));
-    }
-
-    #[test]
-    fn test_detect_aider_by_conventions_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("CONVENTIONS.md"), "# conventions").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Aider));
-    }
-
-    #[test]
-    fn test_detect_copilot_by_github_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".github")).unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Copilot));
-    }
-
-    #[test]
-    fn test_detect_codex_by_agents_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "# agents").unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Codex));
-    }
-
-    #[test]
-    fn test_detect_codex_by_codex_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".codex")).unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::Codex));
-    }
-
-    #[test]
-    fn test_detect_claude_code_by_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".claude")).unwrap();
-        let detected = detect_systems(dir.path());
-        assert!(detected.contains(&System::ClaudeCode));
+        assert!(
+            detected.contains(&expected),
+            "expected {expected:?} to be detected via {marker}"
+        );
     }
 
     // ── install() paths: append to existing non-creft file ───────────────────
@@ -909,63 +848,22 @@ mod tests {
         assert!(content.contains("# creft"));
     }
 
-    #[test]
-    fn test_install_aider_global_no_home_errors() {
+    #[rstest]
+    #[case::aider(System::Aider)]
+    #[case::codex(System::Codex)]
+    #[case::gemini(System::Gemini)]
+    #[case::claude_code(System::ClaudeCode)]
+    fn install_global_no_home_errors(#[case] system: System) {
         let project_dir = TempDir::new().unwrap();
         let ctx = crate::model::AppContext {
             home_dir: None,
             creft_home: None,
             cwd: project_dir.path().to_path_buf(),
         };
-        let result = install(&ctx, System::Aider, project_dir.path(), true);
+        let result = install(&ctx, system, project_dir.path(), true);
         assert!(
             result.is_err(),
-            "Aider global with no home dir should error"
-        );
-    }
-
-    #[test]
-    fn test_install_codex_global_no_home_errors() {
-        let project_dir = TempDir::new().unwrap();
-        let ctx = crate::model::AppContext {
-            home_dir: None,
-            creft_home: None,
-            cwd: project_dir.path().to_path_buf(),
-        };
-        let result = install(&ctx, System::Codex, project_dir.path(), true);
-        assert!(
-            result.is_err(),
-            "Codex global with no home dir should error"
-        );
-    }
-
-    #[test]
-    fn test_install_gemini_global_no_home_errors() {
-        let project_dir = TempDir::new().unwrap();
-        let ctx = crate::model::AppContext {
-            home_dir: None,
-            creft_home: None,
-            cwd: project_dir.path().to_path_buf(),
-        };
-        let result = install(&ctx, System::Gemini, project_dir.path(), true);
-        assert!(
-            result.is_err(),
-            "Gemini global with no home dir should error"
-        );
-    }
-
-    #[test]
-    fn test_install_claude_code_global_no_home_errors() {
-        let project_dir = TempDir::new().unwrap();
-        let ctx = crate::model::AppContext {
-            home_dir: None,
-            creft_home: None,
-            cwd: project_dir.path().to_path_buf(),
-        };
-        let result = install(&ctx, System::ClaudeCode, project_dir.path(), true);
-        assert!(
-            result.is_err(),
-            "ClaudeCode global with no home dir should error"
+            "{system:?} global install with no home dir should error"
         );
     }
 

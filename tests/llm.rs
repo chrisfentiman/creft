@@ -105,17 +105,12 @@ fn test_llm_block_no_header() {
 
     // No YAML header at all — LlmConfig defaults to claude provider.
     // We use dry-run to verify it parses correctly without needing claude.
-    // Incorrect format (no fenced code block) — kept as documentation of what NOT to write.
-    let _skill = "---\nname: llm-noheader\ndescription: llm block with no header\n---\n\njust a prompt without yaml header\n\
-This is the prompt text that has no --- separator at all.\n```\n";
-
-    // Actually we need a proper fenced code block format
-    let skill2 = "---\nname: llm-noheader\ndescription: llm block with no header\n---\n\n\
+    let skill = "---\nname: llm-noheader\ndescription: llm block with no header\n---\n\n\
 ```llm\njust a prompt with no yaml header\n```\n";
 
     creft_with(&dir)
         .args(["add"])
-        .write_stdin(skill2)
+        .write_stdin(skill)
         .assert()
         .success();
 

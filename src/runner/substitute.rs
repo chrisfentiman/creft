@@ -62,6 +62,7 @@ pub(crate) fn substitute(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     #[test]
     fn test_substitute_basic() {
@@ -107,23 +108,14 @@ mod tests {
 
     // ---- shell escaping tests ----
 
-    #[test]
-    fn test_shell_escape_subshell_injection_bash() {
-        // Command injection attempt must be neutralized for bash
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "bash").unwrap();
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::sh("sh")]
+    #[case::zsh("zsh")]
+    fn shell_escape_neutralizes_subshell_injection(#[case] lang: &str) {
+        // Command injection attempt must be neutralized for shell languages.
         // shell_escape produces single-quoted literal: '$(whoami)'
-        assert_eq!(result, "echo '$(whoami)'");
-    }
-
-    #[test]
-    fn test_shell_escape_subshell_injection_sh() {
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "sh").unwrap();
-        assert_eq!(result, "echo '$(whoami)'");
-    }
-
-    #[test]
-    fn test_shell_escape_subshell_injection_zsh() {
-        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], "zsh").unwrap();
+        let result = substitute("echo {{name}}", &[("name", "$(whoami)")], lang).unwrap();
         assert_eq!(result, "echo '$(whoami)'");
     }
 
@@ -192,14 +184,15 @@ mod tests {
 
     // ---- should_shell_escape ----
 
-    #[test]
-    fn test_should_shell_escape_langs() {
-        assert!(should_shell_escape("bash"));
-        assert!(should_shell_escape("sh"));
-        assert!(should_shell_escape("zsh"));
-        assert!(!should_shell_escape("python"));
-        assert!(!should_shell_escape("node"));
-        assert!(!should_shell_escape("ruby"));
+    #[rstest]
+    #[case::bash("bash", true)]
+    #[case::sh("sh", true)]
+    #[case::zsh("zsh", true)]
+    #[case::python("python", false)]
+    #[case::node("node", false)]
+    #[case::ruby("ruby", false)]
+    fn should_shell_escape_classifies_lang(#[case] lang: &str, #[case] expected: bool) {
+        assert_eq!(should_shell_escape(lang), expected);
     }
 
     #[test]

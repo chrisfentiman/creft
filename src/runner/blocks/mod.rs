@@ -11,9 +11,6 @@ mod python;
 mod ruby;
 mod shell;
 
-#[cfg(test)]
-pub(crate) use llm::build_llm_command;
-
 /// Trait for language-specific block command building.
 ///
 /// Each implementation knows how to construct a `Command` for its language

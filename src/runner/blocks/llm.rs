@@ -100,6 +100,7 @@ mod tests {
 
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     fn make_config(provider: &str, model: &str, params: &str) -> LlmConfig {
         LlmConfig {
@@ -109,62 +110,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_llm_command_claude_default() {
-        let config = make_config("", "", "");
+    /// `expected_prog` is the program name; `expected_args` are the expected CLI arguments.
+    #[rstest]
+    #[case::claude_default("", "", "claude", &["-p"] as &[&str])]
+    #[case::claude_with_model("claude", "claude-opus-4-5", "claude", &["-p", "--model", "claude-opus-4-5"])]
+    #[case::gemini_with_model("gemini", "gemini-pro", "gemini", &["-p", "-m", "gemini-pro"])]
+    #[case::codex("codex", "", "codex", &["exec", "-"])]
+    #[case::ollama_with_model("ollama", "llama3", "ollama", &["run", "llama3"])]
+    #[case::unknown_provider("myprovider", "mymodel", "myprovider", &["--model", "mymodel"])]
+    fn build_llm_command_dispatches_provider(
+        #[case] provider: &str,
+        #[case] model: &str,
+        #[case] expected_prog: &str,
+        #[case] expected_args: &[&str],
+    ) {
+        let config = make_config(provider, model, "");
         let cmd = build_llm_command(&config);
-        let prog = format!("{:?}", cmd.get_program());
-        assert_eq!(prog, "\"claude\"");
+        assert_eq!(
+            format!("{:?}", cmd.get_program()),
+            format!("\"{expected_prog}\"")
+        );
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-p"]);
-    }
-
-    #[test]
-    fn build_llm_command_claude_with_model() {
-        let config = make_config("claude", "claude-opus-4-5", "");
-        let cmd = build_llm_command(&config);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-p", "--model", "claude-opus-4-5"]);
-    }
-
-    #[test]
-    fn build_llm_command_gemini_with_model() {
-        let config = make_config("gemini", "gemini-pro", "");
-        let cmd = build_llm_command(&config);
-        let prog = format!("{:?}", cmd.get_program());
-        assert_eq!(prog, "\"gemini\"");
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-p", "-m", "gemini-pro"]);
-    }
-
-    #[test]
-    fn build_llm_command_codex() {
-        let config = make_config("codex", "", "");
-        let cmd = build_llm_command(&config);
-        let prog = format!("{:?}", cmd.get_program());
-        assert_eq!(prog, "\"codex\"");
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["exec", "-"]);
-    }
-
-    #[test]
-    fn build_llm_command_ollama_with_model() {
-        let config = make_config("ollama", "llama3", "");
-        let cmd = build_llm_command(&config);
-        let prog = format!("{:?}", cmd.get_program());
-        assert_eq!(prog, "\"ollama\"");
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["run", "llama3"]);
-    }
-
-    #[test]
-    fn build_llm_command_unknown_provider() {
-        let config = make_config("myprovider", "mymodel", "");
-        let cmd = build_llm_command(&config);
-        let prog = format!("{:?}", cmd.get_program());
-        assert_eq!(prog, "\"myprovider\"");
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["--model", "mymodel"]);
+        assert_eq!(args, expected_args);
     }
 
     #[test]
