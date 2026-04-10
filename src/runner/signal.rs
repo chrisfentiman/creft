@@ -76,3 +76,39 @@ impl Drop for PipeSignalGuard {
         PIPE_CHILD_PGID.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{PIPE_CHILD_PGID, PipeSignalGuard};
+
+    /// Verifies that `PipeSignalGuard` stores the process group ID on
+    /// construction and clears it on drop.
+    ///
+    /// Each test runs in its own process under `cargo nextest`, so touching
+    /// the global atomic does not interfere with other tests.
+    #[test]
+    fn pipe_signal_guard_stores_and_clears_pgid() {
+        assert_eq!(
+            PIPE_CHILD_PGID.load(Ordering::SeqCst),
+            0,
+            "PIPE_CHILD_PGID must be 0 before guard is created"
+        );
+
+        {
+            let _guard = PipeSignalGuard::new(12345);
+            assert_eq!(
+                PIPE_CHILD_PGID.load(Ordering::SeqCst),
+                12345,
+                "PIPE_CHILD_PGID must equal the pgid passed to PipeSignalGuard::new"
+            );
+        }
+
+        assert_eq!(
+            PIPE_CHILD_PGID.load(Ordering::SeqCst),
+            0,
+            "PIPE_CHILD_PGID must be cleared to 0 when guard is dropped"
+        );
+    }
+}

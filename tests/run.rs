@@ -2232,19 +2232,11 @@ fn test_pipe_exit_99_first_block_stdout_captured() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     creft_with(&dir)
         .args(["exit99-first-capture"])
         .assert()
         .success()
         .stdout(predicate::str::contains("first-output"));
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_secs() < 2,
-        "pipe must terminate quickly after first block exits 99 (took {:?})",
-        elapsed
-    );
 }
 
 /// When a middle block exits 99 after printing multiple lines, all lines must

@@ -1824,4 +1824,46 @@ mod tests {
         ctx.request_cancel();
         assert_eq!(cloned.is_cancelled(), true);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn make_execution_error_signal_returns_execution_signaled() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw value N means the process was killed by signal N.
+        let status = std::process::ExitStatus::from_raw(9);
+        let err = make_execution_error(2, "bash", &status);
+        assert!(
+            matches!(
+                err,
+                crate::error::CreftError::ExecutionSignaled {
+                    block: 2,
+                    signal: 9,
+                    ..
+                }
+            ),
+            "signal kill should produce ExecutionSignaled, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn make_execution_error_exit_code_returns_execution_failed() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw value N << 8 means the process exited with code N.
+        let status = std::process::ExitStatus::from_raw(42 << 8);
+        let err = make_execution_error(1, "python", &status);
+        assert!(
+            matches!(
+                err,
+                crate::error::CreftError::ExecutionFailed {
+                    block: 1,
+                    code: 42,
+                    ..
+                }
+            ),
+            "non-zero exit code should produce ExecutionFailed, got: {:?}",
+            err
+        );
+    }
 }
