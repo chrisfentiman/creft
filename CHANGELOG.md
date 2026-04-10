@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/chrisfentiman/creft/compare/creft-v0.2.4...creft-v0.2.5) (2026-04-10)
+
+
+### Features
+
+* **runner:** capture child stderr to suppress ANSI noise ([c284552](https://github.com/chrisfentiman/creft/commit/c2845520895c7e1f79198c9225329866848c2ae6))
+
 ## [0.2.4](https://github.com/chrisfentiman/creft/compare/creft-v0.2.3...creft-v0.2.4) (2026-04-10)
 
 
