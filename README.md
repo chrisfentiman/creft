@@ -8,10 +8,13 @@ A skill system that turns markdown instructions into executable commands.
 
 ![demo](assets/demo.gif)
 
-- **Agents author repeatable workflows.** Write a markdown file, `creft add` makes it a command. Next session, next machine — it just runs. No LLM needed.
-- **Skills run deterministically.** Same input, same output. No interpretation, no token cost.
-- **Skills validate themselves.** Syntax, PATH commands, PyPI/npm deps — checked before saving.
-- **Skills distribute as packages.** `creft install <git-url>`. Share workflows like code.
+AI coding agents generate useful workflows — deploy scripts, test runners, code analysis pipelines — and then lose them when the session ends. Creft captures those workflows as markdown files and runs them as CLI commands. Same input, same output, no LLM needed at runtime.
+
+- **Agents author skills.** Write a markdown file with `creft add`. Next session, next machine, the command is there.
+- **Skills run deterministically.** No interpretation, no token cost at execution time.
+- **LLM blocks bring AI into the pipeline.** Send output to Claude, Gemini, Codex, or Ollama as a step in the chain.
+- **Skills validate before saving.** Syntax, PATH commands, PyPI/npm dependencies — checked at `creft add` time.
+- **Skills distribute as packages.** `creft install <git-url>` shares workflows across teams.
 
 ## Install
 
@@ -21,7 +24,7 @@ cargo install creft
 
 Or: `brew install chrisfentiman/creft/creft` · [Binary releases](https://github.com/chrisfentiman/creft/releases)
 
-## Write a skill
+## Quick start
 
 ````sh
 creft add <<'EOF'
@@ -42,42 +45,45 @@ $ creft hello World
 Hello, World!
 ```
 
-## Mix languages
+For args, flags, env vars, validation, multi-block pipes, LLM blocks, and more: [Skill Authoring Reference](docs/skill-reference.md).
 
-````sh
-creft add <<'EOF'
----
-name: linecount
-description: Lines of code by file
----
+## What creft can do
+
+### Multi-language pipelines
+
+Skills pipe stdout between blocks using OS file descriptors. Blocks run concurrently, not sequentially. Supported languages: `bash`, `sh`, `zsh`, `python`, `node`, `ruby`, and any interpreter on PATH.
+
+````
 ```bash
 find src -name '*.rs' -exec wc -l {} +
 ```
 ```python
 import sys
+# reads stdin from the bash block above
 for line in sys.stdin.read().strip().splitlines():
-    parts = line.split()
-    if len(parts) == 2:
-        print(f"  {parts[1].split('/')[-1]:20s} {parts[0]:>6s}")
+    ...
 ```
-EOF
 ````
 
+### LLM blocks
+
+Send pipeline output to an AI provider as a step in the chain. The default provider is `claude`; `gemini`, `codex`, and `ollama` are also supported.
+
+````
+```bash
+git diff HEAD~1
 ```
-$ creft linecount
-  store.rs                  1737
-  runner.rs                 1917
-  doctor.rs                 1883
+```llm
+provider: claude
+Summarize these changes in one sentence.
 ```
+````
 
-Multi-block skills pipe stdout between blocks using OS file descriptors. Concurrent, not buffered. Use an `llm` block to send pipeline output to an AI provider (Claude, Gemini, Codex, Ollama) as a step in the chain.
+### Args, flags, and env vars
 
-## Add structure
+Declare a typed CLI interface in YAML frontmatter. Args support regex validation. Flags support bool and string types. Required env vars are checked before the skill runs.
 
-````markdown
----
-name: deploy
-description: Deploy to production
+```yaml
 args:
   - name: env
     validation: "^(staging|production)$"
@@ -88,59 +94,55 @@ flags:
 env:
   - name: AWS_PROFILE
     required: true
----
-
-```docs
-Deploys the current branch. Requires AWS credentials.
 ```
 
-```bash
-echo "Deploying to {{env}}..."
-git rev-parse --short HEAD
-```
+### Validation
 
-```bash
-# deps: awscli
-aws ecs update-service --cluster {{env}} --service app --force-new-deployment
-```
-````
+`creft add` checks syntax, verifies template variables are declared, runs shellcheck on bash blocks, and resolves `# deps:` declarations against the PyPI/npm registry before saving the file.
 
-Args with regex validation. Typed flags. Required env vars. Docs blocks for `--help`. Dependencies installed on the fly via `uv`/`npm`. All declared in one file.
+### Packages
 
-For the full frontmatter schema, exit code semantics, LLM blocks, and dependency declarations, run `creft add --help`.
-
-## Teach your agent
-
-```sh
-creft up              # auto-detect: Claude Code, Cursor, Windsurf, Aider, Copilot, Codex, Gemini
-```
-
-After setup, agents discover skills (`creft list`), run them (`creft <name>`), and author new ones (`creft add`).
-
-## Share as packages
+Install a collection of skills from any public git repo. Skills are namespaced under the package name.
 
 ```sh
 creft install https://github.com/example/k8s-tools
-creft update k8s-tools
-creft uninstall k8s-tools
+creft k8s-tools deploy production
 ```
 
-A `creft.yaml` manifest at the repo root. Skills namespaced under the package name.
+## Agent integration
+
+```sh
+creft up
+```
+
+Auto-detects and installs instruction files for: Claude Code, Cursor, Windsurf, Aider, GitHub Copilot, Codex, Gemini CLI.
+
+After setup, agents discover skills with `creft list`, run them with `creft <name>`, and author new ones with `creft add`. The instruction files teach the agent the full workflow without human prompting.
+
+File locations (project-level by default):
+
+| System | File |
+|---|---|
+| Claude Code | `.claude/skills/creft/SKILL.md` |
+| Cursor | `.cursor/rules/creft.mdc` |
+| Windsurf | `.windsurf/rules/creft.md` |
+
+Run `creft up --help` for all systems and the `--global` flag.
 
 ## Commands
 
 | | |
 |---|---|
 | `creft add` | Save a skill from stdin |
-| `creft list` | List skills |
-| `creft show <name>` | Print a skill definition |
 | `creft edit <name>` | Edit in `$EDITOR` or from stdin |
 | `creft rm <name>` | Delete a skill |
+| `creft list` | List skills |
+| `creft show <name>` | Print a skill's full definition |
 | `creft cat <name>` | Print code blocks only |
-| `creft install <url>` | Install from git |
-| `creft update [name]` | Update packages |
+| `creft install <url>` | Install a skill package from git |
+| `creft update [name]` | Update installed packages |
 | `creft uninstall <name>` | Remove a package |
-| `creft up [system]` | Set up AI integration |
+| `creft up [system]` | Set up AI agent integration |
 | `creft init` | Initialize local `.creft/` |
 | `creft doctor [name]` | Check environment or skill health |
 
@@ -155,6 +157,12 @@ A `creft.yaml` manifest at the repo root. Skills namespaced under the package na
 | `creft check` | All quality gates (calls test, lint, coverage) |
 | `creft bench` | Compile time, test time, binary size |
 | `creft changelog` | Changelog from git history |
+
+## Documentation
+
+- [Skill Authoring Reference](docs/skill-reference.md) — complete reference for the skill format: frontmatter schema, code blocks, exit codes, LLM blocks, dependencies, validation, and storage.
+- `creft add --help` — quick reference accessible from the terminal.
+- `creft doctor` — check whether your environment can run skills.
 
 ## Contributing
 
