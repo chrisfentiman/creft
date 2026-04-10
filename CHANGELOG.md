@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/chrisfentiman/creft/compare/creft-v0.2.1...creft-v0.2.2) (2026-04-10)
+
+
+### Bug Fixes
+
+* **router:** longest-match resolution, sponge cancel race, test cleanup ([cbc8d24](https://github.com/chrisfentiman/creft/commit/cbc8d24d2069ac7c04e0864b417521a14170ef01))
+
 ## [0.2.1](https://github.com/chrisfentiman/creft/compare/creft-v0.2.0...creft-v0.2.1) (2026-04-02)
 
 
