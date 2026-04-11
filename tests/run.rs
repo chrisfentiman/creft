@@ -2510,3 +2510,43 @@ fn test_sequential_normal_failure_stderr_preserved() {
         .failure()
         .stderr(predicate::str::contains("diagnostic error"));
 }
+
+/// When a bash block is killed by SIGTERM, creft must NOT suppress its stderr.
+///
+/// This is the negative case for the SIGINT suppression: only signal 2 (SIGINT)
+/// triggers suppression. Signal 15 (SIGTERM) represents a genuine process
+/// failure — any stderr the child produced is diagnostic information and must
+/// be preserved.
+///
+/// The bash block sends SIGTERM to itself so that creft stays alive and can
+/// collect and forward the child's stderr, proving the suppression logic does
+/// not fire for non-SIGINT signals.
+#[test]
+#[cfg(unix)]
+fn test_sequential_sigterm_preserves_stderr() {
+    let dir = creft_env();
+
+    // The bash block writes a sentinel to stderr then kills itself with SIGTERM.
+    // creft stays alive, collects the child's captured stderr, and must write it
+    // because suppress_stderr is false for SIGTERM.
+    add_skill_to_dir(
+        &dir,
+        concat!(
+            "---\n",
+            "name: seq-sigterm-bash\n",
+            "description: bash SIGTERM stderr preservation\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo 'sigterm-sentinel' >&2\n",
+            "kill -TERM $$\n",
+            "```\n",
+        ),
+    );
+
+    creft_with(&dir)
+        .args(["seq-sigterm-bash"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sigterm-sentinel"));
+}
