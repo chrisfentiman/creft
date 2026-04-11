@@ -1,0 +1,34 @@
+{
+  "name": "creft-bundled",
+  "description": "Bundled plugins shipped with creft",
+  "plugins": [
+    {
+      "name": "ask",
+      "source": "./plugins/ask",
+      "description": "Ask a question and get an answer. Routes to a registered project via Claude Code or shows a native dialog for user input.",
+      "version": "0.1.0",
+      "tags": ["interaction", "ui"]
+    },
+    {
+      "name": "fetch",
+      "source": "./plugins/fetch",
+      "description": "Pull source code into workbench/code/ for AI agent context. Accepts package names, git URLs, or GitHub shorthand with optional version pinning.",
+      "version": "0.1.0",
+      "tags": ["source", "context"]
+    },
+    {
+      "name": "mcp",
+      "source": "./plugins/mcp",
+      "description": "Manage MCP servers: add, list, remove, and sync server entries in Claude Code settings with secrets stored in the macOS keychain.",
+      "version": "0.1.0",
+      "tags": ["mcp", "configuration"]
+    },
+    {
+      "name": "schedule",
+      "source": "./plugins/schedule",
+      "description": "Install and manage macOS launchd scheduled jobs with cron-format schedules.",
+      "version": "0.1.0",
+      "tags": ["schedule", "launchd", "macos"]
+    }
+  ]
+}
