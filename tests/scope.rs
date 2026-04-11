@@ -198,7 +198,7 @@ fn test_scope_run_resolves_local_before_global() {
 /// (`~/.creft/plugins/`), regardless of whether a local `.creft/` directory
 /// exists. Plugin install is always global — activation is scoped.
 #[test]
-fn test_scope_install_defaults_to_local() {
+fn test_scope_plugin_install_always_global() {
     let pkg_repo = create_test_package(
         "my-local-pkg",
         &[(
@@ -237,7 +237,7 @@ fn test_scope_install_defaults_to_local() {
 /// `creft install <url>` (deprecated) forwards to `creft plugin install`,
 /// which always installs to the global plugins cache.
 #[test]
-fn test_scope_install_global_flag_forces_global() {
+fn test_scope_plugin_install_never_uses_local_scope() {
     let pkg_repo = create_test_package(
         "my-global-pkg",
         &[(
@@ -269,13 +269,10 @@ fn test_scope_install_global_flag_forces_global() {
 
 // ── 8. update finds package across scopes ────────────────────────────────────
 
-/// `creft update <name>` finds and updates a package regardless of which scope
-/// it was installed to.
-///
-/// This test installs to local scope (default) and verifies that `update`
-/// locates the package without requiring `--global`.
+/// `creft update <name>` (deprecated) forwards to `creft plugin update`, which
+/// finds and updates a plugin in the global plugins cache.
 #[test]
-fn test_scope_update_finds_local_package() {
+fn test_scope_deprecated_update_forwards_to_plugin_update() {
     let pkg_repo = create_test_package(
         "updatable-pkg",
         &[(
@@ -286,13 +283,13 @@ fn test_scope_update_finds_local_package() {
 
     let env = TwoScopeEnv::new();
 
-    // Install to local scope.
+    // Install via the plugin namespace (always global).
     creft_two_scope(&env)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
-    // Update should find the package in local scope and succeed.
+    // The deprecated update alias forwards to plugin update and should succeed.
     creft_two_scope(&env)
         .args(["update", "updatable-pkg"])
         .assert()
@@ -333,9 +330,10 @@ fn test_scope_update_finds_global_package() {
 
 // ── 9. uninstall finds package across scopes ─────────────────────────────────
 
-/// `creft uninstall <name>` removes a package installed to local scope.
+/// `creft uninstall <name>` (deprecated) forwards to `creft plugin uninstall`,
+/// which removes the plugin from the global plugins cache.
 #[test]
-fn test_scope_uninstall_finds_local_package() {
+fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let pkg_repo = create_test_package(
         "local-removable-pkg",
         &[(
@@ -356,10 +354,11 @@ fn test_scope_uninstall_finds_local_package() {
         .assert()
         .success();
 
-    // Package directory must be gone from local scope.
+    // The deprecated alias routes through plugin uninstall, which writes to
+    // the global plugins cache — verify the plugin directory is gone.
     assert!(
-        !env.local_packages().join("local-removable-pkg").exists(),
-        "package should have been removed from local .creft/packages/"
+        !env.global_plugins().join("local-removable-pkg").exists(),
+        "plugin should have been removed from global ~/.creft/plugins/"
     );
 }
 

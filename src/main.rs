@@ -865,7 +865,6 @@ fn cmd_plugin_activate(
     _target: &str,
     _global: bool,
 ) -> Result<(), CreftError> {
-    // Stage 2: activation model.
     let _ = ctx;
     Err(CreftError::Setup(
         "creft plugin activate is not yet implemented".into(),
@@ -877,7 +876,6 @@ fn cmd_plugin_deactivate(
     _target: &str,
     _global: bool,
 ) -> Result<(), CreftError> {
-    // Stage 2: activation model.
     let _ = ctx;
     Err(CreftError::Setup(
         "creft plugin deactivate is not yet implemented".into(),
@@ -927,7 +925,6 @@ fn cmd_plugin_list(ctx: &model::AppContext, name: Option<&str>) -> Result<(), Cr
 }
 
 fn cmd_plugin_search(ctx: &model::AppContext, _query: &[String]) -> Result<(), CreftError> {
-    // Stage 5: search and discovery.
     let _ = ctx;
     Err(CreftError::Setup(
         "creft plugin search is not yet implemented".into(),
