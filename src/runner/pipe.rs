@@ -192,9 +192,12 @@ pub(super) struct SpongeChannels {
     /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
     pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
     /// Receiver for the upstream block's exit-99 determination.
-    /// The reaper sends `true` if upstream exited 99, `false` otherwise.
-    /// `None` when this sponge is block 0 or upstream is also a sponge.
+    /// The upstream reaper or upstream sponge sends `true` if it exited 99,
+    /// `false` otherwise. `None` when this sponge is block 0.
     pub(super) cancel_rx: Option<std::sync::mpsc::Receiver<bool>>,
+    /// Sender to notify the downstream sponge of this block's exit-99
+    /// determination. `None` when the next block is not a sponge.
+    pub(super) cancel_tx_downstream: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 /// Block until the upstream reaper reports whether the upstream block exited 99.
@@ -271,6 +274,7 @@ pub(super) fn sponge_stage(
         pgid_tx,
         reaper_tx,
         cancel_rx,
+        cancel_tx_downstream,
     } = channels;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<Vec<u8>> {
         // Keep raw bytes alongside the String so cancel paths can send the
@@ -302,6 +306,9 @@ pub(super) fn sponge_stage(
         if should_cancel_sponge(&ctx, &cancel_rx) {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
+            if let Some(ref tx) = cancel_tx_downstream {
+                let _ = tx.send(true);
+            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -324,6 +331,9 @@ pub(super) fn sponge_stage(
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
                 drop(pipe_writer);
+                if let Some(ref tx) = cancel_tx_downstream {
+                    let _ = tx.send(true);
+                }
                 if let Some(tx) = pgid_tx {
                     let _ = tx.send(Err(()));
                 }
@@ -344,6 +354,9 @@ pub(super) fn sponge_stage(
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
                 drop(pipe_writer);
+                if let Some(ref tx) = cancel_tx_downstream {
+                    let _ = tx.send(true);
+                }
                 if let Some(tx) = pgid_tx {
                     let _ = tx.send(Err(()));
                 }
@@ -362,6 +375,9 @@ pub(super) fn sponge_stage(
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
                 drop(pipe_writer);
+                if let Some(ref tx) = cancel_tx_downstream {
+                    let _ = tx.send(true);
+                }
                 if let Some(tx) = pgid_tx {
                     let _ = tx.send(Err(()));
                 }
@@ -390,6 +406,9 @@ pub(super) fn sponge_stage(
         if ctx.is_cancelled() {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
+            if let Some(ref tx) = cancel_tx_downstream {
+                let _ = tx.send(true);
+            }
             if let Some(tx) = pgid_tx {
                 let _ = tx.send(Err(()));
             }
@@ -432,6 +451,9 @@ pub(super) fn sponge_stage(
                 };
                 eprintln!("error: sponge block {}: {}", block_idx + 1, msg);
                 drop(pipe_writer);
+                if let Some(ref tx) = cancel_tx_downstream {
+                    let _ = tx.send(true);
+                }
                 if let Some(tx) = pgid_tx {
                     let _ = tx.send(Err(()));
                 }
@@ -494,6 +516,12 @@ pub(super) fn sponge_stage(
 
         let status = child.wait();
 
+        let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
+            == Some(crate::runner::EARLY_EXIT);
+        if let Some(ref tx) = cancel_tx_downstream {
+            let _ = tx.send(exit_99);
+        }
+
         let _ = reaper_tx.send(ReaperResult {
             block_idx,
             lang: block.lang.clone(),
@@ -512,6 +540,10 @@ pub(super) fn sponge_stage(
         Ok(captured) => captured,
         Err(_) => {
             // Sponge thread panicked — send error to prevent main thread hang on rx.recv().
+            // Send true downstream so the downstream sponge does not proceed with empty input.
+            if let Some(ref tx) = cancel_tx_downstream {
+                let _ = tx.send(true);
+            }
             let _ = reaper_tx.send(ReaperResult {
                 block_idx,
                 lang: block.lang.clone(),
@@ -1035,6 +1067,20 @@ pub(super) fn run_pipe_chain(
             // reaper) or when the upstream is itself a sponge.
             let cancel_rx = sponge_cancel_rxs.remove(&i);
 
+            // When the next block is also a sponge, create a direct cancel channel
+            // so this sponge thread can send its exit-99 determination to the
+            // downstream sponge without going through the reaper.
+            let cancel_tx_downstream: Option<std::sync::mpsc::Sender<bool>> = {
+                let next_is_sponge = cmd.blocks.get(i + 1).is_some_and(|b| b.needs_sponge());
+                if next_is_sponge {
+                    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+                    sponge_cancel_rxs.insert(i + 1, rx);
+                    Some(tx)
+                } else {
+                    None
+                }
+            };
+
             let owned_block = block.clone();
             let owned_bound_refs: Vec<(String, String)> = bound_refs
                 .iter()
@@ -1057,6 +1103,7 @@ pub(super) fn run_pipe_chain(
                             pgid_tx,
                             reaper_tx: reaper_tx_clone,
                             cancel_rx,
+                            cancel_tx_downstream,
                         },
                     )
                 })
