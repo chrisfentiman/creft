@@ -265,6 +265,7 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
 
     // list_packages_in silently skips unreadable manifests; scan dirs directly
     // to surface broken ones as explicit Fail results.
+    // read_manifest_from tries .creft/catalog.json first, falls back to creft.yaml.
     for scope in &[Scope::Global, Scope::Local] {
         let base = match ctx.packages_dir_for(*scope) {
             Ok(p) => p,
@@ -279,41 +280,19 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
                 if !path.is_dir() {
                     continue;
                 }
-                let manifest_path = path.join("creft.yaml");
-                if !manifest_path.exists() {
-                    continue;
-                }
-                match std::fs::read_to_string(&manifest_path) {
-                    Ok(content) => {
-                        if let Err(e) =
-                            serde_yaml_ng::from_str::<registry::PackageManifest>(&content)
-                        {
-                            failures += 1;
-                            results.push(CheckResult {
-                                label: format!(
-                                    "package {}",
-                                    path.file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "unknown".to_string())
-                                ),
-                                status: CheckStatus::Fail,
-                                detail: format!("invalid manifest: {}", e),
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        failures += 1;
-                        results.push(CheckResult {
-                            label: format!(
-                                "package {}",
-                                path.file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| "unknown".to_string())
-                            ),
-                            status: CheckStatus::Fail,
-                            detail: format!("could not read manifest: {}", e),
-                        });
-                    }
+                // Only report entries that have at least one manifest file.
+                if let Some(Err(e)) = registry::read_manifest_from(&path) {
+                    failures += 1;
+                    results.push(CheckResult {
+                        label: format!(
+                            "package {}",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        ),
+                        status: CheckStatus::Fail,
+                        detail: format!("invalid manifest: {}", e),
+                    });
                 }
             }
         }

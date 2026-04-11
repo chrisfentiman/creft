@@ -2,7 +2,7 @@
 
 mod helpers;
 
-use helpers::{create_test_package, creft_env, creft_with};
+use helpers::{create_multi_plugin_repo, create_test_package, creft_env, creft_with};
 use predicates::prelude::*;
 use rstest::rstest;
 use tempfile::TempDir;
@@ -156,10 +156,12 @@ fn plugin_update_picks_up_new_version() {
         .assert()
         .success();
 
-    // Add a new commit to the source repo.
+    // Add a new commit to the source repo with a bumped version.
+    let catalog_dir = repo_path.join(".creft");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
     std::fs::write(
-        repo_path.join("creft.yaml"),
-        "name: update-test-plugin\nversion: 0.2.0\ndescription: Updated plugin\n",
+        catalog_dir.join("catalog.json"),
+        r#"{"name":"update-test-plugin","description":"Updated plugin","plugins":[{"name":"update-test-plugin","source":".","description":"Updated plugin","version":"0.2.0","tags":[]}]}"#,
     )
     .unwrap();
     std::process::Command::new("git")
@@ -537,6 +539,139 @@ fn package_appears_in_list_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("listable-pkg"));
+}
+
+// ── Stage 3: catalog-aware install ─────────────────────────────────────────────
+
+/// Bare name without owner/repo separator returns a clear error.
+#[test]
+fn plugin_install_bare_name_without_slash_fails() {
+    let creft_home = creft_env();
+    creft_with(&creft_home)
+        .args(["plugin", "install", "fetch"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("not a valid plugin source"));
+}
+
+/// Multi-plugin repo without `--plugin` returns an error listing available plugins.
+#[test]
+fn plugin_install_multi_plugin_repo_without_filter_fails() {
+    let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
+    let creft_home = creft_env();
+
+    creft_with(&creft_home)
+        .args(["plugin", "install", repo.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Use --plugin"));
+}
+
+/// Multi-plugin repo with `--plugin <name>` installs only the named plugin.
+#[test]
+fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
+    let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
+    let creft_home = creft_env();
+
+    creft_with(&creft_home)
+        .args([
+            "plugin",
+            "install",
+            repo.path().to_str().unwrap(),
+            "--plugin",
+            "alpha",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("installed: alpha"));
+
+    // Only alpha is in the plugins dir; beta is not.
+    let plugins_dir = creft_home.path().join("plugins");
+    assert!(plugins_dir.join("alpha").exists());
+    assert!(!plugins_dir.join("beta").exists());
+}
+
+/// Multi-plugin repo with `--plugin <name>` that does not exist returns PluginNotInCatalog.
+#[test]
+fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
+    let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha")]);
+    let creft_home = creft_env();
+
+    creft_with(&creft_home)
+        .args([
+            "plugin",
+            "install",
+            repo.path().to_str().unwrap(),
+            "--plugin",
+            "nonexistent",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("not found in catalog"));
+}
+
+/// A repo missing both `.creft/catalog.json` and `creft.yaml` returns ManifestNotFound.
+#[test]
+fn plugin_install_repo_without_catalog_or_yaml_fails() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(path)
+        .output()
+        .expect("git init failed");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    std::fs::write(path.join("README.md"), "no manifest").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+
+    let creft_home = creft_env();
+    creft_with(&creft_home)
+        .args(["plugin", "install", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("manifest not found"));
+}
+
+/// `creft plugin install owner/repo` (not `creft`) is treated as GitHub shorthand.
+///
+/// This test verifies the routing logic by checking that the error message
+/// references GitHub (the resolved URL) rather than "not a valid plugin source".
+#[test]
+fn plugin_install_github_shorthand_routes_to_github() {
+    let creft_home = creft_env();
+    creft_with(&creft_home)
+        .args(["plugin", "install", "someowner/somerepo"])
+        .assert()
+        .failure()
+        .code(1)
+        // The error must come from git (cloning from github.com) not from input validation.
+        .stderr(predicate::str::contains("git command failed").or(
+            // On machines without network access, git may report a different error.
+            predicate::str::contains("git").and(predicate::str::contains("failed")),
+        ));
 }
 
 /// A missing skill within an installed package returns CommandNotFound (exit 2).

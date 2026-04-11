@@ -168,12 +168,13 @@ pub fn create_test_package(name: &str, skills: &[(&str, &str)]) -> TempDir {
         .output()
         .expect("git config name failed");
 
-    // Write creft.yaml
-    let manifest = format!(
-        "name: {}\nversion: 0.1.0\ndescription: Test package\n",
-        name
+    // Write .creft/catalog.json (new format)
+    let catalog_dir = path.join(".creft");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
+    let catalog = format!(
+        r#"{{"name":"{name}","description":"Test package","plugins":[{{"name":"{name}","source":".","description":"Test package","version":"0.1.0","tags":[]}}]}}"#
     );
-    std::fs::write(path.join("creft.yaml"), manifest).unwrap();
+    std::fs::write(catalog_dir.join("catalog.json"), catalog).unwrap();
 
     // Write skill files
     for (filename, content) in skills {
@@ -192,6 +193,72 @@ pub fn create_test_package(name: &str, skills: &[(&str, &str)]) -> TempDir {
         .output()
         .expect("git add failed");
 
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .output()
+        .expect("git commit failed");
+
+    dir
+}
+
+/// Create a git repo with a multi-plugin `.creft/catalog.json`.
+///
+/// `plugins` is a list of `(plugin_name, subdir_relative_to_repo_root)` pairs.
+/// Each plugin directory gets a single `<name>.md` skill file.
+pub fn create_multi_plugin_repo(plugins: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(path)
+        .output()
+        .expect("git init failed");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(path)
+        .output()
+        .expect("git config email failed");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(path)
+        .output()
+        .expect("git config name failed");
+
+    // Build catalog entries.
+    let entries: Vec<String> = plugins
+        .iter()
+        .map(|(name, subdir)| {
+            format!(
+                r#"{{"name":"{name}","source":"./{subdir}","description":"Plugin {name}","version":"0.1.0","tags":[]}}"#
+            )
+        })
+        .collect();
+    let catalog = format!(
+        r#"{{"name":"multi-repo","description":"Multi plugin repo","plugins":[{}]}}"#,
+        entries.join(",")
+    );
+
+    let catalog_dir = path.join(".creft");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
+    std::fs::write(catalog_dir.join("catalog.json"), catalog).unwrap();
+
+    // Create each plugin directory with a minimal skill file.
+    for (name, subdir) in plugins {
+        let plugin_dir = path.join(subdir);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let skill_content = format!(
+            "---\nname: {name}\ndescription: {name} skill\n---\n\n```bash\necho {name}\n```\n"
+        );
+        std::fs::write(plugin_dir.join(format!("{name}.md")), skill_content).unwrap();
+    }
+
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()
+        .expect("git add failed");
     std::process::Command::new("git")
         .args(["commit", "-m", "init"])
         .current_dir(path)

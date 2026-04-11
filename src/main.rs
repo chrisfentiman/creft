@@ -1,3 +1,4 @@
+mod catalog;
 mod cli;
 mod doctor;
 mod error;
@@ -842,7 +843,17 @@ fn cmd_plugin_install(
     source: &str,
     plugin: Option<&str>,
 ) -> Result<(), CreftError> {
-    let pkg = registry::plugin_install(ctx, source, plugin)?;
+    let pkg = if source.contains("://") || source.starts_with("git@") || source.starts_with('/') {
+        // Full URL or absolute path: clone directly.
+        registry::plugin_install(ctx, source, plugin)?
+    } else if source.contains('/') {
+        // Shorthand name (owner/repo or creft/plugin): resolve via install_by_name.
+        registry::install_by_name(ctx, source, plugin)?
+    } else {
+        return Err(CreftError::InvalidManifest(format!(
+            "'{source}' is not a valid plugin source — use owner/repo or a full git URL"
+        )));
+    };
     eprintln!(
         "installed: {} ({})",
         pkg.manifest.name, pkg.manifest.version

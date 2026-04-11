@@ -73,11 +73,24 @@ pub enum CreftError {
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
 
-    #[error("manifest not found in repository (expected creft.yaml at repo root)")]
+    #[error("manifest not found in repository (expected .creft/catalog.json at repo root)")]
     ManifestNotFound,
 
     #[error("activation not found: '{cmd}' is not activated in plugin '{plugin}'")]
     ActivationNotFound { plugin: String, cmd: String },
+
+    #[error("catalog parse error in '{catalog_source}': {detail}")]
+    CatalogParse {
+        catalog_source: String,
+        detail: String,
+    },
+
+    #[error("plugin '{plugin}' not found in catalog '{catalog}' (available: {available})")]
+    PluginNotInCatalog {
+        catalog: String,
+        plugin: String,
+        available: String,
+    },
 
     #[error("validation failed")]
     ValidationErrors(Vec<crate::validate::ValidationDiagnostic>),

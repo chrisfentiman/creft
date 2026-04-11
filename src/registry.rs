@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{self, CatalogEntry};
 use crate::error::CreftError;
 use crate::frontmatter;
 use crate::markdown;
@@ -106,9 +107,56 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CreftError> {
     Ok(())
 }
 
+/// Read a `PackageManifest` from an installed package directory.
+///
+/// Tries `.creft/catalog.json` first (new format), falling back to `creft.yaml`
+/// (legacy format) for backward compatibility. Returns `None` if neither exists.
+pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, String>> {
+    let catalog_path = path.join(".creft").join("catalog.json");
+    if catalog_path.exists() {
+        return Some(
+            std::fs::read_to_string(&catalog_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    let label = catalog_path.display().to_string();
+                    catalog::parse_catalog(&content, &label)
+                        .map_err(|e| e.to_string())
+                        .and_then(|cat| {
+                            cat.plugins
+                                .into_iter()
+                                .next()
+                                .map(|entry| PackageManifest {
+                                    name: entry.name,
+                                    version: entry.version.unwrap_or_else(|| "0.0.0".into()),
+                                    description: entry.description,
+                                    author: None,
+                                    license: None,
+                                })
+                                .ok_or_else(|| "catalog has no plugin entries".to_string())
+                        })
+                }),
+        );
+    }
+
+    let yaml_path = path.join("creft.yaml");
+    if yaml_path.exists() {
+        return Some(
+            std::fs::read_to_string(&yaml_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    serde_yaml_ng::from_str::<PackageManifest>(&content).map_err(|e| e.to_string())
+                }),
+        );
+    }
+
+    None
+}
+
 /// List all installed packages in the given scope.
 ///
-/// Reads `ctx.packages_dir_for(scope)` and parses `creft.yaml` for each subdirectory.
+/// Reads `ctx.packages_dir_for(scope)` and parses the manifest for each
+/// subdirectory. Tries `.creft/catalog.json` first; falls back to `creft.yaml`
+/// for packages installed before the catalog format was introduced.
 /// Entries that fail to parse are skipped with a warning to stderr.
 pub fn list_packages_in(
     ctx: &AppContext,
@@ -127,21 +175,16 @@ pub fn list_packages_in(
         if !path.is_dir() {
             continue;
         }
-        let manifest_path = path.join("creft.yaml");
-        match std::fs::read_to_string(&manifest_path) {
-            Ok(content) => match serde_yaml_ng::from_str::<PackageManifest>(&content) {
-                Ok(manifest) => packages.push(InstalledPackage { manifest, path }),
-                Err(e) => eprintln!(
-                    "warning: skipping {}: invalid manifest: {}",
-                    path.display(),
-                    e
-                ),
-            },
-            Err(e) => eprintln!(
-                "warning: skipping {}: could not read creft.yaml: {}",
+        match read_manifest_from(&path) {
+            Some(Ok(manifest)) => packages.push(InstalledPackage { manifest, path }),
+            Some(Err(e)) => eprintln!(
+                "warning: skipping {}: invalid manifest: {}",
                 path.display(),
                 e
             ),
+            None => {
+                // No manifest found — skip silently (directory may not be a package).
+            }
         }
     }
 
@@ -243,8 +286,12 @@ fn collect_package_skills(
 /// Compute a namespaced skill name from a package name and a relative file path.
 ///
 /// Directory separators become spaces and the `.md` extension is stripped.
+/// When the file is at the package root and its stem matches the package name,
+/// the stem is omitted to avoid redundant names (e.g. `fetch/fetch.md` → `"fetch"`
+/// instead of `"fetch fetch"`).
 ///
 /// Examples:
+/// - `"fetch"`, `"fetch.md"` -> `"fetch"` (dedup: root file matches package name)
 /// - `"pkg"`, `"deploy.md"` -> `"pkg deploy"`
 /// - `"k8s-tools"`, `"networking/check-dns.md"` -> `"k8s-tools networking check-dns"`
 fn skill_name_from_path(pkg_name: &str, rel: &Path) -> String {
@@ -255,7 +302,13 @@ fn skill_name_from_path(pkg_name: &str, rel: &Path) -> String {
         }
     }
     if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
-        parts.push(stem.to_string());
+        let at_root = rel.parent().is_none_or(|p| p == Path::new(""));
+        if at_root && stem == pkg_name {
+            // Root-level file matching package name — skip the stem to avoid
+            // "fetch fetch" when the package and file share the same name.
+        } else {
+            parts.push(stem.to_string());
+        }
     }
     parts.join(" ")
 }
@@ -346,26 +399,25 @@ pub fn load_package_skill(ctx: &AppContext, full_name: &str) -> Result<ParsedCom
     Ok(ParsedCommand { def, docs, blocks })
 }
 
+/// The creft repo shorthand resolves to this URL.
+const CREFT_REPO: &str = "https://github.com/chrisfentiman/creft";
+
 /// Install a plugin from a git URL into the global plugin cache.
 ///
 /// 1. Clone the repo to a temp directory with `git clone --depth 1`.
-/// 2. Read and validate `creft.yaml`.
-/// 3. Check the global plugins directory for an existing plugin with the same name.
-/// 4. Move the clone to `ctx.plugins_dir()/<name>/`.
+/// 2. Read `.creft/catalog.json` from the cloned repo root.
+/// 3. For multi-plugin repos, select the entry named by `plugin_filter`,
+///    or return an error listing available plugins when no filter is given.
+/// 4. Move or copy the plugin to `ctx.plugins_dir()/<name>/`.
 ///
-/// The `plugin_filter` parameter is reserved for multi-plugin repos and is not
-/// yet implemented. Passing a value returns an error.
+/// Catalog entries with a `Path` source are installed from within the cloned
+/// repo via `install_from_path`. All other entry types are treated as the
+/// entire cloned repo.
 pub fn plugin_install(
     ctx: &AppContext,
     url: &str,
     plugin_filter: Option<&str>,
 ) -> Result<InstalledPackage, CreftError> {
-    if plugin_filter.is_some() {
-        return Err(CreftError::Setup(
-            "--plugin selection for multi-plugin repos is not yet implemented".into(),
-        ));
-    }
-
     let tmp = tempfile::TempDir::new()?;
     let tmp_path = tmp.path().to_path_buf();
 
@@ -396,15 +448,69 @@ pub fn plugin_install(
         return Err(CreftError::Git(stderr));
     }
 
-    let manifest_path = tmp_path.join("creft.yaml");
-    if !manifest_path.exists() {
+    let catalog_path = tmp_path.join(".creft").join("catalog.json");
+    if !catalog_path.exists() {
         return Err(CreftError::ManifestNotFound);
     }
 
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
-        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
+    let catalog_content = std::fs::read_to_string(&catalog_path)?;
+    let cat = catalog::parse_catalog(&catalog_content, url)?;
 
+    if cat.plugins.is_empty() {
+        return Err(CreftError::InvalidManifest(
+            "catalog has no plugin entries".into(),
+        ));
+    }
+
+    let entry: &CatalogEntry = if cat.plugins.len() > 1 {
+        // Multi-plugin repo: a filter is required.
+        match plugin_filter {
+            Some(name) => cat.plugins.iter().find(|p| p.name == name).ok_or_else(|| {
+                let available: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
+                CreftError::PluginNotInCatalog {
+                    catalog: url.to_string(),
+                    plugin: name.to_string(),
+                    available: available.join(", "),
+                }
+            })?,
+            None => {
+                let names: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
+                return Err(CreftError::InvalidManifest(format!(
+                    "repository contains {} plugins: {}. Use --plugin <name> to install a specific one",
+                    cat.plugins.len(),
+                    names.join(", ")
+                )));
+            }
+        }
+    } else {
+        // Single-plugin repo: validate the filter if provided.
+        let single = &cat.plugins[0];
+        if let Some(name) = plugin_filter
+            && single.name != name
+        {
+            return Err(CreftError::PluginNotInCatalog {
+                catalog: url.to_string(),
+                plugin: name.to_string(),
+                available: single.name.clone(),
+            });
+        }
+        single
+    };
+
+    // For path-based entries, the plugin files live inside the cloned repo.
+    if let catalog::PluginSource::Path(ref rel_path) = entry.source {
+        let source_path = tmp_path.join(rel_path.trim_start_matches("./"));
+        return install_from_path(ctx, &source_path, entry);
+    }
+
+    // For non-path entries (the whole repo is the plugin), move the clone.
+    let manifest = PackageManifest {
+        name: entry.name.clone(),
+        version: entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+        description: entry.description.clone(),
+        author: None,
+        license: None,
+    };
     validate_manifest_name(&manifest.name)?;
 
     let plugins = ctx.plugins_dir()?;
@@ -412,7 +518,6 @@ pub fn plugin_install(
     if dest.exists() {
         return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
     }
-
     if !plugins.exists() {
         std::fs::create_dir_all(&plugins)?;
     }
@@ -426,7 +531,102 @@ pub fn plugin_install(
     })
 }
 
+/// Install a plugin from a local directory path (path-based catalog entries).
+///
+/// Copies the directory into the global plugin cache and writes a synthetic
+/// `.creft/catalog.json` so `list_packages_in` and `doctor` can read metadata.
+pub fn install_from_path(
+    ctx: &AppContext,
+    source_path: &Path,
+    entry: &CatalogEntry,
+) -> Result<InstalledPackage, CreftError> {
+    let manifest = PackageManifest {
+        name: entry.name.clone(),
+        version: entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+        description: entry.description.clone(),
+        author: None,
+        license: None,
+    };
+    validate_manifest_name(&manifest.name)?;
+
+    let plugins = ctx.plugins_dir()?;
+    let dest = plugins.join(&manifest.name);
+    if dest.exists() {
+        return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
+    }
+    if !plugins.exists() {
+        std::fs::create_dir_all(&plugins)?;
+    }
+
+    copy_dir_recursive(source_path, &dest)?;
+
+    // Write a synthetic catalog only when the copy did not bring one over.
+    // This happens when the plugin is a subdirectory of the catalog repo
+    // without its own .creft/catalog.json. When source is "." (the whole repo),
+    // the real catalog was already copied and must not be overwritten — the
+    // installed directory may have a live .git, and overwriting a tracked file
+    // would cause `git pull` to abort with "local changes would be overwritten".
+    let catalog_dir = dest.join(".creft");
+    let catalog_file = catalog_dir.join("catalog.json");
+    if !catalog_file.exists() {
+        let synthetic_catalog = serde_json::json!({
+            "name": entry.name,
+            "description": entry.description,
+            "plugins": [{
+                "name": entry.name,
+                "source": ".",
+                "description": entry.description,
+                "version": entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+                "tags": entry.tags,
+            }]
+        });
+        std::fs::create_dir_all(&catalog_dir)?;
+        std::fs::write(
+            &catalog_file,
+            serde_json::to_string_pretty(&synthetic_catalog)
+                .map_err(|e| CreftError::Serialization(e.to_string()))?,
+        )?;
+    }
+
+    Ok(InstalledPackage {
+        manifest,
+        path: dest,
+    })
+}
+
+/// Install a plugin by shorthand name.
+///
+/// `creft/<plugin>` resolves to the official creft repo. All other
+/// `owner/repo` patterns resolve to `https://github.com/<owner>/<repo>`.
+/// Bare names (no `/`) return an error.
+pub fn install_by_name(
+    ctx: &AppContext,
+    qualified_name: &str,
+    plugin_filter: Option<&str>,
+) -> Result<InstalledPackage, CreftError> {
+    let Some(slash_pos) = qualified_name.find('/') else {
+        return Err(CreftError::InvalidManifest(format!(
+            "'{qualified_name}' is not a valid plugin source — use owner/repo or a full git URL"
+        )));
+    };
+
+    let owner = &qualified_name[..slash_pos];
+    let plugin = &qualified_name[slash_pos + 1..];
+
+    if owner == "creft" {
+        // creft shorthand: clone the official repo and install the named plugin.
+        plugin_install(ctx, CREFT_REPO, Some(plugin))
+    } else {
+        // Treat as GitHub owner/repo shorthand.
+        let url = format!("https://github.com/{owner}/{plugin}");
+        plugin_install(ctx, &url, plugin_filter)
+    }
+}
+
 /// Update an installed plugin by running `git pull --ff-only` in its directory.
+///
+/// After pulling, re-reads the manifest from `.creft/catalog.json` or `creft.yaml`
+/// (whichever is present) to return updated metadata.
 pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
     let plugin_path = ctx.plugins_dir()?.join(name);
     if !plugin_path.exists() {
@@ -456,14 +656,9 @@ pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, C
         return Err(CreftError::Git(stderr));
     }
 
-    let manifest_path = plugin_path.join("creft.yaml");
-    if !manifest_path.exists() {
-        return Err(CreftError::ManifestNotFound);
-    }
-
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
-        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
+    let manifest = read_manifest_from(&plugin_path)
+        .ok_or(CreftError::ManifestNotFound)?
+        .map_err(CreftError::InvalidManifest)?;
 
     validate_manifest_name(&manifest.name)?;
 
@@ -1091,6 +1286,21 @@ mod tests {
         assert!(name.starts_with("k8s-tools "));
     }
 
+    // Stage 3: dedup — root-level file matching package name omits the stem.
+    #[rstest]
+    #[case::root_match("fetch", "fetch.md", "fetch")]
+    #[case::root_mismatch("foo", "bar.md", "foo bar")]
+    #[case::subdir_match("fetch", "sub/fetch.md", "fetch sub fetch")]
+    #[case::subdir_different("k8s-tools", "sub/deploy.md", "k8s-tools sub deploy")]
+    fn skill_name_from_path_dedup(
+        #[case] pkg_name: &str,
+        #[case] rel_str: &str,
+        #[case] expected: &str,
+    ) {
+        let rel = Path::new(rel_str);
+        assert_eq!(skill_name_from_path(pkg_name, rel), expected);
+    }
+
     // --- list_packages ---
 
     #[test]
@@ -1152,6 +1362,91 @@ mod tests {
         let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].manifest.name, "good-pkg");
+    }
+
+    // --- read_manifest_from (Stage 3: catalog-first with creft.yaml fallback) ---
+
+    #[test]
+    fn read_manifest_from_prefers_catalog_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog_dir = dir.path().join(".creft");
+        std::fs::create_dir_all(&catalog_dir).unwrap();
+        std::fs::write(
+            catalog_dir.join("catalog.json"),
+            r#"{"name":"my-pkg","description":"desc","plugins":[{"name":"my-pkg","source":".","description":"From catalog","version":"2.0.0","tags":[]}]}"#,
+        )
+        .unwrap();
+        // Also write creft.yaml — catalog.json should win.
+        std::fs::write(
+            dir.path().join("creft.yaml"),
+            "name: my-pkg\nversion: 1.0.0\ndescription: From yaml\n",
+        )
+        .unwrap();
+
+        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.version, "2.0.0");
+        assert_eq!(manifest.description, "From catalog");
+    }
+
+    #[test]
+    fn read_manifest_from_falls_back_to_creft_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("creft.yaml"),
+            "name: old-pkg\nversion: 1.5.0\ndescription: Legacy package\n",
+        )
+        .unwrap();
+
+        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.name, "old-pkg");
+        assert_eq!(manifest.version, "1.5.0");
+    }
+
+    #[test]
+    fn read_manifest_from_returns_none_when_no_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(read_manifest_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn list_packages_reads_catalog_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("packages").join("catalog-pkg");
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
+        std::fs::write(
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"catalog-pkg","description":"","plugins":[{"name":"catalog-pkg","source":".","description":"A plugin","version":"3.0.0","tags":[]}]}"#,
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].manifest.name, "catalog-pkg");
+        assert_eq!(pkgs[0].manifest.version, "3.0.0");
+    }
+
+    #[test]
+    fn list_packages_backward_compat_creft_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("packages").join("yaml-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("creft.yaml"),
+            "name: yaml-pkg\nversion: 1.0.0\ndescription: Legacy\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].manifest.name, "yaml-pkg");
     }
 
     // --- list_package_skills ---
