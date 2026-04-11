@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::CreftError;
 use crate::frontmatter;
@@ -521,6 +521,10 @@ pub fn plugin_uninstall(ctx: &AppContext, name: &str) -> Result<(), CreftError> 
 /// Walks the plugin directory recursively for `.md` files. Skill names are
 /// derived from file paths relative to the plugin root. Dotfiles, symlinks,
 /// and files nested more than 3 levels deep are skipped.
+///
+/// Skill names include the plugin name as the first token, consistent with
+/// how `creft list` groups namespaced commands. Use
+/// `list_plugin_skills_unprefixed` when resolving skills by short name.
 pub fn list_plugin_skills_in(ctx: &AppContext, name: &str) -> Result<Vec<CommandDef>, CreftError> {
     let plugin_dir = ctx.plugins_dir()?.join(name);
     if !plugin_dir.exists() {
@@ -531,6 +535,386 @@ pub fn list_plugin_skills_in(ctx: &AppContext, name: &str) -> Result<Vec<Command
     collect_package_skills(name, &plugin_dir, &plugin_dir, 0, &mut skills)?;
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
+}
+
+/// List skill definitions in an installed plugin without the plugin name prefix.
+///
+/// `hello.md` in plugin `my-tools` produces skill name `"hello"` rather than
+/// `"my-tools hello"`. This form is used when adding plugin skills to the
+/// global skill list — the plugin name is tracked in `SkillSource::Plugin` instead.
+pub fn list_plugin_skills_unprefixed(
+    ctx: &AppContext,
+    plugin_name: &str,
+) -> Result<Vec<CommandDef>, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(plugin_name);
+    if !plugin_dir.exists() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    let mut skills = Vec::new();
+    collect_plugin_skills_unprefixed(&plugin_dir, &plugin_dir, 0, &mut skills)?;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+/// Recursively collect `.md` skills from a plugin directory, naming them without
+/// the plugin name prefix.
+///
+/// `hello.md` at the plugin root becomes `"hello"`, not `"plugin-name hello"`.
+fn collect_plugin_skills_unprefixed(
+    plugin_root: &Path,
+    dir: &Path,
+    depth: usize,
+    skills: &mut Vec<CommandDef>,
+) -> Result<(), CreftError> {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if depth < 3 {
+                collect_plugin_skills_unprefixed(plugin_root, &path, depth + 1, skills)?;
+            }
+            continue;
+        }
+
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(plugin_root)
+            .expect("path must be under plugin_root");
+
+        // Build skill name from path components, without the plugin name.
+        let mut parts = Vec::new();
+        if let Some(parent) = rel.parent() {
+            for component in parent.components() {
+                parts.push(component.as_os_str().to_string_lossy().into_owned());
+            }
+        }
+        if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
+            parts.push(stem.to_string());
+        }
+        let skill_name = parts.join(" ");
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match crate::frontmatter::parse(&content) {
+                Ok((mut def, _)) => {
+                    def.name = skill_name;
+                    skills.push(def);
+                }
+                Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
+            },
+            Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
+        }
+    }
+    Ok(())
+}
+
+/// Activation state for all plugins in a single scope.
+///
+/// Stored at `.creft/plugins/settings.json` (local scope) or
+/// `~/.creft/plugins/settings.json` (global scope).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginSettings {
+    /// Activated plugin commands.
+    ///
+    /// Keys are plugin names. Values describe which commands are active.
+    /// An `All(true)` value means every command from the plugin is active.
+    /// A `Commands(list)` value means only the listed command names are active.
+    #[serde(default)]
+    pub activated: std::collections::BTreeMap<String, ActivationEntry>,
+}
+
+/// Activation state for a single plugin within a scope.
+///
+/// Deserialization: `true` → `All(true)`, `["cmd1", "cmd2"]` → `Commands(vec)`.
+/// `false` is rejected by `PluginSettings::validate`. An empty command list
+/// is normalized to `All(true)` by `validate` — key presence means active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActivationEntry {
+    /// All commands from this plugin are active.
+    All(bool),
+    /// Only specific named commands are active.
+    Commands(Vec<String>),
+}
+
+impl PluginSettings {
+    /// Validate and normalize settings after deserialization.
+    ///
+    /// - Rejects `All(false)`: to deactivate a plugin, remove its key.
+    /// - Normalizes `Commands([])` to `All(true)`: empty list is equivalent to all.
+    pub fn validate(&mut self) -> Result<(), CreftError> {
+        let mut to_normalize = Vec::new();
+        for (name, entry) in &self.activated {
+            match entry {
+                ActivationEntry::All(false) => {
+                    return Err(CreftError::InvalidManifest(format!(
+                        "plugin '{}' has activation value 'false'; \
+                         remove the key to deactivate instead",
+                        name
+                    )));
+                }
+                ActivationEntry::Commands(cmds) if cmds.is_empty() => {
+                    to_normalize.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+        for name in to_normalize {
+            self.activated.insert(name, ActivationEntry::All(true));
+        }
+        Ok(())
+    }
+}
+
+/// Load activation settings for a scope from `settings.json`.
+///
+/// Returns a default (empty) `PluginSettings` when the file does not exist.
+/// Calls `validate()` after deserialization to reject invalid states.
+pub fn load_settings(ctx: &AppContext, scope: Scope) -> Result<PluginSettings, CreftError> {
+    let path = ctx.plugin_settings_path(scope)?;
+    if !path.exists() {
+        return Ok(PluginSettings::default());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut settings: PluginSettings = serde_json::from_str(&content)
+        .map_err(|e| CreftError::InvalidManifest(format!("settings.json parse error: {e}")))?;
+    settings.validate()?;
+    Ok(settings)
+}
+
+/// Save activation settings for a scope to `settings.json`.
+///
+/// Creates the `.creft/plugins/` directory if it does not exist.
+pub fn save_settings(
+    ctx: &AppContext,
+    scope: Scope,
+    settings: &PluginSettings,
+) -> Result<(), CreftError> {
+    let path = ctx.plugin_settings_path(scope)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(settings)
+        .map_err(|e| CreftError::Serialization(e.to_string()))?;
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Activate a command or all commands from an installed plugin.
+///
+/// `target` is either `plugin` (activate all) or `plugin/cmd` (one command).
+/// Validates the plugin is installed and the command exists before writing.
+/// Writes activation state to the `settings.json` for the given scope.
+pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), CreftError> {
+    let (plugin_name, cmd_name) = parse_activation_target(target);
+
+    let plugins_dir = ctx.plugins_dir()?;
+    let plugin_dir = plugins_dir.join(plugin_name);
+    if !plugin_dir.is_dir() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    if let Some(cmd) = cmd_name {
+        // Validate the specific command exists.
+        plugin_skill_file_path(ctx, plugin_name, cmd)?;
+    }
+
+    let mut settings = load_settings(ctx, scope)?;
+
+    if let Some(cmd) = cmd_name {
+        match settings.activated.get_mut(plugin_name) {
+            Some(ActivationEntry::All(true)) => {
+                // Already all-active; no change needed.
+            }
+            Some(ActivationEntry::Commands(cmds)) => {
+                if !cmds.contains(&cmd.to_string()) {
+                    cmds.push(cmd.to_string());
+                }
+            }
+            _ => {
+                settings.activated.insert(
+                    plugin_name.to_string(),
+                    ActivationEntry::Commands(vec![cmd.to_string()]),
+                );
+            }
+        }
+    } else {
+        settings
+            .activated
+            .insert(plugin_name.to_string(), ActivationEntry::All(true));
+    }
+
+    save_settings(ctx, scope, &settings)?;
+    Ok(())
+}
+
+/// Deactivate a command or all commands from a plugin.
+///
+/// When `global_only` is false, removes the entry from every scope that contains
+/// it (local first, then global). This matches the user's intent: "make this
+/// stop appearing" should clear all scopes, not leave a stale activation elsewhere.
+///
+/// When `global_only` is true, only the global scope is checked and modified.
+///
+/// Returns `ActivationNotFound` when the target exists in no checked scope.
+pub fn deactivate(ctx: &AppContext, target: &str, global_only: bool) -> Result<(), CreftError> {
+    let (plugin_name, cmd_name) = parse_activation_target(target);
+
+    let scopes_to_check: Vec<Scope> = if global_only {
+        vec![Scope::Global]
+    } else {
+        // Always check global; check local only when a local root exists.
+        let mut scopes = Vec::new();
+        if ctx.find_local_root().is_some() {
+            scopes.push(Scope::Local);
+        }
+        scopes.push(Scope::Global);
+        scopes
+    };
+
+    let mut found_in_any = false;
+
+    for scope in scopes_to_check {
+        let mut settings = load_settings(ctx, scope)?;
+        let changed = remove_from_settings(&mut settings, plugin_name, cmd_name);
+        if changed {
+            found_in_any = true;
+            save_settings(ctx, scope, &settings)?;
+        }
+    }
+
+    if !found_in_any {
+        return Err(CreftError::ActivationNotFound {
+            plugin: plugin_name.to_string(),
+            cmd: cmd_name.unwrap_or("(all)").to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Remove a plugin or specific command from settings. Returns true if anything changed.
+fn remove_from_settings(
+    settings: &mut PluginSettings,
+    plugin_name: &str,
+    cmd_name: Option<&str>,
+) -> bool {
+    match cmd_name {
+        None => {
+            // Deactivate the whole plugin.
+            settings.activated.remove(plugin_name).is_some()
+        }
+        Some(cmd) => {
+            match settings.activated.get_mut(plugin_name) {
+                Some(ActivationEntry::All(true)) => {
+                    // Can't selectively remove from "all" — remove the whole entry.
+                    settings.activated.remove(plugin_name);
+                    true
+                }
+                Some(ActivationEntry::Commands(cmds)) => {
+                    let before = cmds.len();
+                    cmds.retain(|c| c != cmd);
+                    let removed = cmds.len() < before;
+                    // Clean up empty command list.
+                    if cmds.is_empty() {
+                        settings.activated.remove(plugin_name);
+                    }
+                    removed
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// Parse a `plugin` or `plugin/cmd` activation target string.
+///
+/// Returns `(plugin_name, None)` for whole-plugin targets and
+/// `(plugin_name, Some(cmd_name))` for specific-command targets.
+fn parse_activation_target(target: &str) -> (&str, Option<&str>) {
+    if let Some(idx) = target.find('/') {
+        let plugin = &target[..idx];
+        let cmd = &target[idx + 1..];
+        (plugin, Some(cmd))
+    } else {
+        (target, None)
+    }
+}
+
+/// Resolve the filesystem path for a skill within an installed plugin.
+///
+/// Looks in `plugins_dir()/<plugin_name>/`. When `skill_name` equals
+/// `plugin_name` (the dedup case: `fetch/fetch.md` → name `"fetch"`),
+/// looks for `<plugin_name>.md` at the plugin root. Otherwise, treats
+/// whitespace-separated tokens as path components with the last getting
+/// a `.md` suffix.
+pub fn plugin_skill_file_path(
+    ctx: &AppContext,
+    plugin_name: &str,
+    skill_name: &str,
+) -> Result<PathBuf, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(plugin_name);
+    if !plugin_dir.is_dir() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    if skill_name == plugin_name {
+        // Dedup case: the skill file is at the plugin root with a matching name.
+        let path = plugin_dir.join(format!("{}.md", plugin_name));
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(CreftError::PackageNotFound(skill_name.to_string()));
+    }
+
+    let tokens: Vec<&str> = skill_name.split_whitespace().collect();
+    for token in &tokens {
+        store::validate_path_token(token)?;
+    }
+    let mut file_path = plugin_dir;
+    for (i, token) in tokens.iter().enumerate() {
+        if i == tokens.len() - 1 {
+            file_path = file_path.join(format!("{}.md", token));
+        } else {
+            file_path = file_path.join(token);
+        }
+    }
+    if file_path.exists() {
+        return Ok(file_path);
+    }
+    Err(CreftError::PackageNotFound(skill_name.to_string()))
+}
+
+/// Load and parse a skill from an installed plugin.
+pub fn load_plugin_skill(
+    ctx: &AppContext,
+    plugin_name: &str,
+    skill_name: &str,
+) -> Result<ParsedCommand, CreftError> {
+    let file_path = plugin_skill_file_path(ctx, plugin_name, skill_name)?;
+    let content = std::fs::read_to_string(&file_path)?;
+    let (mut def, body) = crate::frontmatter::parse(&content)?;
+    let (docs, blocks) = crate::markdown::extract_blocks(&body);
+    def.name = skill_name.to_string();
+    Ok(ParsedCommand { def, docs, blocks })
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use crate::frontmatter;
 use crate::markdown;
 pub use crate::model::find_local_root_from;
 use crate::model::{AppContext, CommandDef, NamespaceEntry, ParsedCommand, Scope, SkillSource};
-use crate::registry;
+use crate::registry::{self, ActivationEntry};
 
 const RESERVED: &[&str] = &[
     "add", "list", "show", "edit", "rm", "cat", "plugin", "up", "help", "version", "init", "doctor",
@@ -287,8 +287,8 @@ fn detect_single_package(skills: &[(CommandDef, SkillSource)]) -> Option<String>
                     }
                 }
             }
-            SkillSource::Owned(_) => {
-                // Contains an owned skill -- not a pure package namespace.
+            SkillSource::Owned(_) | SkillSource::Plugin(_) => {
+                // Contains an owned or plugin skill -- not a pure package namespace.
                 return None;
             }
         }
@@ -424,6 +424,10 @@ pub fn read_raw_from(
             let file_path = registry::skill_file_path(ctx, name)?;
             Ok(std::fs::read_to_string(&file_path)?)
         }
+        SkillSource::Plugin(plugin_name) => {
+            let file_path = registry::plugin_skill_file_path(ctx, plugin_name, name)?;
+            Ok(std::fs::read_to_string(&file_path)?)
+        }
     }
 }
 
@@ -439,6 +443,7 @@ pub fn load_from(
     match source {
         SkillSource::Owned(scope) => load_in(ctx, name, *scope),
         SkillSource::Package(_, _) => registry::load_package_skill(ctx, name),
+        SkillSource::Plugin(plugin_name) => registry::load_plugin_skill(ctx, plugin_name, name),
     }
 }
 
@@ -482,15 +487,17 @@ fn list_scope_with_packages(
     Ok(result)
 }
 
-/// List all available skills (owned + installed), sorted by name.
+/// List all available skills (owned + installed + activated plugins), sorted by name.
 ///
 /// When `creft_home` is set, lists only from that single location.
 /// Otherwise, lists from both local and global scopes; local shadows global on name collision.
+/// Activated plugin skills are appended after owned and package skills.
 pub fn list_all_with_source(
     ctx: &AppContext,
 ) -> Result<Vec<(CommandDef, SkillSource)>, CreftError> {
     if ctx.creft_home.is_some() {
         let mut result = list_scope_with_packages(ctx, Scope::Global)?;
+        append_activated_plugin_skills(ctx, &mut result)?;
         result.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         return Ok(result);
     }
@@ -507,12 +514,79 @@ pub fn list_all_with_source(
 
     for item in list_scope_with_packages(ctx, Scope::Global)? {
         if !seen_names.contains(&item.0.name) {
+            seen_names.insert(item.0.name.clone());
+            result.push(item);
+        }
+    }
+
+    // Append activated plugin skills (global and local activations merged).
+    let mut plugin_items = Vec::new();
+    append_activated_plugin_skills(ctx, &mut plugin_items)?;
+    for item in plugin_items {
+        if !seen_names.contains(&item.0.name) {
             result.push(item);
         }
     }
 
     result.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     Ok(result)
+}
+
+/// Collect skills from all activated plugins and append them to `result`.
+///
+/// Reads activation settings from both local and global scopes when available.
+/// Local activations take precedence — if a plugin command is activated locally,
+/// it is not added again from global.
+fn append_activated_plugin_skills(
+    ctx: &AppContext,
+    result: &mut Vec<(CommandDef, SkillSource)>,
+) -> Result<(), CreftError> {
+    let mut seen_plugin_skills: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    let scopes = if ctx.creft_home.is_some() {
+        vec![Scope::Global]
+    } else {
+        let mut v = Vec::new();
+        if ctx.find_local_root().is_some() {
+            v.push(Scope::Local);
+        }
+        v.push(Scope::Global);
+        v
+    };
+
+    for scope in scopes {
+        let settings = registry::load_settings(ctx, scope)?;
+        for (plugin_name, entry) in &settings.activated {
+            match registry::list_plugin_skills_unprefixed(ctx, plugin_name) {
+                Ok(skills) => {
+                    for skill in skills {
+                        let key = format!("{}/{}", plugin_name, skill.name);
+                        if seen_plugin_skills.contains(&key) {
+                            continue;
+                        }
+                        let activated = match entry {
+                            ActivationEntry::All(true) => true,
+                            ActivationEntry::Commands(cmds) => cmds.contains(&skill.name),
+                            ActivationEntry::All(false) => false,
+                        };
+                        if activated {
+                            seen_plugin_skills.insert(key);
+                            result.push((skill, SkillSource::Plugin(plugin_name.clone())));
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not list skills for plugin '{}': {}",
+                        plugin_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Construct the flat-file path for a namespaced command name.
@@ -691,10 +765,85 @@ fn resolve_in_single_scope(
         }
     }
 
+    // Check activated plugins. Each activated plugin may expose commands matching the args.
+    if let Ok(resolved) = resolve_from_activated_plugins(ctx, args, scope) {
+        return Ok(resolved);
+    }
+
+    Err(CreftError::CommandNotFound(args[0].clone()))
+}
+
+/// Try to resolve `args` as a command from an activated plugin in the given scope.
+///
+/// Loads activation settings for `scope`. For `All`-activated plugins, tries longest
+/// match against skill files in the plugin directory. For `Commands`-activated plugins,
+/// only checks the listed command names. Returns `CommandNotFound` if no match.
+fn resolve_from_activated_plugins(
+    ctx: &AppContext,
+    args: &[String],
+    scope: Scope,
+) -> Result<(String, Vec<String>, SkillSource), CreftError> {
+    let settings = registry::load_settings(ctx, scope)?;
+    if settings.activated.is_empty() {
+        return Err(CreftError::CommandNotFound(args[0].clone()));
+    }
+
+    let plugins_dir = ctx.plugins_dir()?;
+
+    for (plugin_name, entry) in &settings.activated {
+        let plugin_dir = plugins_dir.join(plugin_name);
+        if !plugin_dir.is_dir() {
+            // Stale activation — plugin was uninstalled. Skip silently here;
+            // `creft doctor` reports stale activations explicitly.
+            continue;
+        }
+
+        match entry {
+            ActivationEntry::All(true) => {
+                // Try longest match across all skill files in this plugin.
+                for len in (1..=args.len().min(4)).rev() {
+                    let candidate = args[..len].join(" ");
+                    if let Ok(path) = registry::plugin_skill_file_path(ctx, plugin_name, &candidate)
+                        && path.exists()
+                    {
+                        return Ok((
+                            candidate,
+                            args[len..].to_vec(),
+                            SkillSource::Plugin(plugin_name.clone()),
+                        ));
+                    }
+                }
+            }
+            ActivationEntry::Commands(cmds) => {
+                // Only check the explicitly activated command names.
+                for cmd in cmds {
+                    let cmd_parts: Vec<&str> = cmd.split_whitespace().collect();
+                    let len = cmd_parts.len();
+                    if args.len() >= len
+                        && args[..len].join(" ") == *cmd
+                        && let Ok(path) = registry::plugin_skill_file_path(ctx, plugin_name, cmd)
+                        && path.exists()
+                    {
+                        return Ok((
+                            cmd.clone(),
+                            args[len..].to_vec(),
+                            SkillSource::Plugin(plugin_name.clone()),
+                        ));
+                    }
+                }
+            }
+            ActivationEntry::All(false) => {
+                // Normalized away by validate(); never reachable in practice.
+            }
+        }
+    }
+
     Err(CreftError::CommandNotFound(args[0].clone()))
 }
 
 /// Returns true if the source is local-scope (owned or package).
+///
+/// `Plugin(_)` is always global — plugins live in the global cache.
 pub(crate) fn is_local_source(source: &SkillSource) -> bool {
     matches!(
         source,

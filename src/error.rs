@@ -76,6 +76,9 @@ pub enum CreftError {
     #[error("manifest not found in repository (expected creft.yaml at repo root)")]
     ManifestNotFound,
 
+    #[error("activation not found: '{cmd}' is not activated in plugin '{plugin}'")]
+    ActivationNotFound { plugin: String, cmd: String },
+
     #[error("validation failed")]
     ValidationErrors(Vec<crate::validate::ValidationDiagnostic>),
 

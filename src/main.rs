@@ -699,6 +699,7 @@ fn format_skill_desc(
     match source {
         model::SkillSource::Owned(_) => desc.into_owned(),
         model::SkillSource::Package(pkg, _) => format!("{desc}  (pkg: {pkg})"),
+        model::SkillSource::Plugin(name) => format!("{desc}  (plugin: {name})"),
     }
 }
 
@@ -719,10 +720,18 @@ fn cmd_edit(
     let args: Vec<String> = name.split_whitespace().map(String::from).collect();
     let (resolved_name, _, source) = store::resolve_command(ctx, &args)?;
 
-    if let model::SkillSource::Package(_, _) = &source {
-        return Err(CreftError::Setup(
-            "cannot edit installed package skills -- they are read-only".into(),
-        ));
+    match &source {
+        model::SkillSource::Package(_, _) => {
+            return Err(CreftError::Setup(
+                "cannot edit installed package skills -- they are read-only".into(),
+            ));
+        }
+        model::SkillSource::Plugin(_) => {
+            return Err(CreftError::Setup(
+                "cannot edit plugin skills -- they are read-only".into(),
+            ));
+        }
+        model::SkillSource::Owned(_) => {}
     }
 
     let scope = if global {
@@ -731,6 +740,8 @@ fn cmd_edit(
         match &source {
             model::SkillSource::Owned(s) => *s,
             model::SkillSource::Package(_, s) => *s,
+            // Unreachable: Plugin is rejected above, but required for exhaustiveness.
+            model::SkillSource::Plugin(_) => model::Scope::Global,
         }
     };
     let path = store::name_to_path_in(ctx, &resolved_name, scope)?;
@@ -787,10 +798,18 @@ fn cmd_rm(ctx: &model::AppContext, name: &str, global: bool) -> Result<(), Creft
     let args: Vec<String> = name.split_whitespace().map(String::from).collect();
     let (_, _, source) = store::resolve_command(ctx, &args)?;
 
-    if let model::SkillSource::Package(_, _) = &source {
-        return Err(CreftError::Setup(
-            "cannot remove individual skills from an installed package -- use 'creft uninstall <package>' instead".into(),
-        ));
+    match &source {
+        model::SkillSource::Package(_, _) => {
+            return Err(CreftError::Setup(
+                "cannot remove individual skills from an installed package -- use 'creft plugin uninstall <package>' instead".into(),
+            ));
+        }
+        model::SkillSource::Plugin(_) => {
+            return Err(CreftError::Setup(
+                "cannot remove individual skills from a plugin -- use 'creft plugin deactivate <plugin>' or 'creft plugin uninstall <plugin>' instead".into(),
+            ));
+        }
+        model::SkillSource::Owned(_) => {}
     }
 
     let scope = if global {
@@ -799,6 +818,8 @@ fn cmd_rm(ctx: &model::AppContext, name: &str, global: bool) -> Result<(), Creft
         match &source {
             model::SkillSource::Owned(s) => *s,
             model::SkillSource::Package(_, s) => *s,
+            // Unreachable: Plugin is rejected above, but required for exhaustiveness.
+            model::SkillSource::Plugin(_) => model::Scope::Global,
         }
     };
     store::remove_in(ctx, name, scope)?;
@@ -862,24 +883,27 @@ fn cmd_plugin_uninstall(ctx: &model::AppContext, name: &str) -> Result<(), Creft
 
 fn cmd_plugin_activate(
     ctx: &model::AppContext,
-    _target: &str,
-    _global: bool,
+    target: &str,
+    global: bool,
 ) -> Result<(), CreftError> {
-    let _ = ctx;
-    Err(CreftError::Setup(
-        "creft plugin activate is not yet implemented".into(),
-    ))
+    let scope = if global {
+        model::Scope::Global
+    } else {
+        ctx.default_write_scope()
+    };
+    registry::activate(ctx, target, scope)?;
+    eprintln!("activated: {target}");
+    Ok(())
 }
 
 fn cmd_plugin_deactivate(
     ctx: &model::AppContext,
-    _target: &str,
-    _global: bool,
+    target: &str,
+    global: bool,
 ) -> Result<(), CreftError> {
-    let _ = ctx;
-    Err(CreftError::Setup(
-        "creft plugin deactivate is not yet implemented".into(),
-    ))
+    registry::deactivate(ctx, target, global)?;
+    eprintln!("deactivated: {target}");
+    Ok(())
 }
 
 fn cmd_plugin_list(ctx: &model::AppContext, name: Option<&str>) -> Result<(), CreftError> {
