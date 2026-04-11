@@ -63,7 +63,15 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
                 return cmd_namespace_help(ctx, &prefix);
             }
         }
-        return run_builtin(ctx);
+        return run_builtin(ctx, None);
+    }
+
+    // Deprecated root-level commands: forward to `creft plugin <cmd>` with a warning.
+    if first == "install" || first == "update" || first == "uninstall" {
+        eprintln!("warning: 'creft {first}' is deprecated, use 'creft plugin {first}' instead");
+        let mut rewritten = vec!["creft".to_string(), "plugin".to_string()];
+        rewritten.extend(args);
+        return run_builtin(ctx, Some(rewritten));
     }
 
     if store::is_reserved(first)
@@ -72,14 +80,17 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
         || first == "--version"
         || first == "-V"
     {
-        return run_builtin(ctx);
+        return run_builtin(ctx, None);
     }
 
     run_user_command(ctx, &args)
 }
 
-fn run_builtin(ctx: &model::AppContext) -> Result<(), CreftError> {
-    let cli = cli::Cli::parse();
+fn run_builtin(ctx: &model::AppContext, args: Option<Vec<String>>) -> Result<(), CreftError> {
+    let cli = match args {
+        Some(a) => cli::Cli::parse_from(a),
+        None => cli::Cli::parse(),
+    };
 
     match cli.command {
         cli::BuiltinCommand::Add {
@@ -131,11 +142,21 @@ fn run_builtin(ctx: &model::AppContext) -> Result<(), CreftError> {
             cmd_cat(ctx, &name)
         }
 
-        cli::BuiltinCommand::Install { url, global } => cmd_install(ctx, &url, global),
-
-        cli::BuiltinCommand::Update { name } => cmd_update(ctx, name),
-
-        cli::BuiltinCommand::Uninstall { name } => cmd_uninstall(ctx, &name),
+        cli::BuiltinCommand::Plugin { action } => match action {
+            cli::PluginAction::Install { source, plugin } => {
+                cmd_plugin_install(ctx, &source, plugin.as_deref())
+            }
+            cli::PluginAction::Update { name } => cmd_plugin_update(ctx, name),
+            cli::PluginAction::Uninstall { name } => cmd_plugin_uninstall(ctx, &name),
+            cli::PluginAction::Activate { target, global } => {
+                cmd_plugin_activate(ctx, &target, global)
+            }
+            cli::PluginAction::Deactivate { target, global } => {
+                cmd_plugin_deactivate(ctx, &target, global)
+            }
+            cli::PluginAction::List { name } => cmd_plugin_list(ctx, name.as_deref()),
+            cli::PluginAction::Search { query } => cmd_plugin_search(ctx, &query),
+        },
 
         cli::BuiltinCommand::Up { system, global } => cmd_up(ctx, system, global),
 
@@ -795,13 +816,12 @@ fn cmd_cat(ctx: &model::AppContext, name: &str) -> Result<(), CreftError> {
     Ok(())
 }
 
-fn cmd_install(ctx: &model::AppContext, url: &str, global: bool) -> Result<(), CreftError> {
-    let scope = if global {
-        model::Scope::Global
-    } else {
-        ctx.default_write_scope()
-    };
-    let pkg = registry::install(ctx, url, scope)?;
+fn cmd_plugin_install(
+    ctx: &model::AppContext,
+    source: &str,
+    plugin: Option<&str>,
+) -> Result<(), CreftError> {
+    let pkg = registry::plugin_install(ctx, source, plugin)?;
     eprintln!(
         "installed: {} ({})",
         pkg.manifest.name, pkg.manifest.version
@@ -809,16 +829,16 @@ fn cmd_install(ctx: &model::AppContext, url: &str, global: bool) -> Result<(), C
     Ok(())
 }
 
-fn cmd_update(ctx: &model::AppContext, name: Option<String>) -> Result<(), CreftError> {
+fn cmd_plugin_update(ctx: &model::AppContext, name: Option<String>) -> Result<(), CreftError> {
     match name {
         Some(n) => {
-            let pkg = registry::update(ctx, &n)?;
+            let pkg = registry::plugin_update(ctx, &n)?;
             eprintln!("updated: {} ({})", pkg.manifest.name, pkg.manifest.version);
         }
         None => {
-            let results = registry::update_all(ctx)?;
+            let results = registry::plugin_update_all(ctx)?;
             if results.is_empty() {
-                eprintln!("no packages installed");
+                eprintln!("no plugins installed");
                 return Ok(());
             }
             for result in results {
@@ -834,10 +854,84 @@ fn cmd_update(ctx: &model::AppContext, name: Option<String>) -> Result<(), Creft
     Ok(())
 }
 
-fn cmd_uninstall(ctx: &model::AppContext, name: &str) -> Result<(), CreftError> {
-    registry::uninstall(ctx, name)?;
+fn cmd_plugin_uninstall(ctx: &model::AppContext, name: &str) -> Result<(), CreftError> {
+    registry::plugin_uninstall(ctx, name)?;
     eprintln!("uninstalled: {}", name);
     Ok(())
+}
+
+fn cmd_plugin_activate(
+    ctx: &model::AppContext,
+    _target: &str,
+    _global: bool,
+) -> Result<(), CreftError> {
+    // Stage 2: activation model.
+    let _ = ctx;
+    Err(CreftError::Setup(
+        "creft plugin activate is not yet implemented".into(),
+    ))
+}
+
+fn cmd_plugin_deactivate(
+    ctx: &model::AppContext,
+    _target: &str,
+    _global: bool,
+) -> Result<(), CreftError> {
+    // Stage 2: activation model.
+    let _ = ctx;
+    Err(CreftError::Setup(
+        "creft plugin deactivate is not yet implemented".into(),
+    ))
+}
+
+fn cmd_plugin_list(ctx: &model::AppContext, name: Option<&str>) -> Result<(), CreftError> {
+    let plugins_dir = ctx.plugins_dir()?;
+    if !plugins_dir.exists() {
+        eprintln!("no plugins installed");
+        return Ok(());
+    }
+
+    match name {
+        Some(plugin_name) => {
+            let plugin_dir = plugins_dir.join(plugin_name);
+            if !plugin_dir.exists() {
+                return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+            }
+            let skills = registry::list_plugin_skills_in(ctx, plugin_name)?;
+            if skills.is_empty() {
+                eprintln!("no commands found in plugin '{}'", plugin_name);
+            } else {
+                for skill in &skills {
+                    println!("{}", skill.name);
+                }
+            }
+        }
+        None => {
+            let entries = std::fs::read_dir(&plugins_dir)?;
+            let mut found = false;
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir()
+                    && let Some(name) = entry.file_name().to_str()
+                {
+                    println!("{}", name);
+                    found = true;
+                }
+            }
+            if !found {
+                eprintln!("no plugins installed");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_plugin_search(ctx: &model::AppContext, _query: &[String]) -> Result<(), CreftError> {
+    // Stage 5: search and discovery.
+    let _ = ctx;
+    Err(CreftError::Setup(
+        "creft plugin search is not yet implemented".into(),
+    ))
 }
 
 fn cmd_up(ctx: &model::AppContext, system: Option<String>, global: bool) -> Result<(), CreftError> {

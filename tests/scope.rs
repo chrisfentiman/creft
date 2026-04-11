@@ -192,10 +192,11 @@ fn test_scope_run_resolves_local_before_global() {
         .stdout(predicates::prelude::predicate::str::contains("global-version").not());
 }
 
-// ── 6. install defaults to local scope when .creft/ exists ────────────────────
+// ── 6. plugin install always goes to global plugins cache ─────────────────────
 
-/// `creft install <url>` installs the package to `.creft/packages/` (local) when
-/// a local `.creft/` directory exists in CWD.
+/// `creft plugin install <url>` always installs to the global plugins cache
+/// (`~/.creft/plugins/`), regardless of whether a local `.creft/` directory
+/// exists. Plugin install is always global — activation is scoped.
 #[test]
 fn test_scope_install_defaults_to_local() {
     let pkg_repo = create_test_package(
@@ -209,28 +210,32 @@ fn test_scope_install_defaults_to_local() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
             "installed: my-local-pkg",
         ));
 
-    // Package must be in local .creft/packages/, not global.
+    // Plugin must be in global ~/.creft/plugins/, never in packages/.
     assert!(
-        env.local_packages().join("my-local-pkg").exists(),
-        "package should be in local .creft/packages/"
+        env.global_plugins().join("my-local-pkg").exists(),
+        "plugin should be in global ~/.creft/plugins/"
+    );
+    assert!(
+        !env.local_packages().join("my-local-pkg").exists(),
+        "plugin must NOT be in local .creft/packages/"
     );
     assert!(
         !env.global_packages().join("my-local-pkg").exists(),
-        "package must NOT be in global ~/.creft/packages/"
+        "plugin must NOT be in global ~/.creft/packages/"
     );
 }
 
-// ── 7. install --global to global scope ──────────────────────────────────────
+// ── 7. deprecated install alias forwards with warning ─────────────────────────
 
-/// `creft install --global <url>` installs the package to `~/.creft/packages/`
-/// even when a local `.creft/` directory is present.
+/// `creft install <url>` (deprecated) forwards to `creft plugin install`,
+/// which always installs to the global plugins cache.
 #[test]
 fn test_scope_install_global_flag_forces_global() {
     let pkg_repo = create_test_package(
@@ -244,21 +249,21 @@ fn test_scope_install_global_flag_forces_global() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["install", "--global", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
             "installed: my-global-pkg",
         ));
 
-    // Package must be in global ~/.creft/packages/, not local.
+    // Plugin is in the global plugins cache.
     assert!(
-        env.global_packages().join("my-global-pkg").exists(),
-        "package should be in global ~/.creft/packages/"
+        env.global_plugins().join("my-global-pkg").exists(),
+        "plugin should be in global ~/.creft/plugins/"
     );
     assert!(
         !env.local_packages().join("my-global-pkg").exists(),
-        "package must NOT be in local .creft/packages/"
+        "plugin must NOT be in local .creft/packages/"
     );
 }
 
@@ -297,7 +302,7 @@ fn test_scope_update_finds_local_package() {
         ));
 }
 
-/// `creft update <name>` finds and updates a package installed to global scope.
+/// `creft plugin update <name>` finds and updates a plugin in the global cache.
 #[test]
 fn test_scope_update_finds_global_package() {
     let pkg_repo = create_test_package(
@@ -310,15 +315,15 @@ fn test_scope_update_finds_global_package() {
 
     let env = TwoScopeEnv::new();
 
-    // Install to global scope.
+    // Install to global plugins cache.
     creft_two_scope(&env)
-        .args(["install", "--global", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
-    // Update should find the package in global scope and succeed.
+    // Update should find the plugin in the global cache and succeed.
     creft_two_scope(&env)
-        .args(["update", "global-updatable-pkg"])
+        .args(["plugin", "update", "global-updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -358,7 +363,7 @@ fn test_scope_uninstall_finds_local_package() {
     );
 }
 
-/// `creft uninstall <name>` removes a package installed to global scope.
+/// `creft plugin uninstall <name>` removes a plugin from the global cache.
 #[test]
 fn test_scope_uninstall_finds_global_package() {
     let pkg_repo = create_test_package(
@@ -372,19 +377,19 @@ fn test_scope_uninstall_finds_global_package() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["install", "--global", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["uninstall", "global-removable-pkg"])
+        .args(["plugin", "uninstall", "global-removable-pkg"])
         .assert()
         .success();
 
-    // Package directory must be gone from global scope.
+    // Plugin directory must be gone from the global cache.
     assert!(
-        !env.global_packages().join("global-removable-pkg").exists(),
-        "package should have been removed from global ~/.creft/packages/"
+        !env.global_plugins().join("global-removable-pkg").exists(),
+        "plugin should have been removed from global ~/.creft/plugins/"
     );
 }
 

@@ -2,7 +2,7 @@
 
 mod helpers;
 
-use helpers::{create_test_package, creft_env, creft_with};
+use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
 
 // ── list tests ────────────────────────────────────────────────────────────────
@@ -324,26 +324,25 @@ fn test_list_namespace_with_nonexistent_tag() {
     );
 }
 
-/// `creft list` shows [package] annotation on a package namespace.
+/// `creft list` groups multiple skills under the same namespace prefix and shows
+/// a skill count when there are more than one.
 #[test]
-fn test_list_package_annotation() {
-    let pkg_repo = create_test_package(
-        "annotated-pkg",
-        &[
-            (
-                "search.md",
-                "---\nname: search\ndescription: Search\n---\n\n```bash\necho search\n```\n",
-            ),
-            (
-                "crawl.md",
-                "---\nname: crawl\ndescription: Crawl\n---\n\n```bash\necho crawl\n```\n",
-            ),
-        ],
-    );
+fn test_list_namespace_skill_count() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
+        .args(["add"])
+        .write_stdin(
+            "---\nname: mypkg search\ndescription: Search\n---\n\n```bash\necho search\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&creft_home)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: mypkg crawl\ndescription: Crawl\n---\n\n```bash\necho crawl\n```\n",
+        )
         .assert()
         .success();
 
@@ -351,8 +350,7 @@ fn test_list_package_annotation() {
         .args(["list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("annotated-pkg"))
-        .stdout(predicate::str::contains("[package]"))
+        .stdout(predicate::str::contains("mypkg"))
         .stdout(predicate::str::contains("2 skills"));
 }
 

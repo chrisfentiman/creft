@@ -66,6 +66,10 @@ pub fn validate_manifest_name(name: &str) -> Result<(), CreftError> {
 ///
 /// Otherwise, check local scope first, then global. Returns
 /// `CreftError::PackageNotFound` if the package is not found in either scope.
+///
+/// Used by the backward-compat `packages/` path (for packages installed before
+/// the plugin system) and by the unit test suite.
+#[allow(dead_code)]
 pub fn find_package_scope(ctx: &AppContext, name: &str) -> Result<Scope, CreftError> {
     if ctx.creft_home.is_some() {
         // CREFT_HOME mode: single scope, both resolve to same path.
@@ -101,6 +105,10 @@ pub fn find_package_scope(ctx: &AppContext, name: &str) -> Result<Scope, CreftEr
 /// 4. Move the clone to `ctx.packages_dir_for(scope)/<name>/`.
 ///
 /// Returns the installed package info.
+///
+/// Retained for backward compatibility with packages installed before the plugin
+/// system. New installs use `plugin_install` which writes to `plugins_dir()`.
+#[allow(dead_code)]
 pub fn install(ctx: &AppContext, url: &str, scope: Scope) -> Result<InstalledPackage, CreftError> {
     let tmp = tempfile::TempDir::new()?;
     let tmp_path = tmp.path().to_path_buf();
@@ -174,6 +182,9 @@ pub fn install(ctx: &AppContext, url: &str, scope: Scope) -> Result<InstalledPac
 /// Resolves which scope the package lives in via `find_package_scope`, then
 /// runs the update in that scope's directory. After pull, re-reads and re-validates
 /// the manifest to pick up any metadata changes. Returns the updated package info.
+///
+/// Retained for the backward-compat `packages/` path. New updates use `plugin_update`.
+#[allow(dead_code)]
 pub fn update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
     let scope = find_package_scope(ctx, name)?;
     let pkg_path = ctx.packages_dir_for(scope)?.join(name);
@@ -241,6 +252,9 @@ pub fn update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftErr
 /// Packages are deduplicated by name (local shadows global) so a package
 /// that exists in both scopes is only updated once (from whichever scope
 /// `find_package_scope` resolves first, which is local).
+///
+/// Retained for the backward-compat `packages/` path. New updates use `plugin_update_all`.
+#[allow(dead_code)]
 pub fn update_all(
     ctx: &AppContext,
 ) -> Result<Vec<Result<InstalledPackage, CreftError>>, CreftError> {
@@ -282,6 +296,9 @@ pub fn update_all(
 ///
 /// Resolves which scope the package lives in via `find_package_scope`, then
 /// removes the package from that scope's directory.
+///
+/// Retained for the backward-compat `packages/` path. New removals use `plugin_uninstall`.
+#[allow(dead_code)]
 pub fn uninstall(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
     let scope = find_package_scope(ctx, name)?;
     let pkg_path = ctx.packages_dir_for(scope)?.join(name);
@@ -580,6 +597,193 @@ pub fn load_package_skill(ctx: &AppContext, full_name: &str) -> Result<ParsedCom
     Ok(ParsedCommand { def, docs, blocks })
 }
 
+/// Install a plugin from a git URL into the global plugin cache.
+///
+/// 1. Clone the repo to a temp directory with `git clone --depth 1`.
+/// 2. Read and validate `creft.yaml` (catalog.json support added in stage 3).
+/// 3. Check the global plugins directory for an existing plugin with the same name.
+/// 4. Move the clone to `ctx.plugins_dir()/<name>/`.
+///
+/// The `plugin_filter` parameter is reserved for multi-plugin repos (stage 3).
+/// In stage 1 it must be `None`; passing a value returns an error.
+pub fn plugin_install(
+    ctx: &AppContext,
+    url: &str,
+    plugin_filter: Option<&str>,
+) -> Result<InstalledPackage, CreftError> {
+    if plugin_filter.is_some() {
+        return Err(CreftError::Setup(
+            "--plugin selection for multi-plugin repos is not yet implemented".into(),
+        ));
+    }
+
+    let tmp = tempfile::TempDir::new()?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    // The `--` separator prevents a user-supplied URL starting with `-`
+    // from being interpreted as a git flag.
+    let output = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--",
+            url,
+            tmp_path.to_str().unwrap_or_default(),
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CreftError::Git(
+                    "git is not installed. Install git to use plugin management.".into(),
+                )
+            } else {
+                CreftError::Git(e.to_string())
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CreftError::Git(stderr));
+    }
+
+    let manifest_path = tmp_path.join("creft.yaml");
+    if !manifest_path.exists() {
+        return Err(CreftError::ManifestNotFound);
+    }
+
+    let manifest_content = std::fs::read_to_string(&manifest_path)?;
+    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
+        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
+
+    validate_manifest_name(&manifest.name)?;
+
+    let plugins = ctx.plugins_dir()?;
+    let dest = plugins.join(&manifest.name);
+    if dest.exists() {
+        return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
+    }
+
+    if !plugins.exists() {
+        std::fs::create_dir_all(&plugins)?;
+    }
+
+    move_dir(&tmp_path, &dest)?;
+    let _ = tmp.keep();
+
+    Ok(InstalledPackage {
+        manifest,
+        path: dest,
+    })
+}
+
+/// Update an installed plugin by running `git pull --ff-only` in its directory.
+pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
+    let plugin_path = ctx.plugins_dir()?.join(name);
+    if !plugin_path.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            plugin_path.to_str().unwrap_or_default(),
+            "pull",
+            "--ff-only",
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CreftError::Git(
+                    "git is not installed. Install git to use plugin management.".into(),
+                )
+            } else {
+                CreftError::Git(e.to_string())
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CreftError::Git(stderr));
+    }
+
+    let manifest_path = plugin_path.join("creft.yaml");
+    if !manifest_path.exists() {
+        return Err(CreftError::ManifestNotFound);
+    }
+
+    let manifest_content = std::fs::read_to_string(&manifest_path)?;
+    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
+        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
+
+    validate_manifest_name(&manifest.name)?;
+
+    if manifest.name != name {
+        return Err(CreftError::InvalidManifest(format!(
+            "plugin name changed from '{}' to '{}' -- uninstall and reinstall",
+            name, manifest.name
+        )));
+    }
+
+    Ok(InstalledPackage {
+        manifest,
+        path: plugin_path,
+    })
+}
+
+/// Update all installed plugins. Returns results for each.
+///
+/// Individual update failures are collected — a failure for one plugin does not
+/// stop the others from being attempted.
+pub fn plugin_update_all(
+    ctx: &AppContext,
+) -> Result<Vec<Result<InstalledPackage, CreftError>>, CreftError> {
+    let base = ctx.plugins_dir()?;
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    for entry in std::fs::read_dir(&base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            results.push(plugin_update(ctx, name));
+        }
+    }
+    Ok(results)
+}
+
+/// Remove an installed plugin by deleting its directory from the global cache.
+pub fn plugin_uninstall(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
+    let plugin_path = ctx.plugins_dir()?.join(name);
+    if !plugin_path.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+    std::fs::remove_dir_all(&plugin_path)?;
+    Ok(())
+}
+
+/// List all skill definitions in an installed plugin.
+///
+/// Walks the plugin directory recursively for `.md` files. Skill names are
+/// derived from file paths relative to the plugin root. Dotfiles, symlinks,
+/// and files nested more than 3 levels deep are skipped.
+pub fn list_plugin_skills_in(ctx: &AppContext, name: &str) -> Result<Vec<CommandDef>, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(name);
+    if !plugin_dir.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+
+    let mut skills = Vec::new();
+    collect_package_skills(name, &plugin_dir, &plugin_dir, 0, &mut skills)?;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,20 +883,28 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_manifest_name_reserved_install() {
-        let err = validate_manifest_name("install").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    fn test_validate_manifest_name_install_is_now_valid() {
+        // `install` is no longer a reserved name — plugin management moved under
+        // `creft plugin`, freeing `install` for use by skill authors.
+        assert!(validate_manifest_name("install").is_ok());
     }
 
     #[test]
-    fn test_validate_manifest_name_reserved_update() {
-        let err = validate_manifest_name("update").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    fn test_validate_manifest_name_update_is_now_valid() {
+        // `update` is no longer reserved — see test_validate_manifest_name_install_is_now_valid.
+        assert!(validate_manifest_name("update").is_ok());
     }
 
     #[test]
-    fn test_validate_manifest_name_reserved_uninstall() {
-        let err = validate_manifest_name("uninstall").unwrap_err();
+    fn test_validate_manifest_name_uninstall_is_now_valid() {
+        // `uninstall` is no longer reserved — see test_validate_manifest_name_install_is_now_valid.
+        assert!(validate_manifest_name("uninstall").is_ok());
+    }
+
+    #[test]
+    fn test_validate_manifest_name_plugin_is_reserved() {
+        // `plugin` is the new reserved name for the plugin management namespace.
+        let err = validate_manifest_name("plugin").unwrap_err();
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 

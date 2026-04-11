@@ -116,6 +116,11 @@ impl TwoScopeEnv {
     pub fn global_packages(&self) -> std::path::PathBuf {
         self.home_dir.path().join(".creft").join("packages")
     }
+
+    /// Path to the global ~/.creft/plugins/ directory.
+    pub fn global_plugins(&self) -> std::path::PathBuf {
+        self.home_dir.path().join(".creft").join("plugins")
+    }
 }
 
 /// Build a creft Command bound to a two-scope environment.

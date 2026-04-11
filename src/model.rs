@@ -162,6 +162,15 @@ impl AppContext {
         Ok(self.resolve_root(scope)?.join("packages"))
     }
 
+    /// Global plugin cache directory (`~/.creft/plugins/`).
+    ///
+    /// Uses `resolve_root(Scope::Global)` so `CREFT_HOME` redirects plugin
+    /// storage for test isolation. Install is always global — there is no
+    /// per-scope plugin directory.
+    pub fn plugins_dir(&self) -> Result<PathBuf, CreftError> {
+        Ok(self.resolve_root(Scope::Global)?.join("plugins"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)

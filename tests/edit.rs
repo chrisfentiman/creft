@@ -2,7 +2,7 @@
 
 mod helpers;
 
-use helpers::{create_test_package, creft_env, creft_with};
+use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
 
 // ── edit stdin tests ──────────────────────────────────────────────────────────
@@ -103,31 +103,18 @@ fn test_edit_stdin_nonexistent_command_fails() {
         .code(2);
 }
 
-/// Piping content to an installed package skill is rejected (read-only).
+/// Editing a command that does not exist fails with "command not found".
 #[test]
-fn test_edit_stdin_package_skill_is_rejected() {
-    let pkg_repo = create_test_package(
-        "stdin-edit-pkg",
-        &[(
-            "deploy.md",
-            "---\nname: deploy\ndescription: Deploy\n---\n\n```bash\necho deploying\n```\n",
-        )],
-    );
+fn test_edit_nonexistent_fails() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
-        .assert()
-        .success();
-
-    let new_content = "---\nname: deploy\ndescription: hacked\n---\n\n```bash\necho hacked\n```\n";
-    creft_with(&creft_home)
-        .args(["edit", "stdin-edit-pkg", "deploy"])
-        .write_stdin(new_content)
+        .args(["edit", "nonexistent-skill"])
+        .write_stdin("---\nname: nonexistent-skill\ndescription: x\n---\n\n```bash\necho x\n```\n")
         .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("read-only"));
+        .code(2)
+        .stderr(predicate::str::contains("command not found"));
 }
 
 /// Piping content with a description longer than 80 characters emits a warning

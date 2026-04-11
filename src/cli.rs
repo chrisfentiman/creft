@@ -95,28 +95,11 @@ pub enum BuiltinCommand {
         name: Vec<String>,
     },
 
-    /// Install a skill package from a git repo
-    #[command(long_about = INSTALL_LONG_ABOUT)]
-    Install {
-        /// Git repository URL
-        url: String,
-        /// Install to global ~/.creft/ instead of local .creft/
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
-
-    /// Update installed skill packages
-    #[command(long_about = UPDATE_LONG_ABOUT)]
-    Update {
-        /// Package name (updates all if omitted)
-        name: Option<String>,
-    },
-
-    /// Remove an installed skill package
-    #[command(long_about = UNINSTALL_LONG_ABOUT)]
-    Uninstall {
-        /// Package name
-        name: String,
+    /// Manage plugins
+    #[command(long_about = PLUGIN_LONG_ABOUT)]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
     },
 
     /// Set up creft for a coding AI system
@@ -140,5 +123,67 @@ pub enum BuiltinCommand {
         /// Skill name to check (omit for global health check)
         #[arg(trailing_var_arg = true)]
         name: Vec<String>,
+    },
+}
+
+/// Subcommands for `creft plugin`.
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// Install a plugin from a git repo
+    #[command(long_about = PLUGIN_INSTALL_LONG_ABOUT)]
+    Install {
+        /// Plugin source: git URL or path to a local repo
+        source: String,
+        /// Install a specific plugin from a multi-plugin repo
+        #[arg(short = 'p', long)]
+        plugin: Option<String>,
+    },
+
+    /// Update installed plugins
+    #[command(long_about = PLUGIN_UPDATE_LONG_ABOUT)]
+    Update {
+        /// Plugin name (updates all if omitted)
+        name: Option<String>,
+    },
+
+    /// Remove an installed plugin
+    #[command(long_about = PLUGIN_UNINSTALL_LONG_ABOUT)]
+    Uninstall {
+        /// Plugin name
+        name: String,
+    },
+
+    /// Activate a command from an installed plugin
+    #[command(long_about = PLUGIN_ACTIVATE_LONG_ABOUT)]
+    Activate {
+        /// Command to activate: plugin/cmd or plugin (activates all)
+        target: String,
+        /// Activate globally instead of in the nearest .creft/
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
+
+    /// Deactivate a command
+    #[command(long_about = PLUGIN_DEACTIVATE_LONG_ABOUT)]
+    Deactivate {
+        /// Command to deactivate: plugin/cmd or plugin (deactivates all)
+        target: String,
+        /// Deactivate only in the global scope
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
+
+    /// List installed plugins, or commands in a specific plugin
+    #[command(long_about = PLUGIN_LIST_LONG_ABOUT)]
+    List {
+        /// Show commands in this plugin instead of listing all plugins
+        name: Option<String>,
+    },
+
+    /// Search for commands across installed plugins
+    #[command(long_about = PLUGIN_SEARCH_LONG_ABOUT)]
+    Search {
+        /// Search query (matches name, description, tags)
+        query: Vec<String>,
     },
 }

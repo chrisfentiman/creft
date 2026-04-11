@@ -73,8 +73,29 @@ pub enum CreftError {
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
 
-    #[error("manifest not found in repository (expected creft.yaml at repo root)")]
+    #[error(
+        "manifest not found in repository (expected .creft/catalog.json or creft.yaml at repo root)"
+    )]
     ManifestNotFound,
+
+    // These variants are used in later stages (catalog parsing, activation model).
+    // They are defined here now so the error type is complete and callers in later
+    // stages don't need to touch the enum's discriminant layout.
+    #[allow(dead_code)]
+    #[error("catalog parse error in {path}: {detail}")]
+    CatalogParse { path: String, detail: String },
+
+    #[allow(dead_code)]
+    #[error("plugin '{plugin}' not found in catalog {catalog} (available: {available})")]
+    PluginNotInCatalog {
+        catalog: String,
+        plugin: String,
+        available: String,
+    },
+
+    #[allow(dead_code)]
+    #[error("activation not found: plugin '{plugin}' command '{cmd}'")]
+    ActivationNotFound { plugin: String, cmd: String },
 
     #[error("validation failed")]
     ValidationErrors(Vec<crate::validate::ValidationDiagnostic>),
