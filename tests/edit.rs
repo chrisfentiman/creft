@@ -5,6 +5,70 @@ mod helpers;
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
 
+// ── package skill guard tests ─────────────────────────────────────────────────
+//
+// These tests exercise the read-only guards in cmd_edit and cmd_rm that reject
+// mutations against skills from the packages/ directory. The guard code still
+// exists; these tests ensure a future refactor cannot accidentally remove it.
+
+/// `creft edit <pkg> <skill>` against a packages/ skill is rejected with a
+/// "read-only" error. Editing package skills is not supported — the package
+/// must be updated through plugin lifecycle commands.
+#[test]
+fn edit_package_skill_is_rejected_as_read_only() {
+    let creft_home = creft_env();
+    let pkg_dir = creft_home.path().join("packages").join("guard-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+
+    std::fs::write(
+        pkg_dir.join("creft.yaml"),
+        "name: guard-pkg\nversion: 1.0.0\ndescription: guard test package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("do-thing.md"),
+        "---\nname: do-thing\ndescription: does a thing\n---\n\n```bash\necho thing\n```\n",
+    )
+    .unwrap();
+
+    creft_with(&creft_home)
+        .args(["edit", "guard-pkg", "do-thing"])
+        .write_stdin(
+            "---\nname: do-thing\ndescription: mutated\n---\n\n```bash\necho mutated\n```\n",
+        )
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("read-only"));
+}
+
+/// `creft rm <pkg> <skill>` against a packages/ skill is rejected with an
+/// actionable error directing the user to uninstall the whole package instead.
+#[test]
+fn rm_package_skill_is_rejected() {
+    let creft_home = creft_env();
+    let pkg_dir = creft_home.path().join("packages").join("rm-guard-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+
+    std::fs::write(
+        pkg_dir.join("creft.yaml"),
+        "name: rm-guard-pkg\nversion: 1.0.0\ndescription: rm guard test package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("build.md"),
+        "---\nname: build\ndescription: builds the thing\n---\n\n```bash\necho building\n```\n",
+    )
+    .unwrap();
+
+    creft_with(&creft_home)
+        .args(["rm", "rm-guard-pkg", "build"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("cannot remove"));
+}
+
 // ── edit stdin tests ──────────────────────────────────────────────────────────
 
 /// `creft edit <name>` with piped stdin replaces the command content.

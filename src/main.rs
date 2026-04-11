@@ -905,19 +905,23 @@ fn cmd_plugin_list(ctx: &model::AppContext, name: Option<&str>) -> Result<(), Cr
             }
         }
         None => {
-            let entries = std::fs::read_dir(&plugins_dir)?;
-            let mut found = false;
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_dir()
-                    && let Some(name) = entry.file_name().to_str()
-                {
-                    println!("{}", name);
-                    found = true;
-                }
-            }
-            if !found {
+            let mut names: Vec<String> = std::fs::read_dir(&plugins_dir)?
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    if entry.file_type().ok()?.is_dir() {
+                        entry.file_name().into_string().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            if names.is_empty() {
                 eprintln!("no plugins installed");
+            } else {
+                for name in &names {
+                    println!("{}", name);
+                }
             }
         }
     }
