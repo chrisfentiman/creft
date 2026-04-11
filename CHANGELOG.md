@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/chrisfentiman/creft/compare/creft-v0.2.5...creft-v0.2.6) (2026-04-11)
+
+
+### Bug Fixes
+
+* **runner:** sponge-to-sponge cancel and clean Ctrl+C ([8bd18d5](https://github.com/chrisfentiman/creft/commit/8bd18d513cd7a209a6a7e456ff8cf7828945d4a9))
+
 ## [0.2.5](https://github.com/chrisfentiman/creft/compare/creft-v0.2.4...creft-v0.2.5) (2026-04-10)
 
 
