@@ -647,6 +647,109 @@ fn test_pipe_exit_99_sponge_captures_upstream_output() {
     );
 }
 
+/// Exit 99 from an upstream bash block must not spawn either downstream LLM sponge.
+///
+/// Regression guard for the sponge-to-sponge cancel propagation gap: before the
+/// fix, the first sponge had no way to send the exit-99 determination to the
+/// second sponge. The second sponge's `cancel_rx` was `None`, so it fell back to
+/// `ctx.is_cancelled()`, which may not be set before `read_to_end` completes and
+/// the sponge tries to spawn its provider.
+#[test]
+#[cfg(unix)]
+fn test_pipe_exit_99_propagates_through_sponge_chain() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = creft_env();
+    let script_dir = tempfile::TempDir::new().unwrap();
+
+    let sentinel1 = script_dir.path().join("sentinel1.txt");
+    let sentinel2 = script_dir.path().join("sentinel2.txt");
+    let script1_path = script_dir.path().join("mock-provider1.sh");
+    let script2_path = script_dir.path().join("mock-provider2.sh");
+
+    let make_script = |path: &std::path::Path, sentinel: &std::path::Path| {
+        let content = format!("#!/bin/sh\ntouch {}\ncat\n", sentinel.to_string_lossy());
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    };
+    make_script(&script1_path, &sentinel1);
+    make_script(&script2_path, &sentinel2);
+
+    let p1 = script1_path.to_string_lossy();
+    let p2 = script2_path.to_string_lossy();
+
+    // Block 0 (bash): exits 99 immediately.
+    // Block 1 (llm): first sponge — must not spawn mock-provider1.
+    // Block 2 (llm): second sponge — must not spawn mock-provider2.
+    let skill = format!(
+        "---\nname: sponge-chain-exit99\ndescription: exit 99 propagates through sponge chain\n---\n\n\
+```bash\nexit 99\n```\n\n\
+```llm\nprovider: {p1}\n---\n{{{{prev}}}}\n```\n\n\
+```llm\nprovider: {p2}\n---\n{{{{prev}}}}\n```\n"
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill.as_str())
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["sponge-chain-exit99"])
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+
+    assert!(
+        !sentinel1.exists(),
+        "first sponge provider must not have been spawned (sentinel1 found)",
+    );
+    assert!(
+        !sentinel2.exists(),
+        "second sponge provider must not have been spawned (sentinel2 found)",
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "must complete quickly when upstream exits 99 (took {:?})",
+        elapsed
+    );
+}
+
+/// Normal (non-exit-99) sponge chains still work after the cancel propagation fix.
+///
+/// The upstream sponge sends `false` through its downstream cancel channel.
+/// The downstream sponge receives `false`, proceeds, and its output is visible.
+#[test]
+#[cfg(unix)]
+fn test_pipe_sponge_chain_normal_exit_proceeds() {
+    let dir = creft_env();
+
+    // bash → llm(cat, "A:{{prev}}") → llm(cat, "B:{{prev}}")
+    // Both sponges must execute and their output must contain both prefixes.
+    let skill = "---\nname: sponge-chain-normal\ndescription: consecutive sponge normal exit\n---\n\n\
+```bash\necho start\n```\n\n\
+```llm\nprovider: cat\n---\nA:{{prev}}\n```\n\n\
+```llm\nprovider: cat\n---\nB:{{prev}}\n```\n";
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill)
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["sponge-chain-normal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("B:"))
+        .stdout(predicate::str::contains("A:"))
+        .stdout(predicate::str::contains("start"));
+}
+
 /// Three-block chain: bash → bash(exit 99 with output) → LLM sponge.
 ///
 /// Block 1 reads block 0's output, prints "mid-result", exits 99.
@@ -700,6 +803,79 @@ fn test_pipe_exit_99_three_block_sponge_captures() {
     assert!(
         elapsed.as_secs() < 2,
         "must complete quickly (took {:?})",
+        elapsed
+    );
+}
+
+/// A sponge whose own LLM provider exits 99 propagates that cancel to the downstream sponge.
+///
+/// `bash | llm(exits 99) | llm(sentinel)` — the first sponge's child exits 99, so the
+/// origination path at pipe.rs:519-523 sends `true` through `cancel_tx_downstream`. The
+/// downstream sponge must not spawn its provider. This is distinct from the forwarding path
+/// tested by `test_pipe_exit_99_propagates_through_sponge_chain`, which exercises cancel
+/// forwarded from an upstream non-sponge (bash exits 99).
+#[test]
+#[cfg(unix)]
+fn test_pipe_sponge_originated_exit_99_cancels_downstream() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = creft_env();
+    let script_dir = tempfile::TempDir::new().unwrap();
+
+    let exit99_path = script_dir.path().join("provider-exit99.sh");
+    let sentinel = script_dir.path().join("sentinel.txt");
+    let sentinel_provider_path = script_dir.path().join("sentinel-provider.sh");
+
+    // First provider: reads stdin to satisfy the sponge's read_to_end, then exits 99.
+    {
+        let content = "#!/bin/sh\ncat > /dev/null\nexit 99\n";
+        let mut f = std::fs::File::create(&exit99_path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exit99_path, perms).unwrap();
+    }
+
+    // Second provider (sentinel): creates a file when spawned, proving it ran.
+    {
+        let content = format!("#!/bin/sh\ntouch {}\ncat\n", sentinel.to_string_lossy());
+        let mut f = std::fs::File::create(&sentinel_provider_path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&sentinel_provider_path, perms).unwrap();
+    }
+
+    let p1 = exit99_path.to_string_lossy();
+    let p2 = sentinel_provider_path.to_string_lossy();
+
+    let skill = format!(
+        "---\nname: sponge-exit99-originated\ndescription: sponge-originated exit-99 cancels downstream\n---\n\n\
+```bash\necho input\n```\n\n\
+```llm\nprovider: {p1}\n---\n{{{{prev}}}}\n```\n\n\
+```llm\nprovider: {p2}\n---\n{{{{prev}}}}\n```\n"
+    );
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(skill.as_str())
+        .assert()
+        .success();
+
+    let start = std::time::Instant::now();
+    creft_with(&dir)
+        .args(["sponge-exit99-originated"])
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+
+    assert!(
+        !sentinel.exists(),
+        "downstream sponge provider must not have been spawned (sentinel file found)",
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "must complete quickly when upstream sponge exits 99 (took {:?})",
         elapsed
     );
 }

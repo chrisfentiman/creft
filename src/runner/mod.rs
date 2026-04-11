@@ -486,7 +486,18 @@ fn execute_block(
     }
 
     if !output.status.success() {
-        if !output.stderr.is_empty() {
+        // Suppress child stderr when killed by SIGINT: the user pressed Ctrl+C
+        // deliberately and the interpreter's traceback (e.g., Python's
+        // KeyboardInterrupt) is noise, not diagnostics.
+        #[cfg(unix)]
+        let suppress_stderr = {
+            use std::os::unix::process::ExitStatusExt;
+            output.status.signal() == Some(libc::SIGINT)
+        };
+        #[cfg(not(unix))]
+        let suppress_stderr = false;
+
+        if !suppress_stderr && !output.stderr.is_empty() {
             let _ = std::io::stderr().write_all(&output.stderr);
         }
         return Err(make_execution_error(block_idx, &block.lang, &output.status));
