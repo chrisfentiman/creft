@@ -2321,3 +2321,192 @@ fn test_pipe_exit_99_middle_block_no_stdout() {
         String::from_utf8_lossy(&output)
     );
 }
+
+// ── sequential SIGINT stderr suppression ──────────────────────────────────────
+
+/// When SIGINT is sent to creft while running a sequential Python block, creft
+/// must not dump the interpreter's KeyboardInterrupt traceback to stderr.
+///
+/// This validates that `execute_block` suppresses child stderr when the child
+/// was killed by signal 2 (SIGINT), regardless of what the interpreter printed.
+#[test]
+#[cfg(unix)]
+fn test_sequential_sigint_suppresses_python_traceback() {
+    if !helpers::tool_available("python3") {
+        eprintln!(
+            "skipping test_sequential_sigint_suppresses_python_traceback: python3 not on PATH"
+        );
+        return;
+    }
+
+    let dir = creft_env();
+
+    add_skill_to_dir(
+        &dir,
+        concat!(
+            "---\n",
+            "name: seq-sigint-python\n",
+            "description: sequential Python SIGINT traceback suppression\n",
+            "---\n",
+            "\n",
+            "```python3\n",
+            "import time\n",
+            "time.sleep(10)\n",
+            "```\n",
+        ),
+    );
+
+    // Spawn creft in its own process group (process_group(0)) so the SIGINT we
+    // deliver to that group reaches creft and its sequential child without
+    // propagating to the nextest process group.
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("creft"));
+    cmd.env("CREFT_HOME", dir.path())
+        .env_remove("CREFT_PROJECT_ROOT")
+        .args(["seq-sigint-python"])
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().expect("failed to spawn creft");
+
+    // Python needs slightly longer to start than bash.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Send SIGINT to creft's isolated process group. The child (python) inherits
+    // the group and also receives the signal, producing a KeyboardInterrupt that
+    // creft must suppress.
+    //
+    // SAFETY: kill(-pgid, SIGINT) is a standard POSIX call. child.id() is
+    // creft's PID and also the process group ID (set via process_group(0)).
+    // child.id() is valid for the duration of this scope.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGINT);
+    }
+
+    let output = child.wait_with_output().expect("failed to wait for creft");
+
+    let code = output.status.code().unwrap_or_else(|| {
+        use std::os::unix::process::ExitStatusExt;
+        128 + output.status.signal().unwrap_or(2)
+    });
+    assert_eq!(
+        code, 130,
+        "creft should exit with code 130 after SIGINT, got {code}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Traceback"),
+        "creft stderr must not contain 'Traceback' after sequential SIGINT; got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("KeyboardInterrupt"),
+        "creft stderr must not contain 'KeyboardInterrupt' after sequential SIGINT; got: {stderr:?}"
+    );
+}
+
+/// When SIGINT is sent to creft while running a sequential bash block, creft
+/// must produce no error output on stderr.
+#[test]
+#[cfg(unix)]
+fn test_sequential_sigint_suppresses_bash_stderr() {
+    let dir = creft_env();
+
+    add_skill_to_dir(
+        &dir,
+        concat!(
+            "---\n",
+            "name: seq-sigint-bash\n",
+            "description: sequential bash SIGINT stderr suppression\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "sleep 10\n",
+            "```\n",
+        ),
+    );
+
+    // Spawn creft in its own process group so SIGINT targets only this group
+    // and does not propagate to the nextest runner.
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("creft"));
+    cmd.env("CREFT_HOME", dir.path())
+        .env_remove("CREFT_PROJECT_ROOT")
+        .args(["seq-sigint-bash"])
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().expect("failed to spawn creft");
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Send SIGINT to creft's isolated process group. The bash child inherits
+    // the group and also receives the signal.
+    //
+    // SAFETY: kill(-pgid, SIGINT) is a standard POSIX call. child.id() is
+    // creft's PID and also the process group ID (set via process_group(0)).
+    // child.id() is valid for the duration of this scope.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGINT);
+    }
+
+    let output = child.wait_with_output().expect("failed to wait for creft");
+
+    let code = output.status.code().unwrap_or_else(|| {
+        use std::os::unix::process::ExitStatusExt;
+        128 + output.status.signal().unwrap_or(2)
+    });
+    assert_eq!(
+        code, 130,
+        "creft should exit with code 130 after SIGINT, got {code}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "creft stderr must be empty after sequential bash SIGINT; got: {stderr:?}"
+    );
+}
+
+/// When a sequential Python block exits with a non-zero code (not signal-killed),
+/// its stderr is still written to the terminal — only SIGINT-killed stderr is
+/// suppressed.
+#[test]
+#[cfg(unix)]
+fn test_sequential_normal_failure_stderr_preserved() {
+    if !helpers::tool_available("python3") {
+        eprintln!("skipping test_sequential_normal_failure_stderr_preserved: python3 not on PATH");
+        return;
+    }
+
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: seq-fail-stderr\n",
+            "description: sequential failure preserves stderr\n",
+            "---\n",
+            "\n",
+            "```python3\n",
+            "import sys\n",
+            "print('diagnostic error', file=sys.stderr)\n",
+            "sys.exit(1)\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["seq-fail-stderr"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("diagnostic error"));
+}
