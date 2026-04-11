@@ -205,8 +205,7 @@ pub(super) struct SpongeChannels {
 /// Returns `true` if the sponge should cancel (upstream exit 99 or SIGINT
 /// already fired). Returns `false` if the sponge should proceed.
 ///
-/// When `cancel_rx` is `None` (block 0 or upstream is a sponge), falls back
-/// to the shared cancel flag only.
+/// When `cancel_rx` is `None` (block 0), falls back to the shared cancel flag only.
 #[cfg(unix)]
 fn should_cancel_sponge(
     ctx: &RunContext,
@@ -1062,9 +1061,9 @@ pub(super) fn run_pipe_chain(
             };
             let pgid_tx = pgid_channel.as_ref().map(|(tx, _)| tx.clone());
 
-            // Retrieve the cancel receiver placed here by the upstream non-sponge
-            // block's spawn logic. None when block 0 is a sponge (no upstream
-            // reaper) or when the upstream is itself a sponge.
+            // Retrieve the cancel receiver placed here by the upstream block's spawn
+            // logic (reaper for non-sponge, or upstream sponge for sponge-to-sponge).
+            // None when block 0 is a sponge (no upstream).
             let cancel_rx = sponge_cancel_rxs.remove(&i);
 
             // When the next block is also a sponge, create a direct cancel channel
