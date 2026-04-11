@@ -160,7 +160,7 @@ fn deactivate_not_activated_fails() {
         .args(["plugin", "deactivate", "my-tools"])
         .assert()
         .failure()
-        .code(1);
+        .code(2);
 }
 
 // ── scope: global vs local activation ─────────────────────────────────────────

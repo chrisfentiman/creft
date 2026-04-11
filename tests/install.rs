@@ -609,7 +609,7 @@ fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
         ])
         .assert()
         .failure()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("not found in catalog"));
 }
 

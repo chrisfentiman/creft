@@ -8,12 +8,12 @@ use crate::error::CreftError;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Catalog {
     /// Catalog identifier (kebab-case).
-    #[allow(dead_code)] // used in Stage 5 search/display
+    #[allow(dead_code)] // read by search and plugin list commands
     pub name: String,
 
     /// Human-readable description of this catalog.
     #[serde(default)]
-    #[allow(dead_code)] // used in Stage 5 search/display
+    #[allow(dead_code)] // read by search and plugin list commands
     pub description: String,
 
     /// Available plugins.
@@ -53,16 +53,16 @@ pub enum PluginSource {
     Path(String),
 
     /// Structured source with an explicit type field.
-    #[allow(dead_code)] // consumed in Stage 5 when installing typed-source plugins
+    #[allow(dead_code)] // consumed when installing plugins from typed (non-path) sources
     Typed(TypedSource),
 }
 
 /// Explicit source type for plugins not co-located with the catalog.
 ///
-/// Used in Stage 5 (search/discovery) for non-path plugin sources.
+/// Used for non-path plugin sources such as GitHub repositories or arbitrary git URLs.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code)] // fields consumed in Stage 5 install-from-typed-source
+#[allow(dead_code)] // consumed when installing plugins from typed (non-path) sources
 pub enum TypedSource {
     /// GitHub repository.
     #[serde(rename = "github")]

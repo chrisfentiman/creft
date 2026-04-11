@@ -111,7 +111,10 @@ impl CreftError {
     /// `ExecutionSignaled`, and 1 for everything else.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::CommandNotFound(_) | Self::PackageNotFound(_) => 2,
+            Self::CommandNotFound(_)
+            | Self::PackageNotFound(_)
+            | Self::ActivationNotFound { .. }
+            | Self::PluginNotInCatalog { .. } => 2,
             Self::MissingArg(_) | Self::MissingEnvVar(_) | Self::ValidationFailed { .. } => 3,
             Self::ExecutionFailed { code, .. } => *code,
             Self::ExecutionSignaled { signal, .. } => 128 + signal,
