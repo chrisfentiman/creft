@@ -98,7 +98,7 @@ if show_list:
             pass
     if not _projects:
         print("no projects registered")
-        print("register one with: creft ask add <name> /path/to/project")
+        print("register projects in ~/.creft/projects.json")
     else:
         print(f"{len(_projects)} project(s):\n")
         for _name, _entry in sorted(_projects.items()):
