@@ -1255,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_commands_skips_readme() {
+    fn test_collect_commands_skips_readme() {
         let dir = tempfile::TempDir::new().unwrap();
         let ctx = AppContext::for_test_with_creft_home(
             dir.path().to_path_buf(),
