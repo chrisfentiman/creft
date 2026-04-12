@@ -514,6 +514,22 @@ fn execute_block(
     Ok(stdout)
 }
 
+/// Convert bound pairs from `parse_and_bind` into environment variable pairs.
+///
+/// Names are uppercased and hyphens are replaced with underscores so that
+/// shell-invalid identifiers like `always-confirm` become valid env var names
+/// (`ALWAYS_CONFIRM`). The original names in `bound` are left unchanged for
+/// template substitution; only the env var keys are transformed here.
+fn bound_pairs_to_env(pairs: &[(String, String)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(name, val)| {
+            let env_name = name.replace('-', "_").to_uppercase();
+            (env_name, val.clone())
+        })
+        .collect()
+}
+
 /// Core execution logic. Uses `RunContext` for all execution configuration.
 fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Result<(), CreftError> {
     if cmd.blocks.is_empty() {
@@ -528,10 +544,23 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
+    // Inject bound args and flags as environment variables into every child
+    // process. Names are normalized (uppercase, hyphens → underscores) so
+    // shell authors can write $FORMAT instead of only {{format}}.
+    let mut extended_env = ctx.env().to_vec();
+    extended_env.extend(bound_pairs_to_env(&bound));
+    let ctx = RunContext::new(
+        ctx.cancel_arc(),
+        ctx.cwd().to_path_buf(),
+        extended_env,
+        ctx.is_verbose(),
+        ctx.is_dry_run(),
+    );
+
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
         {
-            return pipe::run_pipe_chain(cmd, &bound_refs, ctx);
+            return pipe::run_pipe_chain(cmd, &bound_refs, &ctx);
         }
         #[cfg(not(unix))]
         {
@@ -543,7 +572,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
                         .into(),
                 ));
             }
-            return pipe::run_pipe_chain(cmd, &bound_refs, ctx);
+            return pipe::run_pipe_chain(cmd, &bound_refs, &ctx);
         }
     }
 
@@ -558,7 +587,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         None
     };
 
-    match execute_block(block, &expanded, 0, ctx, stdin_data) {
+    match execute_block(block, &expanded, 0, &ctx, stdin_data) {
         Ok(_) => Ok(()),
         Err(CreftError::EarlyExit) => Ok(()),
         Err(e) => Err(e),
@@ -1765,5 +1794,56 @@ mod tests {
             "non-zero exit code should produce ExecutionFailed, got: {:?}",
             err
         );
+    }
+
+    // ---- bound_pairs_to_env ----
+
+    #[test]
+    fn bound_pairs_to_env_empty_input_produces_empty_output() {
+        let result = bound_pairs_to_env(&[]);
+        assert_eq!(result, Vec::<(String, String)>::new());
+    }
+
+    #[rstest]
+    #[case::lowercase("format", "json", "FORMAT", "json")]
+    #[case::hyphenated("always-confirm", "true", "ALWAYS_CONFIRM", "true")]
+    #[case::multi_hyphen("output-file-path", "out.txt", "OUTPUT_FILE_PATH", "out.txt")]
+    #[case::already_upper("TARGET", "prod", "TARGET", "prod")]
+    #[case::mixed_case("myFlag", "val", "MYFLAG", "val")]
+    #[case::underscore_unchanged("my_flag", "1", "MY_FLAG", "1")]
+    fn bound_pairs_to_env_name_normalization(
+        #[case] input_name: &str,
+        #[case] input_val: &str,
+        #[case] expected_name: &str,
+        #[case] expected_val: &str,
+    ) {
+        let pairs = vec![(input_name.to_string(), input_val.to_string())];
+        let result = bound_pairs_to_env(&pairs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            (expected_name.to_string(), expected_val.to_string())
+        );
+    }
+
+    #[test]
+    fn bound_pairs_to_env_preserves_order_and_count() {
+        let pairs = vec![
+            ("alpha".to_string(), "1".to_string()),
+            ("beta-flag".to_string(), "2".to_string()),
+            ("gamma".to_string(), "3".to_string()),
+        ];
+        let result = bound_pairs_to_env(&pairs);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], ("ALPHA".to_string(), "1".to_string()));
+        assert_eq!(result[1], ("BETA_FLAG".to_string(), "2".to_string()));
+        assert_eq!(result[2], ("GAMMA".to_string(), "3".to_string()));
+    }
+
+    #[test]
+    fn bound_pairs_to_env_empty_value_preserved() {
+        let pairs = vec![("format".to_string(), String::new())];
+        let result = bound_pairs_to_env(&pairs);
+        assert_eq!(result, vec![("FORMAT".to_string(), String::new())]);
     }
 }

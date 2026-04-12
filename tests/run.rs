@@ -2550,3 +2550,165 @@ fn test_sequential_sigterm_preserves_stderr() {
         .failure()
         .stderr(predicate::str::contains("sigterm-sentinel"));
 }
+
+// ── env var injection tests ───────────────────────────────────────────────────
+
+/// A flag is accessible as an environment variable ($FORMAT) in bash blocks.
+#[test]
+fn test_flag_injected_as_env_var() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-format\n",
+            "description: echo the format flag\n",
+            "flags:\n",
+            "  - name: format\n",
+            "    description: output format\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$FORMAT\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-format", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("json"));
+}
+
+/// A positional arg is accessible as an environment variable ($TARGET) in bash blocks.
+#[test]
+fn test_arg_injected_as_env_var() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-target\n",
+            "description: echo the target arg\n",
+            "args:\n",
+            "  - name: target\n",
+            "    description: deployment target\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$TARGET\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-target", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("production"));
+}
+
+/// A hyphenated flag name is accessible as an env var with underscores ($ALWAYS_CONFIRM).
+#[test]
+fn test_hyphenated_flag_injected_with_underscores() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-confirm\n",
+            "description: echo the always-confirm flag\n",
+            "flags:\n",
+            "  - name: always-confirm\n",
+            "    description: skip confirmation prompts\n",
+            "    type: bool\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$ALWAYS_CONFIRM\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-confirm", "--always-confirm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("true"));
+}
+
+/// Template substitution ({{format}}) and env var access ($FORMAT) both work in the same block.
+#[test]
+fn test_template_and_env_var_both_resolve() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: dual-access\n",
+            "description: access flag via template and env var\n",
+            "flags:\n",
+            "  - name: format\n",
+            "    description: output format\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"template={{format}} env=$FORMAT\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["dual-access", "--format", "yaml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("template=yaml env=yaml"));
+}
+
+/// In a multi-block pipe chain, all blocks see the injected env vars.
+#[test]
+fn test_pipe_chain_blocks_see_env_vars() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-env-check\n",
+            "description: verify env vars reach all pipe blocks\n",
+            "flags:\n",
+            "  - name: tag\n",
+            "    description: a tag value\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"block1:$TAG\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat -\n",
+            "echo \"block2:$TAG\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["pipe-env-check", "--tag", "v1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("block1:v1"))
+        .stdout(predicate::str::contains("block2:v1"));
+}
