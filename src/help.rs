@@ -1,26 +1,32 @@
 /// One-line tagline shown in the root help header.
-pub const ROOT_ABOUT: &str = "Executable skills for Agents";
+pub const ROOT_ABOUT: &str = "Executable skills for AI agents";
 
 /// Extended description shown by `creft --help`, including usage examples and storage overview.
 pub const ROOT_LONG_ABOUT: &str = "\
-Executable skills for Agents
+creft — Executable skills for AI agents
 
-Saves reusable commands as markdown and runs them as subcommands.
-Skills are .md files with YAML frontmatter and fenced code blocks.
+Save agent workflows as markdown. Run them as CLI commands.
 
+Run:
+  creft <name> [args] [--flags]
+
+Discover:
+  creft cmd list                 list available skills
+  creft <name> --help            show a skill's args and description
+
+Create:
   creft cmd add <<'EOF'          save a skill from stdin
-  creft hello World              run a skill directly
-  creft hello World --verbose    show rendered blocks, then run
-  creft hello World --dry-run    show rendered blocks, do not run
-  creft cmd list                 see available skills
-  creft cmd add --help           learn how to create skills
+  creft cmd add --help           full format reference
 
-Skills are stored in .creft/ (project-local) or ~/.creft/ (global).
-Local skills shadow global ones with the same name.
+Setup:
+  creft plugins                  manage skill collections
+  creft up                       install for your coding AI
+  creft init                     create local .creft/ for this project
+  creft doctor                   check environment and skill health
 
-Global Flags (available on every skill):
-  --dry-run       Show rendered template blocks, do not execute
-  --verbose, -v   Show rendered template blocks on stderr, then execute";
+Global Flags:
+  --dry-run       show rendered blocks, do not execute
+  --verbose, -v   show rendered blocks on stderr, then execute";
 
 /// Extended description shown by `creft cmd --help`, listing skill management subcommands.
 pub const CMD_LONG_ABOUT: &str = "\
@@ -53,7 +59,6 @@ you want to reuse. Pipe the skill definition as markdown to stdin.
 
 Examples:
   creft cmd add <<'EOF'                          Save from stdin (recommended)
-  creft cmd add --name hello --description \"...\" Create from flags (quick one-liners)
   creft cmd add --force <<'EOF'                  Overwrite existing skill
   creft cmd add --no-validate <<'EOF'            Skip validation only
 
@@ -74,17 +79,52 @@ Skill Definition Format:
     echo \"Hello, {{who}}!\"
     ```
 
+  Full example (all frontmatter fields):
+    ---
+    name: gh issue-summary
+    description: Summarizes open issues for a GitHub repo.
+    args:
+      - name: repo
+        description: GitHub repository (owner/name)
+        required: true
+      - name: branch
+        description: Target branch
+        default: main
+    flags:
+      - name: format
+        short: f
+        type: string
+        default: json
+        description: Output format
+        validation: \"^(json|yaml|text)$\"
+      - name: verbose
+        short: v
+        type: bool
+        description: Show detailed output
+    env:
+      - name: GITHUB_TOKEN
+        required: true
+      - name: GH_API_URL
+        required: false
+    tags: [git, api]
+    ---
+
 Frontmatter Fields:
   name          Required. Spaces create namespaces: 'gh issue-body' -> 'creft gh issue-body'
   description   Required. One line: what it does and when to use it
   args          Positional arguments. Each has: name, description, default, required, validation
-  flags         Named --flags. Each has: name, short, type (bool/string), default, validation
+  flags         Named --flags. Each has: name, short, type (bool/string), default, description, validation
   env           Environment variables. Each has: name, required (default true)
   tags          List of tags for filtering with 'creft cmd list --tag'
 
+  Arg/flag validation values are regex strings matched against the input.
+
 Code Blocks:
   Each fenced block is an executable step. Language tag sets the interpreter.
-  Blocks run in order; if one fails, execution stops.
+  Blocks connect as a pipeline: each block's stdout feeds the next block's
+  stdin. All blocks in the pipeline run concurrently (like Unix pipes).
+  If any block fails, the pipeline stops and its exit code propagates.
+  Single-block skills run standalone (no pipeline).
 
   Exit codes:
     0     Success, continue to the next block
@@ -95,8 +135,8 @@ Code Blocks:
   Interpreters: bash, python, node, zsh, ruby, docs (not executed -- shown in --help)
 
   LLM Blocks:
-    Use ```llm to send prompts to AI CLI tools. Add a YAML header before
-    --- to configure the provider:
+    Use ```llm to send prompts to AI providers as pipeline steps. Add a YAML
+    header before --- to configure the provider:
 
       ```llm
       provider: claude
@@ -109,8 +149,9 @@ Code Blocks:
     Providers: claude (default), gemini, codex, ollama, or any CLI tool name.
     The provider handles authentication (API keys, config files).
     Template placeholders ({{name}}) work in the prompt body.
-    LLM blocks buffer all upstream input before sending to the provider (sponge pattern).
-    Use {{prev}} in the LLM prompt to reference the buffered input.
+    LLM blocks buffer all upstream input before sending to the provider
+    (sponge pattern — all stdin is collected before the prompt is sent).
+    Use {{prev}} in the prompt to reference the buffered input.
     On non-Unix systems, multi-block skills with LLM blocks are not supported.
 
   Dependencies (first line comment):
@@ -121,10 +162,8 @@ Code Blocks:
 Template Placeholders:
   {{name}}            Positional arg or flag value
   {{name|default}}    Value with fallback
-
-Output Chaining:
-  Multi-block skills pipe stdout of each block as stdin to the next block.
-  Single-block skills run standalone.
+  {{prev}}            Buffered output from previous block (LLM blocks only —
+                      other blocks receive previous output via stdin)
 
 Storage:
   Skills save to nearest .creft/ directory, or ~/.creft/ if none exists.
@@ -365,6 +404,17 @@ Subcommands:
 
 Examples:
   creft settings show
-  creft settings set key value
+  creft settings set shell zsh
+  creft settings set shell none    Disable shell preference
+
+Known settings:
+  shell   Preferred shell for block execution (bash, zsh, sh, or 'none').
+          Applies to shell-family blocks only (bash, sh, zsh are interchangeable).
+
+Shell preference resolution order:
+  1. CREFT_SHELL env var (highest priority)
+  2. creft settings set shell <name>
+  3. $SHELL env var
+  4. block language tag (no substitution)
 
 Bare 'creft settings' with no subcommand runs 'creft settings show'.";
