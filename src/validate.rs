@@ -185,6 +185,26 @@ fn check_placeholders(
             }
         }
     }
+
+    // In shell blocks, flags with hyphenated names cannot be used as bare bash
+    // variables ($always-confirm is a subtraction expression). Inform the author
+    // of the normalized env var name injected by the runner.
+    if doctor::is_shell_lang(&block.lang) {
+        for flag in &def.flags {
+            if flag.name.contains('-') {
+                let env_name = flag.name.replace('-', "_").to_uppercase();
+                warnings.push(ValidationDiagnostic {
+                    block_index: Some(block_index),
+                    lang: Some(block.lang.clone()),
+                    message: format!(
+                        "flag '{}' is available as environment variable {} in shell blocks",
+                        flag.name, env_name
+                    ),
+                    line: None,
+                });
+            }
+        }
+    }
 }
 
 /// Validate an `llm` code block.
@@ -1195,6 +1215,116 @@ mod tests {
         assert!(
             result.errors.is_empty(),
             "typescript should not be validated (too heavy)"
+        );
+    }
+
+    // ── Hyphenated flag env var diagnostics ──────────────────────────────────
+
+    /// Returns warnings whose message contains "environment variable" — the
+    /// marker for the hyphenated-flag hint emitted by check_placeholders.
+    fn env_var_hints(result: &ValidationResult) -> Vec<&ValidationDiagnostic> {
+        result
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("environment variable"))
+            .collect()
+    }
+
+    #[test]
+    fn hyphenated_flag_in_bash_block_emits_env_var_warning() {
+        let def = make_def(vec![], vec!["always-confirm"]);
+        let block = make_block("bash", "echo hello\n");
+        let result = validate_skill(&def, &[block], None);
+        assert!(
+            result.errors.is_empty(),
+            "hyphenated flag in bash block should not produce errors"
+        );
+        let hints = env_var_hints(&result);
+        assert_eq!(hints.len(), 1, "expected exactly one env var hint warning");
+        assert!(
+            hints[0].message.contains("always-confirm"),
+            "warning should name the flag"
+        );
+        assert!(
+            hints[0].message.contains("ALWAYS_CONFIRM"),
+            "warning should show the normalized env var name"
+        );
+    }
+
+    #[test]
+    fn hyphenated_flag_in_non_shell_block_emits_no_diagnostic() {
+        // Python authors use os.environ directly; no need to guide them toward
+        // the normalized name since the subtraction-expression trap doesn't apply.
+        let def = make_def(vec![], vec!["always-confirm"]);
+        let block = make_block("python", "print('hello')\n");
+        let result = validate_skill(&def, &[block], None);
+        assert!(
+            result.errors.is_empty(),
+            "hyphenated flag in python block should not produce errors"
+        );
+        assert!(
+            env_var_hints(&result).is_empty(),
+            "hyphenated flag in python block should not produce env var hints"
+        );
+    }
+
+    #[test]
+    fn non_hyphenated_flag_in_bash_block_emits_no_env_var_warning() {
+        let def = make_def(vec![], vec!["format"]);
+        let block = make_block("bash", "echo hello\n");
+        let result = validate_skill(&def, &[block], None);
+        assert!(result.errors.is_empty());
+        assert!(
+            env_var_hints(&result).is_empty(),
+            "non-hyphenated flag should not emit the env var diagnostic"
+        );
+    }
+
+    #[test]
+    fn multiple_hyphenated_flags_each_emit_a_warning() {
+        let def = make_def(vec![], vec!["output-format", "dry-run"]);
+        let block = make_block("bash", "echo hello\n");
+        let result = validate_skill(&def, &[block], None);
+        assert!(result.errors.is_empty());
+        let hints = env_var_hints(&result);
+        assert_eq!(
+            hints.len(),
+            2,
+            "each hyphenated flag should produce one env var hint"
+        );
+        let messages: Vec<&str> = hints.iter().map(|w| w.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("output-format") && m.contains("OUTPUT_FORMAT"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("dry-run") && m.contains("DRY_RUN"))
+        );
+    }
+
+    #[test]
+    fn hyphenated_flag_with_template_usage_passes_bash_syntax() {
+        // {{always-confirm}} is valid after sanitize_placeholders replaces it with
+        // __CREFT_PH__. The warning about the env var name should still be emitted.
+        if crate::doctor::which_path("bash").is_none() {
+            return;
+        }
+        let def = make_def(vec![], vec!["always-confirm"]);
+        let block = make_block("bash", "echo {{always-confirm}}\n");
+        let result = validate_skill(&def, &[block], None);
+        assert!(
+            result.errors.is_empty(),
+            "{{always-confirm}} in bash should not produce a syntax error; errors: {:?}",
+            result.errors
+        );
+        assert!(
+            env_var_hints(&result)
+                .iter()
+                .any(|w| w.message.contains("ALWAYS_CONFIRM")),
+            "expected env var hint warning"
         );
     }
 
