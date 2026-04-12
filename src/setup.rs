@@ -98,8 +98,14 @@ pub fn detect_systems(dir: &Path) -> Vec<System> {
     found
 }
 
+/// Version marker embedded in installed instruction files. Used to detect whether
+/// the installed instructions match the running binary, so stale copies can be
+/// refreshed automatically.
+const VERSION_MARKER: &str = concat!("<!-- creft:", env!("CARGO_PKG_VERSION"), " -->");
+
 /// The creft instruction content — teaches the LLM about creft.
-const CREFT_INSTRUCTIONS: &str = "\
+const CREFT_INSTRUCTIONS: &str = concat!(
+    "\
 # creft -- Executable Skills for AI Agents
 
 creft is a skill system that saves reusable commands as markdown files and
@@ -158,8 +164,10 @@ Run `creft cmd add --help` for the complete format reference.
   Global:  ~/.creft/ (available everywhere)
 
 Local skills shadow global ones with the same name.
-<!-- creft:v2 -->
-";
+",
+    concat!("<!-- creft:", env!("CARGO_PKG_VERSION"), " -->"),
+    "\n"
+);
 
 /// Write creft instructions for `system` into `project_dir` (or the user's home
 /// when `global` is true). Skips if the current version marker is already present;
@@ -193,7 +201,7 @@ pub fn install(
     if path.exists() {
         let existing = std::fs::read_to_string(&path)?;
 
-        if existing.contains("<!-- creft:v2 -->") {
+        if existing.contains(VERSION_MARKER) {
             eprintln!(
                 "  skipped: {} (creft instructions are current)",
                 path.display()
@@ -539,7 +547,7 @@ mod tests {
         assert_eq!(path, dir.path().join("GEMINI.md"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# creft"));
-        assert!(content.contains("<!-- creft:v2 -->"));
+        assert!(content.contains(VERSION_MARKER));
         assert!(content.contains("creft cmd list"));
     }
 
@@ -598,9 +606,14 @@ mod tests {
     #[test]
     fn test_install_skip_current_version() {
         let dir = TempDir::new().unwrap();
-        // Pre-write a file that already contains the current (v2) version marker.
+        // Pre-write a file that already contains the current version marker.
         let path = dir.path().join("GEMINI.md");
-        std::fs::write(&path, "# creft\nsome content\n<!-- creft:v2 -->\n").unwrap();
+        let current_marker = VERSION_MARKER;
+        std::fs::write(
+            &path,
+            format!("# creft\nsome content\n{current_marker}\n"),
+        )
+        .unwrap();
         let original_content = std::fs::read_to_string(&path).unwrap();
         let ctx = ctx_no_home(dir.path());
 
@@ -625,7 +638,7 @@ mod tests {
 
         let after_content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            after_content.contains("<!-- creft:v2 -->"),
+            after_content.contains(VERSION_MARKER),
             "stale instructions should be updated to include current version marker"
         );
         assert!(
@@ -635,27 +648,31 @@ mod tests {
     }
 
     #[test]
-    fn test_install_upgrades_v1_to_v2() {
+    fn test_install_upgrades_old_marker_to_current() {
         let dir = TempDir::new().unwrap();
-        // Pre-write a file with v1 instructions — these are now stale and must be replaced.
+        // Pre-write a file with an older version marker — these are stale and must be replaced.
         let path = dir.path().join("GEMINI.md");
-        std::fs::write(&path, "# creft\ncreft list\ncreft add\n<!-- creft:v1 -->\n").unwrap();
+        std::fs::write(
+            &path,
+            "# creft\ncreft list\ncreft add\n<!-- creft:0.1.0 -->\n",
+        )
+        .unwrap();
         let ctx = ctx_no_home(dir.path());
 
         install(&ctx, System::Gemini, dir.path(), false).unwrap();
 
         let after_content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            after_content.contains("<!-- creft:v2 -->"),
-            "v1 marker should be upgraded to v2"
+            after_content.contains(VERSION_MARKER),
+            "old marker should be upgraded to current version marker"
         );
         assert!(
-            !after_content.contains("<!-- creft:v1 -->"),
-            "v1 marker should not remain after upgrade"
+            !after_content.contains("<!-- creft:0.1.0 -->"),
+            "old marker should not remain after upgrade"
         );
         assert!(
             after_content.contains("creft cmd list"),
-            "updated content should use v0.3.0 command paths"
+            "updated content should use current command paths"
         );
     }
 
@@ -664,7 +681,7 @@ mod tests {
     #[test]
     fn test_replace_creft_section_replaces_content() {
         let existing = "# Other Section\nother content\n\n# creft\nold creft stuff\n";
-        let new_content = "# creft\nnew creft content\n<!-- creft:v2 -->\n";
+        let new_content = &format!("# creft\nnew creft content\n{VERSION_MARKER}\n");
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("# Other Section"));
         assert!(result.contains("other content"));
@@ -685,7 +702,7 @@ mod tests {
     #[test]
     fn test_replace_creft_section_preserves_content_after() {
         let existing = "# creft\nold stuff\n\n# After Section\nafter content\n";
-        let new_content = "# creft\nnew creft\n<!-- creft:v2 -->\n";
+        let new_content = &format!("# creft\nnew creft\n{VERSION_MARKER}\n");
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("new creft"));
         assert!(!result.contains("old stuff"));
@@ -790,7 +807,7 @@ mod tests {
         install(&ctx, System::Aider, dir.path(), false).unwrap();
 
         let content = std::fs::read_to_string(&conventions_path).unwrap();
-        assert!(content.contains("<!-- creft:v2 -->"));
+        assert!(content.contains(VERSION_MARKER));
         assert!(!content.contains("old instructions"));
         // Other section should be preserved
         assert!(content.contains("# Other section"));
@@ -899,7 +916,7 @@ mod tests {
     fn test_replace_creft_section_case_insensitive() {
         // "# CREFT" should match as a creft heading
         let existing = "# CREFT\nold stuff\n";
-        let new_content = "# creft\nnew stuff\n<!-- creft:v2 -->\n";
+        let new_content = &format!("# creft\nnew stuff\n{VERSION_MARKER}\n");
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("new stuff"));
         assert!(!result.contains("old stuff"));
