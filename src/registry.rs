@@ -264,6 +264,10 @@ fn collect_package_skills(
             continue;
         }
 
+        if file_name.eq_ignore_ascii_case("README.md") {
+            continue;
+        }
+
         let rel = path
             .strip_prefix(pkg_root)
             .expect("path must be under pkg_root");
@@ -788,6 +792,10 @@ fn collect_plugin_skills_unprefixed(
         }
 
         if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+
+        if file_name.eq_ignore_ascii_case("README.md") {
             continue;
         }
 
@@ -1643,6 +1651,42 @@ mod tests {
     }
 
     #[test]
+    fn test_list_package_skills_excludes_readme() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let pkg_dir = dir.path().join("packages").join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        // Real skill
+        std::fs::write(
+            pkg_dir.join("skill.md"),
+            "---\nname: skill\ndescription: a skill\n---\n\n```bash\necho ok\n```\n",
+        )
+        .unwrap();
+
+        // README.md must not appear as a skill.
+        std::fs::write(
+            pkg_dir.join("README.md"),
+            "# mypkg\n\nInstallation instructions.\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let skills = list_package_skills_in(&ctx, "mypkg", Scope::Global).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            skills.len(),
+            1,
+            "README.md must not appear as a skill, got: {:?}",
+            names
+        );
+        assert_eq!(names[0], "mypkg skill");
+    }
+
+    #[test]
     fn test_list_package_skills_nesting_cap() {
         let dir = tempfile::TempDir::new().unwrap();
 
@@ -1960,6 +2004,41 @@ mod tests {
             names
         );
         assert_eq!(names[0], "mypkg real");
+    }
+
+    #[test]
+    fn test_list_plugin_skills_excludes_readme() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        let plugin_dir = dir.path().join("plugins").join("myplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("myplugin.md"),
+            "---\nname: myplugin\ndescription: a plugin skill\n---\n\n```bash\necho ok\n```\n",
+        )
+        .unwrap();
+
+        // README.md must not appear as a plugin skill.
+        std::fs::write(
+            plugin_dir.join("README.md"),
+            "# myplugin\n\nUsage instructions.\n",
+        )
+        .unwrap();
+
+        let skills = list_plugin_skills_in(&ctx, "myplugin").unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            skills.len(),
+            1,
+            "README.md must not appear as a plugin skill, got: {:?}",
+            names
+        );
+        assert_eq!(names[0], "myplugin");
     }
 
     // --- packages_dir_for ---
