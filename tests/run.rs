@@ -14,7 +14,7 @@ fn test_run_simple_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: greet\ndescription: say hello\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
@@ -32,7 +32,7 @@ fn test_run_with_args() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: greet\ndescription: greet someone\nargs:\n  - name: who\n    description: name to greet\n---\n\n```bash\necho \"Hello, {{who}}!\"\n```\n",
         )
@@ -67,7 +67,7 @@ fn test_help_on_user_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: greet\ndescription: greet someone\nargs:\n  - name: who\n    description: name to greet\n---\n\n```bash\necho \"Hello, {{who}}!\"\n```\n",
         )
@@ -91,7 +91,7 @@ fn test_namespaced_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: gh issue-body\ndescription: fetch issue body\n---\n\n```bash\necho issue-output\n```\n",
         )
@@ -114,7 +114,7 @@ fn test_four_token_command_routes_over_three_token_match() {
 
     // Register the 3-token command first.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hooks guard refs\n",
@@ -130,7 +130,7 @@ fn test_four_token_command_routes_over_three_token_match() {
 
     // Register the 4-token command.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hooks guard refs config\n",
@@ -158,7 +158,7 @@ fn test_three_token_command_still_resolves_when_four_token_sibling_exists() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hooks guard refs\n",
@@ -173,7 +173,7 @@ fn test_three_token_command_still_resolves_when_four_token_sibling_exists() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hooks guard refs config\n",
@@ -207,7 +207,7 @@ fn test_optional_arg_with_template_default_omitted() {
     let markdown = "---\nname: opt-count\ndescription: counts things\nargs:\n  - name: count\n    description: how many\n    required: false\n---\n\n```bash\necho \"count={{count|5}}\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -229,7 +229,7 @@ fn test_optional_arg_with_template_default_provided() {
     let markdown = "---\nname: opt-count2\ndescription: counts things\nargs:\n  - name: count\n    description: how many\n    required: false\n---\n\n```bash\necho \"count={{count|5}}\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -254,7 +254,7 @@ fn test_optional_arg_no_default_anywhere_errors() {
     let markdown = "---\nname: opt-nodefault\ndescription: needs a name\nargs:\n  - name: name\n    description: a name\n    required: false\n---\n\n```bash\necho \"hello {{name}}\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -296,7 +296,7 @@ fn test_pipe_intermediate_output_suppressed() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -353,7 +353,7 @@ fn test_multi_block_default_pipes_integration() {
     );
 
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -396,7 +396,7 @@ fn test_pipe_large_output_no_e2big() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -432,7 +432,7 @@ fn test_pipe_mode_no_creft_prev_env() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -468,7 +468,7 @@ fn test_pipe_mode_prev_placeholder_passes_through() {
     );
 
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -490,7 +490,7 @@ fn test_help_shows_subcommands_when_parent_and_child_exist() {
 
     // Create the parent skill "test" with a positional arg.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test\n",
@@ -509,7 +509,7 @@ fn test_help_shows_subcommands_when_parent_and_child_exist() {
 
     // Create the child skill "test mutants".
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test mutants\n",
@@ -561,7 +561,7 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -614,7 +614,7 @@ fn test_pipe_exit_99_middle_block() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -651,7 +651,7 @@ fn upstream_block_failure_reported_when_last_block_succeeds() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: upstream-fail-last-ok\n",
@@ -698,7 +698,7 @@ fn earliest_failure_is_root_cause_when_multiple_blocks_fail() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: both-fail\n",
@@ -740,7 +740,7 @@ fn all_blocks_succeed_returns_ok() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: all-ok\n",
@@ -778,7 +778,7 @@ fn upstream_exit_zero_with_partial_consumer_returns_ok() {
     // Block 0: echo 5 lines. Block 1: read all of them (cat).
     // Both blocks exit 0. No root cause. creft must return 0.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: multi-line-cat\n",
@@ -806,7 +806,7 @@ fn middle_block_failure_reported_in_three_block_chain() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: mid-fail-three\n",
@@ -857,7 +857,7 @@ fn test_subcommand_resolved_over_parent_positional_arg() {
 
     // Parent skill: test with positional arg `filter`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test\n",
@@ -876,7 +876,7 @@ fn test_subcommand_resolved_over_parent_positional_arg() {
 
     // Child skill: test mutants (stored as commands/test/mutants.md).
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test mutants\n",
@@ -908,7 +908,7 @@ fn test_parent_with_positional_still_works_when_child_exists() {
 
     // Parent skill: test with positional arg `filter`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test2\n",
@@ -927,7 +927,7 @@ fn test_parent_with_positional_still_works_when_child_exists() {
 
     // Child skill: test2 mutants.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test2 mutants\n",
@@ -957,7 +957,7 @@ fn test_subcommand_with_own_args() {
 
     // Parent skill: test with positional arg `filter`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test3\n",
@@ -976,7 +976,7 @@ fn test_subcommand_with_own_args() {
 
     // Child skill: test3 mutants with its own `target` positional arg.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test3 mutants\n",
@@ -1008,7 +1008,7 @@ fn test_subcommand_help_shows_subcommand_details() {
 
     // Parent skill: test4 with positional arg `filter`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test4\n",
@@ -1027,7 +1027,7 @@ fn test_subcommand_help_shows_subcommand_details() {
 
     // Child skill: test4 mutants with description and `target` arg.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: test4 mutants\n",
@@ -1061,7 +1061,7 @@ fn test_help_no_subcommands_section_for_leaf_skill() {
 
     // Create a standalone skill with no children.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hello\n",
@@ -1187,7 +1187,7 @@ fn test_flat_file_not_triggered_for_single_token() {
 
     // Add a normal single-token skill via creft add.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: hello-single\n",
@@ -1256,7 +1256,7 @@ fn test_flat_file_nested_spaces_migrated() {
 #[cfg(unix)]
 fn add_skill_to_dir(dir: &tempfile::TempDir, markdown: &str) {
     creft_with(dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -1435,7 +1435,7 @@ fn test_sequential_sigterm_block_reported() {
 
     // A sequential (non-pipe) skill whose block kills itself with SIGTERM.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: seq-sigterm\n",
@@ -1671,7 +1671,7 @@ fn test_pipe_sigint_no_python_traceback() {
     //   KeyboardInterrupt and print a traceback when SIGINT arrived.
     //   With the fix it ignores SIGINT and exits when the pipe closes (EOF).
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-sigint-python-norace\n",
@@ -1735,7 +1735,7 @@ fn test_verbose_shows_rendered_blocks() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: verbose-hello\n",
@@ -1789,7 +1789,7 @@ fn test_verbose_dry_run_shows_rendered_no_execute() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: verbose-dry\n",
@@ -1849,7 +1849,7 @@ fn test_node_deps_available_for_require() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: node-leftpad\n",
@@ -1878,7 +1878,7 @@ fn test_verbose_without_args_shows_empty_defaults() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: verbose-optional\n",
@@ -1925,7 +1925,7 @@ fn test_early_exit_99_stops_remaining_blocks() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: early-exit-stop\n",
@@ -1956,7 +1956,7 @@ fn test_early_exit_99_preserves_output() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: early-exit-output\n",
@@ -1984,7 +1984,7 @@ fn test_normal_exit_1_still_fails() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit-one-fails\n",
@@ -2007,7 +2007,7 @@ fn test_early_exit_99_in_pipe_mode() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-early-exit\n",
@@ -2045,7 +2045,7 @@ fn test_pipe_exit_99_fast_downstream_no_output() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-fast-exit99\n",
@@ -2100,7 +2100,7 @@ fn test_pipe_exit_99_no_side_effects() {
     let sentinel_path = sentinel_dir.path().join("sentinel");
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-exit99-sentinel\n",
@@ -2145,7 +2145,7 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-mid-exit99-suppress\n",
@@ -2216,7 +2216,7 @@ fn test_legacy_pipe_true_ignored() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -2252,7 +2252,7 @@ fn test_legacy_sequential_true_ignored() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -2277,7 +2277,7 @@ fn test_pipe_exit_99_last_block_stdout_preserved() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-last-stdout\n",
@@ -2322,7 +2322,7 @@ fn test_pipe_exit_99_last_block_multiline_stdout() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-last-multiline\n",
@@ -2367,7 +2367,7 @@ fn test_pipe_exit_99_middle_block_stdout_captured() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-mid-capture\n",
@@ -2408,7 +2408,7 @@ fn test_pipe_exit_99_first_block_stdout_captured() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-first-capture\n",
@@ -2448,7 +2448,7 @@ fn test_pipe_exit_99_middle_block_multiline_stdout() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-mid-multiline\n",
@@ -2490,7 +2490,7 @@ fn test_pipe_exit_99_middle_block_no_stdout() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: exit99-mid-no-stdout\n",
@@ -2693,7 +2693,7 @@ fn test_sequential_normal_failure_stderr_preserved() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: seq-fail-stderr\n",
@@ -2764,7 +2764,7 @@ fn test_flag_injected_as_env_var() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: echo-format\n",
@@ -2795,7 +2795,7 @@ fn test_arg_injected_as_env_var() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: echo-target\n",
@@ -2825,7 +2825,7 @@ fn test_hyphenated_flag_injected_with_underscores() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: echo-confirm\n",
@@ -2856,7 +2856,7 @@ fn test_template_and_env_var_both_resolve() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: dual-access\n",
@@ -2887,7 +2887,7 @@ fn test_pipe_chain_blocks_see_env_vars() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-env-check\n",

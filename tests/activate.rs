@@ -14,7 +14,7 @@ use tempfile::TempDir;
 /// Install a plugin to `creft_home` using `creft plugin install`.
 fn install_plugin(creft_home: &TempDir, pkg_repo: &TempDir) {
     helpers::creft_with(creft_home)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 }
@@ -44,14 +44,14 @@ fn activate_all_commands_from_plugin() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success()
         .stderr(predicate::str::contains("activated: my-tools"));
 
     // After activation, the command should appear in list output.
     helpers::creft_with(&creft_home)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"));
@@ -63,7 +63,7 @@ fn activate_nonexistent_plugin_fails() {
     let creft_home = creft_env();
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "ghost-tools"])
+        .args(["plugins", "activate", "ghost-tools"])
         .assert()
         .failure()
         .code(2)
@@ -90,13 +90,13 @@ fn activate_specific_command_from_plugin() {
 
     // Only activate "deploy", not "status".
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "k8s-tools/deploy"])
+        .args(["plugins", "activate", "k8s-tools/deploy"])
         .assert()
         .success();
 
     // "deploy" should appear in list output.
     let list_output = helpers::creft_with(&creft_home)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -119,7 +119,7 @@ fn activate_nonexistent_command_fails() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools/nonexistent"])
+        .args(["plugins", "activate", "my-tools/nonexistent"])
         .assert()
         .failure()
         .code(2);
@@ -133,19 +133,19 @@ fn deactivate_removes_plugin_commands() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "deactivate", "my-tools"])
+        .args(["plugins", "deactivate", "my-tools"])
         .assert()
         .success()
         .stderr(predicate::str::contains("deactivated: my-tools"));
 
     // After deactivation, command should not appear in list.
     helpers::creft_with(&creft_home)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::is_match("hello").unwrap().not());
@@ -157,7 +157,7 @@ fn deactivate_not_activated_fails() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "deactivate", "my-tools"])
+        .args(["plugins", "deactivate", "my-tools"])
         .assert()
         .failure()
         .code(2);
@@ -173,13 +173,13 @@ fn activate_without_global_writes_to_local_scope() {
     // Install the plugin (always global).
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Activate without --global: should write to local settings.json.
     creft_two_scope(&env)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
@@ -213,12 +213,12 @@ fn activate_with_global_flag_writes_to_global_scope() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["plugin", "activate", "--global", "my-tools"])
+        .args(["plugins", "activate", "--global", "my-tools"])
         .assert()
         .success();
 
@@ -241,19 +241,19 @@ fn local_activation_is_visible_from_project_scope() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Activate locally only.
     creft_two_scope(&env)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
     // Command should appear in list from within the project.
     creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"));
@@ -268,29 +268,29 @@ fn deactivate_without_global_removes_from_all_scopes() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Activate in both scopes.
     creft_two_scope(&env)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
     creft_two_scope(&env)
-        .args(["plugin", "activate", "--global", "my-tools"])
+        .args(["plugins", "activate", "--global", "my-tools"])
         .assert()
         .success();
 
     // Deactivate without --global: should clear both scopes.
     creft_two_scope(&env)
-        .args(["plugin", "deactivate", "my-tools"])
+        .args(["plugins", "deactivate", "my-tools"])
         .assert()
         .success();
 
     // Command should no longer appear in list.
     creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::is_match("hello").unwrap().not());
@@ -303,29 +303,29 @@ fn deactivate_with_global_flag_removes_only_from_global() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Activate in both scopes.
     creft_two_scope(&env)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
     creft_two_scope(&env)
-        .args(["plugin", "activate", "--global", "my-tools"])
+        .args(["plugins", "activate", "--global", "my-tools"])
         .assert()
         .success();
 
     // Deactivate with --global: removes only global.
     creft_two_scope(&env)
-        .args(["plugin", "deactivate", "--global", "my-tools"])
+        .args(["plugins", "deactivate", "--global", "my-tools"])
         .assert()
         .success();
 
     // The local activation should keep the command visible.
     creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"));
@@ -354,7 +354,7 @@ fn non_activated_plugin_commands_are_not_visible() {
 
     // Plugin is installed but not activated.
     let list_out = helpers::creft_with(&creft_home)
-        .args(["list"])
+        .args(["cmd", "list"])
         .output()
         .unwrap();
     let list_str = String::from_utf8_lossy(&list_out.stdout);
@@ -370,7 +370,7 @@ fn activated_command_can_be_run() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
@@ -402,12 +402,12 @@ fn stale_activation_produces_error_on_use() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "uninstall", "my-tools"])
+        .args(["plugins", "uninstall", "my-tools"])
         .assert()
         .success();
 
@@ -425,12 +425,12 @@ fn doctor_reports_stale_activation() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "uninstall", "my-tools"])
+        .args(["plugins", "uninstall", "my-tools"])
         .assert()
         .success();
 
@@ -449,7 +449,7 @@ fn settings_json_round_trips() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 
@@ -463,7 +463,7 @@ fn settings_json_round_trips() {
     );
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "deactivate", "my-tools"])
+        .args(["plugins", "deactivate", "my-tools"])
         .assert()
         .success();
 
@@ -484,7 +484,7 @@ fn settings_json_lives_under_plugins_subdirectory() {
     let (_repo, creft_home) = install_single_skill_plugin("my-tools", "hello.md", HELLO_SKILL);
 
     helpers::creft_with(&creft_home)
-        .args(["plugin", "activate", "my-tools"])
+        .args(["plugins", "activate", "my-tools"])
         .assert()
         .success();
 

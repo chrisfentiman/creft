@@ -10,7 +10,7 @@ use predicates::prelude::*;
 /// Install a plugin from a local git repo into creft_home.
 fn install(creft_home: &tempfile::TempDir, pkg_repo: &tempfile::TempDir) {
     creft_with(creft_home)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 }
@@ -23,7 +23,7 @@ fn search_no_plugins_installed_prints_message() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugin", "search"])
+        .args(["plugins", "search"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no plugins installed"));
@@ -35,7 +35,7 @@ fn search_query_no_plugins_installed_prints_no_matches() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "fetch"])
+        .args(["plugins", "search", "fetch"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no matching skills found"));
@@ -63,7 +63,7 @@ fn search_empty_query_lists_all_skills() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search"])
+        .args(["plugins", "search"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools hello"))
@@ -86,7 +86,7 @@ fn search_by_skill_name_returns_match() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "fetch"])
+        .args(["plugins", "search", "fetch"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools fetch"));
@@ -106,7 +106,7 @@ fn search_no_match_prints_no_matching_skills() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "nonexistent-query-xyz"])
+        .args(["plugins", "search", "nonexistent-query-xyz"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no matching skills found"));
@@ -128,7 +128,7 @@ fn search_by_description_returns_match() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "kubernetes"])
+        .args(["plugins", "search", "kubernetes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("ops-tools deploy"));
@@ -150,7 +150,7 @@ fn search_by_tag_returns_match() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "storage"])
+        .args(["plugins", "search", "storage"])
         .assert()
         .success()
         .stdout(predicate::str::contains("aws-tools s3-sync"));
@@ -172,19 +172,19 @@ fn search_is_case_insensitive() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "deploy"])
+        .args(["plugins", "search", "deploy"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools"));
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "PRODUCTION"])
+        .args(["plugins", "search", "PRODUCTION"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools"));
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "ci-cd"])
+        .args(["plugins", "search", "ci-cd"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools"));
@@ -213,7 +213,7 @@ fn search_multiple_terms_all_must_match() {
 
     // "fetch" AND "source" — only fetch.md matches both
     creft_with(&creft_home)
-        .args(["plugin", "search", "fetch", "source"])
+        .args(["plugins", "search", "fetch", "source"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools fetch"))
@@ -244,7 +244,7 @@ fn search_across_multiple_plugins() {
     install(&creft_home, &pkg_b);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "command"])
+        .args(["plugins", "search", "command"])
         .assert()
         .success()
         .stdout(predicate::str::contains("plugin-alpha"))
@@ -265,7 +265,7 @@ fn search_output_includes_plugin_name() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "hello"])
+        .args(["plugins", "search", "hello"])
         .assert()
         .success()
         .stdout(predicate::str::contains("plugin: my-tools"));
@@ -293,7 +293,7 @@ fn search_returns_only_matching_skills_not_all() {
     install(&creft_home, &pkg);
 
     creft_with(&creft_home)
-        .args(["plugin", "search", "fetch"])
+        .args(["plugins", "search", "fetch"])
         .assert()
         .success()
         .stdout(predicate::str::contains("my-tools fetch"))

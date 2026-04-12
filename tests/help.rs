@@ -34,7 +34,7 @@ fn test_root_long_help_contains_examples() {
     let stdout = String::from_utf8(output).unwrap();
 
     assert!(
-        stdout.contains("creft add") || stdout.contains("creft list"),
+        stdout.contains("creft cmd add") || stdout.contains("creft cmd list"),
         "root --help should contain quick-start examples; got: {stdout:?}"
     );
 }
@@ -52,9 +52,7 @@ fn test_root_long_help_contains_all_subcommands() {
         .clone();
     let stdout = String::from_utf8(output).unwrap();
 
-    let subcommands = [
-        "add", "list", "show", "rm", "cat", "plugin", "up", "init", "doctor",
-    ];
+    let subcommands = ["cmd", "plugins", "settings", "up", "init", "doctor"];
     for cmd in &subcommands {
         assert!(
             stdout.contains(cmd),
@@ -217,7 +215,7 @@ fn test_skill_help_matches_clap_format() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill_md)
         .assert()
         .success();
@@ -288,7 +286,7 @@ fn test_skill_help_matches_clap_format() {
 fn test_add_help_uses_skill_terminology() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["add", "--help"])
+        .args(["cmd", "add", "--help"])
         .assert()
         .success()
         .get_output()
@@ -316,7 +314,7 @@ fn test_help_subcommand_with_user_skill() {
 
     // Add a user skill named `mutants`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: mutants\ndescription: Run mutation testing\n---\n\n```bash\necho mutants\n```\n",
         )
@@ -345,12 +343,12 @@ fn test_help_subcommand_with_namespace() {
 
     // Add two skills under the `tavily` namespace but no skill named exactly `tavily`.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
@@ -375,13 +373,13 @@ fn test_help_subcommand_with_namespace() {
     );
 }
 
-/// `creft help add` still shows clap's built-in help for the `add` subcommand.
+/// `creft help cmd` shows clap's built-in help for the `cmd` subcommand.
 #[test]
 fn test_help_subcommand_with_builtin() {
     let dir = creft_env();
 
     let output = creft_with(&dir)
-        .args(["help", "add"])
+        .args(["help", "cmd"])
         .assert()
         .success()
         .get_output()
@@ -389,10 +387,10 @@ fn test_help_subcommand_with_builtin() {
         .clone();
     let stdout = String::from_utf8(output).unwrap();
 
-    // Clap renders the `add` subcommand description in its help output.
+    // Clap renders the `cmd` subcommand description in its help output.
     assert!(
-        stdout.contains("skill") || stdout.contains("add"),
-        "creft help add should show built-in add help; got: {stdout:?}"
+        stdout.contains("skill") || stdout.contains("cmd"),
+        "creft help cmd should show built-in cmd help; got: {stdout:?}"
     );
 }
 
@@ -434,7 +432,7 @@ fn test_help_subcommand_multiword_skill() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web with Tavily\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
@@ -461,7 +459,7 @@ fn test_help_subcommand_multiword_skill() {
 fn test_add_help_has_usage_section() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["add", "--help"])
+        .args(["cmd", "add", "--help"])
         .assert()
         .success()
         .get_output()
@@ -480,7 +478,7 @@ fn test_add_help_has_usage_section() {
 fn test_add_help_has_frontmatter_section() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["add", "--help"])
+        .args(["cmd", "add", "--help"])
         .assert()
         .success()
         .get_output()
@@ -541,9 +539,9 @@ fn test_up_help_has_supported_systems() {
 fn test_all_builtin_help_has_usage() {
     let dir = creft_env();
 
-    let builtins = ["add", "list", "show", "cat", "rm", "up", "doctor", "init"];
-
-    for cmd in &builtins {
+    // Top-level builtins: invoke directly.
+    let top_level = ["up", "doctor", "init", "cmd", "plugins", "settings"];
+    for cmd in &top_level {
         let output = creft_with(&dir)
             .args([cmd, "--help"])
             .assert()
@@ -552,10 +550,26 @@ fn test_all_builtin_help_has_usage() {
             .stdout
             .clone();
         let stdout = String::from_utf8(output).unwrap();
-
         assert!(
             stdout.contains("Usage:"),
             "creft {cmd} --help should contain 'Usage:' section; got: {stdout:?}"
+        );
+    }
+
+    // `cmd` sub-commands: invoke as `creft cmd <sub> --help`.
+    let cmd_subs = ["add", "list", "show", "cat", "rm"];
+    for sub in &cmd_subs {
+        let output = creft_with(&dir)
+            .args(["cmd", sub, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(
+            stdout.contains("Usage:"),
+            "creft cmd {sub} --help should contain 'Usage:' section; got: {stdout:?}"
         );
     }
 }
@@ -568,14 +582,14 @@ fn test_all_builtin_help_has_usage() {
 fn test_no_allcaps_sections_in_help() {
     let dir = creft_env();
 
-    let builtins = ["add", "list", "show", "cat", "rm", "up", "doctor", "init"];
-
     // Regex: a line that is all uppercase letters and spaces (4+ chars) ending with ':'
     // This catches headers like "FRONTMATTER FIELDS:" or "CODE BLOCKS:" but not
     // normal prose that might happen to have an uppercase word.
     let allcaps_re = regex::Regex::new(r"(?m)^[A-Z ]{4,}:$").unwrap();
 
-    for cmd in &builtins {
+    // Top-level builtins.
+    let top_level = ["up", "doctor", "init", "cmd", "plugins", "settings"];
+    for cmd in &top_level {
         let output = creft_with(&dir)
             .args([cmd, "--help"])
             .assert()
@@ -584,10 +598,26 @@ fn test_no_allcaps_sections_in_help() {
             .stdout
             .clone();
         let stdout = String::from_utf8(output).unwrap();
-
         assert!(
             !allcaps_re.is_match(&stdout),
             "creft {cmd} --help must not contain ALL CAPS section headers; got: {stdout:?}"
+        );
+    }
+
+    // `cmd` sub-commands.
+    let cmd_subs = ["add", "list", "show", "cat", "rm"];
+    for sub in &cmd_subs {
+        let output = creft_with(&dir)
+            .args(["cmd", sub, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(
+            !allcaps_re.is_match(&stdout),
+            "creft cmd {sub} --help must not contain ALL CAPS section headers; got: {stdout:?}"
         );
     }
 }

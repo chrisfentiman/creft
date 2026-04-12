@@ -8,7 +8,15 @@ use crate::model::{AppContext, CommandDef, NamespaceEntry, ParsedCommand, Scope,
 use crate::registry::{self, ActivationEntry};
 
 const RESERVED: &[&str] = &[
-    "add", "list", "show", "rm", "cat", "plugin", "up", "help", "version", "init", "doctor",
+    "cmd",
+    "command",
+    "plugins",
+    "settings",
+    "up",
+    "help",
+    "version",
+    "init",
+    "doctor",
 ];
 
 /// Returns `true` if `name` is a built-in creft subcommand that cannot be used as a skill name.
@@ -895,8 +903,17 @@ mod tests {
 
     #[test]
     fn test_is_reserved() {
-        assert!(is_reserved("add"));
-        assert!(is_reserved("list"));
+        // Top-level builtins are reserved.
+        assert!(is_reserved("cmd"));
+        assert!(is_reserved("plugins"));
+        assert!(is_reserved("settings"));
+        assert!(is_reserved("up"));
+        assert!(is_reserved("init"));
+        assert!(is_reserved("doctor"));
+        // Sub-commands of `cmd` are NOT reserved at the top level.
+        assert!(!is_reserved("add"));
+        assert!(!is_reserved("list"));
+        // User-defined names are never reserved.
         assert!(!is_reserved("hello"));
         assert!(!is_reserved("gh"));
     }
@@ -906,16 +923,19 @@ mod tests {
         assert!(validate_name("hello").is_ok());
         assert!(validate_name("gh issue-body").is_ok());
         assert!(validate_name("my_cmd").is_ok());
+        // `add` and `list` are no longer top-level reserved — they are valid skill names.
+        assert!(validate_name("add").is_ok());
+        assert!(validate_name("list").is_ok());
     }
 
     #[test]
     fn test_validate_name_reserved() {
         assert!(matches!(
-            validate_name("add"),
+            validate_name("cmd"),
             Err(CreftError::ReservedName(_))
         ));
         assert!(matches!(
-            validate_name("list"),
+            validate_name("plugins"),
             Err(CreftError::ReservedName(_))
         ));
     }

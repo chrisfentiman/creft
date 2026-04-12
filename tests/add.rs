@@ -21,7 +21,7 @@ fn lang_to_tool(lang: &str) -> &str {
 fn test_add_from_stdin() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success()
@@ -37,7 +37,7 @@ fn test_add_from_flags() {
     let dir = creft_env();
     // Pipe a base document; --name and --description override the frontmatter values.
     creft_with(&dir)
-        .args(["add", "--name", "hello", "--description", "greet"])
+        .args(["cmd", "add", "--name", "hello", "--description", "greet"])
         .write_stdin(
             "---\nname: placeholder\ndescription: placeholder\n---\n\n```bash\necho hello\n```\n",
         )
@@ -54,14 +54,14 @@ fn test_add_duplicate_rejected() {
 
     // First add succeeds.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
 
     // Second add without --force fails.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .failure()
@@ -76,13 +76,13 @@ fn test_add_force_overwrites() {
     let markdown = "---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add", "--force"])
+        .args(["cmd", "add", "--force"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -101,7 +101,7 @@ fn test_add_with_undeclared_placeholder_warns() {
     let markdown = "---\nname: warn-skill\ndescription: skill with undeclared placeholder\n---\n\n```bash\necho \"{{undeclared}}\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         // Save must succeed — validation warnings do not block the write.
         .assert()
@@ -120,7 +120,7 @@ fn test_add_with_valid_placeholders_no_warnings() {
     let markdown = "---\nname: valid-skill\ndescription: skill with valid placeholder\nargs:\n  - name: who\n    description: who to greet\n---\n\n```bash\necho \"Hello, {{who}}!\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success()
@@ -147,7 +147,7 @@ fn test_add_syntax_error_rejected(#[case] lang: &str, #[case] broken_body: &str)
         "---\nname: bad-{lang}\ndescription: broken {lang}\n---\n\n```{lang}\n{broken_body}\n```\n"
     );
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         .assert()
         .failure()
@@ -168,7 +168,7 @@ fn test_add_valid_syntax_succeeds(#[case] lang: &str, #[case] valid_body: &str) 
         "---\nname: good-{lang}\ndescription: valid {lang}\n---\n\n```{lang}\n{valid_body}\n```\n"
     );
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         .assert()
         .success()
@@ -189,7 +189,7 @@ fn test_add_skip_validation_flag(#[case] flag: &str, #[case] skill_name: &str) {
         "---\nname: {skill_name}\ndescription: broken bash with skip flag\n---\n\n```bash\nif true; then\n  echo broken\n```\n"
     );
     creft_with(&dir)
-        .args(["add", flag])
+        .args(["cmd", "add", flag])
         .write_stdin(markdown.as_str())
         .assert()
         .success()
@@ -206,7 +206,7 @@ fn test_add_missing_interpreter_skips_check() {
     let markdown = "---\nname: cobol-skill\ndescription: a cobol skill\n---\n\n```cobol\nTHIS IS DEFINITELY NOT VALID COBOL SYNTAX !!!@#$\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success()
@@ -227,7 +227,7 @@ fn test_add_placeholders_dont_cause_false_syntax_errors() {
     let markdown = "---\nname: ph-bash\ndescription: bash with placeholder\nargs:\n  - name: repo\n    description: repo name\n---\n\n```bash\necho \"hello {{repo}}\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success()
@@ -244,7 +244,7 @@ fn test_add_docs_blocks_not_validated() {
     let markdown = "---\nname: docs-skill\ndescription: skill with docs block\n---\n\n```docs\n# Usage\n\nRun it like: `if broken then`\n```\n\n```bash\necho hello\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success()
@@ -264,7 +264,7 @@ fn test_add_long_description_warns() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         // Operation must succeed — the warning doesn't block.
         .assert()
@@ -280,7 +280,7 @@ fn test_add_short_description_no_length_warning() {
     let markdown = "---\nname: short-desc-skill\ndescription: Short description\n---\n\n```bash\necho hi\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success()
@@ -297,7 +297,7 @@ fn test_add_no_validate_skips_description_warning() {
     );
 
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(markdown.as_str())
         .assert()
         .success()
@@ -314,7 +314,7 @@ fn test_add_force_skips_description_warning() {
     );
 
     creft_with(&dir)
-        .args(["add", "--force"])
+        .args(["cmd", "add", "--force"])
         .write_stdin(markdown.as_str())
         .assert()
         .success()
@@ -329,8 +329,8 @@ fn test_reserved_name_rejected() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
-        .write_stdin("---\nname: add\ndescription: shadow add\n---\n\n```bash\necho oops\n```\n")
+        .args(["cmd", "add"])
+        .write_stdin("---\nname: cmd\ndescription: shadow cmd\n---\n\n```bash\necho oops\n```\n")
         .assert()
         .failure()
         .code(1)
@@ -345,16 +345,16 @@ fn test_rm_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
-    creft_with(&dir).args(["rm", "hello"]).assert().success();
+    creft_with(&dir).args(["cmd", "rm", "hello"]).assert().success();
 
     // After removal the list is empty.
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no commands found"));
@@ -365,7 +365,7 @@ fn test_rm_command() {
 fn test_rm_not_found() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["rm", "nonexistent"])
+        .args(["cmd", "rm", "nonexistent"])
         .assert()
         .failure()
         .code(2);
@@ -379,7 +379,7 @@ fn test_rm_not_found() {
 fn test_add_warns_on_missing_sub_skill() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: sub-skill-caller\ndescription: calls a missing sub-skill\n---\n\n\
              ```bash\ncreft nonexistent-skill-xyzzy\n```\n",
@@ -398,7 +398,7 @@ fn test_add_warns_on_missing_sub_skill() {
 fn test_add_no_sub_skill_warn_with_force() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["add", "--force"])
+        .args(["cmd", "add", "--force"])
         .write_stdin(
             "---\nname: sub-skill-force\ndescription: calls a missing sub-skill\n---\n\n\
              ```bash\ncreft nonexistent-skill-xyzzy\n```\n",
@@ -414,7 +414,7 @@ fn test_add_sub_skill_found_no_warn() {
     let dir = creft_env();
     // Add skill A first.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: skill-a-exists\ndescription: skill a\n---\n\n```bash\necho a\n```\n",
         )
@@ -423,7 +423,7 @@ fn test_add_sub_skill_found_no_warn() {
 
     // Add skill B that references creft skill-a-exists.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: skill-b-caller\ndescription: calls skill a\n---\n\n\
              ```bash\ncreft skill-a-exists\n```\n",
@@ -447,7 +447,7 @@ fn test_add_python_dep_found() {
     let skill = "---\nname: py-dep-found\ndescription: python with valid dep\n---\n\n\
                  ```python\n# deps: requests\nimport requests\n```\n";
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success()
@@ -466,7 +466,7 @@ fn test_add_python_dep_not_found() {
     let skill = "---\nname: py-dep-missing\ndescription: python with bad dep\n---\n\n\
                  ```python\n# deps: zzz-nonexistent-pkg-12345\npass\n```\n";
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success()
@@ -485,7 +485,7 @@ fn test_add_node_dep_found() {
     let skill = "---\nname: node-dep-found\ndescription: node with valid dep\n---\n\n\
                  ```node\n// deps: lodash\nconst _ = require('lodash');\n```\n";
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success()
@@ -504,7 +504,7 @@ fn test_add_node_dep_not_found() {
     let skill = "---\nname: node-dep-missing\ndescription: node with bad dep\n---\n\n\
                  ```node\n// deps: zzz-nonexistent-pkg-12345\nconsole.log('hi');\n```\n";
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success()
@@ -519,7 +519,7 @@ fn test_add_warns_on_missing_shell_dep() {
     let skill = "---\nname: shell-dep-missing\ndescription: shell with bad dep\n---\n\n\
                  ```bash\n# deps: __nonexistent_dep_xyzzy__\necho hello\n```\n";
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success()
@@ -533,7 +533,7 @@ fn test_add_dep_warn_skipped_with_no_validate() {
     let skill = "---\nname: dep-novalidate\ndescription: shell dep no-validate\n---\n\n\
                  ```bash\n# deps: __nonexistent_dep_xyzzy__\necho hello\n```\n";
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(skill)
         .assert()
         .success()

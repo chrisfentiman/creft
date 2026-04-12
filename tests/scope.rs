@@ -16,7 +16,7 @@ fn test_scope_add_defaults_to_local_when_local_exists() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: local-skill\ndescription: a local skill\n---\n\n```bash\necho local\n```\n",
         )
@@ -44,7 +44,7 @@ fn test_scope_add_global_flag_forces_global() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["add", "--global"])
+        .args(["cmd", "add", "--global"])
         .write_stdin("---\nname: global-skill\ndescription: a global skill\n---\n\n```bash\necho global\n```\n")
         .assert()
         .success()
@@ -71,7 +71,7 @@ fn test_scope_list_shows_local_and_global_with_indicators() {
 
     // Add a local skill.
     creft_two_scope(&env)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: local-only\ndescription: local skill\n---\n\n```bash\necho local\n```\n",
         )
@@ -80,7 +80,7 @@ fn test_scope_list_shows_local_and_global_with_indicators() {
 
     // Add a global skill.
     creft_two_scope(&env)
-        .args(["add", "--global"])
+        .args(["cmd", "add", "--global"])
         .write_stdin(
             "---\nname: global-only\ndescription: global skill\n---\n\n```bash\necho global\n```\n",
         )
@@ -89,7 +89,7 @@ fn test_scope_list_shows_local_and_global_with_indicators() {
 
     // List must show both skills. Scope annotations are dropped.
     creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicates::prelude::predicate::str::contains("local-only"))
@@ -108,20 +108,20 @@ fn test_scope_list_local_shadows_global_same_name() {
 
     // Add local version of "deploy".
     creft_two_scope(&env)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: deploy\ndescription: local deploy\n---\n\n```bash\necho local-deploy\n```\n")
         .assert()
         .success();
 
     // Add global version of "deploy".
     creft_two_scope(&env)
-        .args(["add", "--global"])
+        .args(["cmd", "add", "--global"])
         .write_stdin("---\nname: deploy\ndescription: global deploy\n---\n\n```bash\necho global-deploy\n```\n")
         .assert()
         .success();
 
     let output = creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -165,7 +165,7 @@ fn test_scope_run_resolves_local_before_global() {
 
     // Local version echoes "local-version".
     creft_two_scope(&env)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: greet\ndescription: greet\n---\n\n```bash\necho local-version\n```\n",
         )
@@ -174,7 +174,7 @@ fn test_scope_run_resolves_local_before_global() {
 
     // Global version echoes "global-version".
     creft_two_scope(&env)
-        .args(["add", "--global"])
+        .args(["cmd", "add", "--global"])
         .write_stdin(
             "---\nname: greet\ndescription: greet\n---\n\n```bash\necho global-version\n```\n",
         )
@@ -210,7 +210,7 @@ fn test_scope_plugin_install_always_global() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -249,7 +249,7 @@ fn test_scope_plugin_install_never_uses_local_scope() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -267,10 +267,10 @@ fn test_scope_plugin_install_never_uses_local_scope() {
     );
 }
 
-// ── 8. update finds package across scopes ────────────────────────────────────
+// ── 8. update uses plugins subcommand ────────────────────────────────────────
 
-/// `creft update <name>` (deprecated) forwards to `creft plugin update`, which
-/// finds and updates a plugin in the global plugins cache.
+/// `creft plugins update <name>` finds and updates a plugin in the global plugins cache.
+/// (The old root-level `creft update` alias was removed in v0.3.0.)
 #[test]
 fn test_scope_deprecated_update_forwards_to_plugin_update() {
     let pkg_repo = create_test_package(
@@ -283,15 +283,15 @@ fn test_scope_deprecated_update_forwards_to_plugin_update() {
 
     let env = TwoScopeEnv::new();
 
-    // Install via the plugin namespace (always global).
+    // Install via the plugins namespace (always global).
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
-    // The deprecated update alias forwards to plugin update and should succeed.
+    // Update via the plugins namespace.
     creft_two_scope(&env)
-        .args(["update", "updatable-pkg"])
+        .args(["plugins", "update", "updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -314,13 +314,13 @@ fn test_scope_update_finds_global_package() {
 
     // Install to global plugins cache.
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Update should find the plugin in the global cache and succeed.
     creft_two_scope(&env)
-        .args(["plugin", "update", "global-updatable-pkg"])
+        .args(["plugins", "update", "global-updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -328,10 +328,10 @@ fn test_scope_update_finds_global_package() {
         ));
 }
 
-// ── 9. uninstall finds package across scopes ─────────────────────────────────
+// ── 9. uninstall uses plugins subcommand ─────────────────────────────────────
 
-/// `creft uninstall <name>` (deprecated) forwards to `creft plugin uninstall`,
-/// which removes the plugin from the global plugins cache.
+/// `creft plugins uninstall <name>` removes the plugin from the global plugins cache.
+/// (The old root-level `creft uninstall` alias was removed in v0.3.0.)
 #[test]
 fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let pkg_repo = create_test_package(
@@ -345,17 +345,16 @@ fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["uninstall", "local-removable-pkg"])
+        .args(["plugins", "uninstall", "local-removable-pkg"])
         .assert()
         .success();
 
-    // The deprecated alias routes through plugin uninstall, which writes to
-    // the global plugins cache — verify the plugin directory is gone.
+    // Verify the plugin directory is gone from the global cache.
     assert!(
         !env.global_plugins().join("local-removable-pkg").exists(),
         "plugin should have been removed from global ~/.creft/plugins/"
@@ -376,12 +375,12 @@ fn test_scope_uninstall_finds_global_package() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["plugin", "uninstall", "global-removable-pkg"])
+        .args(["plugins", "uninstall", "global-removable-pkg"])
         .assert()
         .success();
 
@@ -402,7 +401,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 1: add local skill named "ping".
     creft_two_scope(&env)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: ping\ndescription: local ping\n---\n\n```bash\necho local-ping\n```\n",
         )
@@ -411,7 +410,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 2: add global skill also named "ping".
     creft_two_scope(&env)
-        .args(["add", "--global"])
+        .args(["cmd", "add", "--global"])
         .write_stdin(
             "---\nname: ping\ndescription: global ping\n---\n\n```bash\necho global-ping\n```\n",
         )
@@ -421,7 +420,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
     // Step 3: list — both local and global appear (but only one "ping" row since
     //         local shadows global).
     let list_output = creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -458,7 +457,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 5: rm "ping" (removes the local copy).
     creft_two_scope(&env)
-        .args(["rm", "ping"])
+        .args(["cmd", "rm", "ping"])
         .assert()
         .success();
 
@@ -477,7 +476,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 7: list — "ping" still appears (now from global, but no scope annotation shown).
     creft_two_scope(&env)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicates::prelude::predicate::str::contains("ping"))

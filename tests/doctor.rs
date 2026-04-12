@@ -45,7 +45,7 @@ fn test_doctor_skill_with_missing_env_var() {
 
     // Add a skill that requires a nonexistent env var.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: needs-token\ndescription: requires a token\nenv:\n  - name: CREFT_TEST_NONEXISTENT_VAR_XYZ\n    required: true\n---\n\n```bash\necho $CREFT_TEST_NONEXISTENT_VAR_XYZ\n```\n",
         )
@@ -77,7 +77,7 @@ fn test_doctor_skill_with_deps() {
 
     // Add a skill that has a bash block with deps.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: uses-deps\ndescription: skill with deps\n---\n\n```bash\n# deps: curl jq\ncurl https://example.com | jq .\n```\n",
         )
@@ -108,7 +108,7 @@ fn test_skill_check_simple_bash() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: simple-bash\ndescription: a simple bash skill\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
@@ -138,7 +138,7 @@ fn test_skill_check_circular_reference() {
 
     // Add a skill that calls itself via creft.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: self-ref\ndescription: calls itself\n---\n\n```bash\ncreft self-ref\n```\n",
         )
@@ -187,7 +187,7 @@ fn test_skill_check_depth_limit() {
         };
 
         creft_with(&dir)
-            .args(["add"])
+            .args(["cmd", "add"])
             .write_stdin(body.as_str())
             .assert()
             .success();

@@ -22,7 +22,7 @@ fn test_dry_run() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         .assert()
         .success();
@@ -50,7 +50,7 @@ fn test_dry_run_delegated() {
     let markdown = "---\nname: dry-aware\ndescription: dry-run aware command\nsupports: [dry-run]\n---\n\n```bash\necho \"CREFT_DRY_RUN=$CREFT_DRY_RUN\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -80,7 +80,7 @@ fn test_dry_run_fallback() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         .assert()
         .success();
@@ -108,7 +108,7 @@ fn test_dry_run_delegated_failure() {
     let markdown = "---\nname: dry-fail\ndescription: fails on dry-run\nsupports: [dry-run]\n---\n\n```bash\nif [ \"$CREFT_DRY_RUN\" = \"1\" ]; then exit 1; fi\necho ok\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -133,7 +133,7 @@ fn test_dry_run_delegated_multi_block() {
     let markdown = "---\nname: multi-dry\ndescription: multi-block dry-run\nsupports: [dry-run]\n---\n\n```bash\necho \"BLOCK1=$CREFT_DRY_RUN\"\n```\n\n```bash\ncat\necho \"BLOCK2=$CREFT_DRY_RUN\"\n```\n";
 
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -156,7 +156,7 @@ fn test_dry_run_delegated_with_args() {
     let markdown = "---\nname: greet-dry\ndescription: dry-run aware greeting\nsupports: [dry-run]\nargs:\n  - name: who\n    description: who to greet\n---\n\n```bash\necho \"Hello {{who}} dry=$CREFT_DRY_RUN\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();
@@ -181,7 +181,7 @@ fn test_dry_run_supports_multiple_features() {
     let markdown = "---\nname: multi-feat\ndescription: multiple features declared\nsupports: [dry-run, verbose]\n---\n\n```bash\necho \"DRY=$CREFT_DRY_RUN\"\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown)
         .assert()
         .success();

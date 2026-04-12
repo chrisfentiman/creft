@@ -12,7 +12,7 @@ use predicates::prelude::*;
 fn test_list_empty() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no commands found"));
@@ -24,19 +24,19 @@ fn test_list_shows_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: alpha\ndescription: first\n---\n\n```bash\necho alpha\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: beta\ndescription: second\n---\n\n```bash\necho beta\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -53,7 +53,7 @@ fn test_list_filter_by_tag() {
 
     // Command with ops tag.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: deploy\ndescription: Deploy the app\ntags:\n  - ops\n  - deploy\n---\n\n```bash\necho deploying\n```\n",
         )
@@ -62,7 +62,7 @@ fn test_list_filter_by_tag() {
 
     // Command with dev tag (different).
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: lint\ndescription: Run linter\ntags:\n  - dev\n  - test\n---\n\n```bash\necho linting\n```\n",
         )
@@ -71,7 +71,7 @@ fn test_list_filter_by_tag() {
 
     // Filtering by "ops" should show only "deploy".
     creft_with(&dir)
-        .args(["list", "--tag", "ops"])
+        .args(["cmd", "list", "--tag", "ops"])
         .assert()
         .success()
         .stdout(predicate::str::contains("deploy"))
@@ -86,13 +86,13 @@ fn test_show_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["show", "hello"])
+        .args(["cmd", "show", "hello"])
         .assert()
         .success()
         .stdout(predicate::str::contains("name: hello"))
@@ -104,7 +104,7 @@ fn test_show_command() {
 fn test_show_not_found() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["show", "nonexistent"])
+        .args(["cmd", "show", "nonexistent"])
         .assert()
         .failure()
         .code(2);
@@ -118,13 +118,13 @@ fn test_cat_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["cat", "hello"])
+        .args(["cmd", "cat", "hello"])
         .assert()
         .success()
         .stdout(predicate::str::contains("echo hello"))
@@ -141,7 +141,7 @@ fn test_list_grouped_output() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hello\ndescription: Greets someone\n---\n\n```bash\necho hello\n```\n",
         )
@@ -149,19 +149,19 @@ fn test_list_grouped_output() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -207,7 +207,7 @@ fn test_list_all_flag() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hello\ndescription: Greets someone\n---\n\n```bash\necho hello\n```\n",
         )
@@ -215,20 +215,20 @@ fn test_list_all_flag() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     // --all shows every skill by full name with description.
     creft_with(&dir)
-        .args(["list", "--all"])
+        .args(["cmd", "list", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"))
@@ -242,7 +242,7 @@ fn test_list_namespace_not_found() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hello\ndescription: Greets someone\n---\n\n```bash\necho hello\n```\n",
         )
@@ -250,7 +250,7 @@ fn test_list_namespace_not_found() {
         .success();
 
     creft_with(&dir)
-        .args(["list", "nonexistent"])
+        .args(["cmd", "list", "nonexistent"])
         .assert()
         .success()
         .stderr(predicate::str::contains(
@@ -265,21 +265,21 @@ fn test_list_tag_with_namespace() {
 
     // tavily search tagged with 'api'
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\ntags:\n  - api\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     // tavily crawl NOT tagged with 'api'
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\ntags:\n  - crawl\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     // Filtering by 'api' shows tavily namespace (1 skill matched).
     creft_with(&dir)
-        .args(["list", "--tag", "api"])
+        .args(["cmd", "list", "--tag", "api"])
         .assert()
         .success()
         .stdout(predicate::str::contains("tavily"))
@@ -294,13 +294,13 @@ fn test_list_namespace_with_nonexistent_tag() {
 
     // Add tavily skills without the 'nonexistent' tag.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\ntags:\n  - api\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\ntags:\n  - crawl\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
@@ -309,13 +309,13 @@ fn test_list_namespace_with_nonexistent_tag() {
     // Flags must precede namespace positional args (trailing_var_arg captures everything after first
     // positional). Should show generic empty message, not "no skills found under 'tavily'".
     let output = creft_with(&dir)
-        .args(["list", "--tag", "nonexistent", "tavily"])
+        .args(["cmd", "list", "--tag", "nonexistent", "tavily"])
         .assert()
         .success();
 
     let stderr = String::from_utf8_lossy(&output.get_output().stderr);
     assert!(
-        stderr.contains("no commands found. use 'creft add' to create one."),
+        stderr.contains("no commands found. use 'creft cmd add' to create one."),
         "expected generic empty message; got: {stderr:?}"
     );
     assert!(
@@ -331,7 +331,7 @@ fn test_list_namespace_skill_count() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: mypkg search\ndescription: Search\n---\n\n```bash\necho search\n```\n",
         )
@@ -339,7 +339,7 @@ fn test_list_namespace_skill_count() {
         .success();
 
     creft_with(&creft_home)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: mypkg crawl\ndescription: Crawl\n---\n\n```bash\necho crawl\n```\n",
         )
@@ -347,7 +347,7 @@ fn test_list_namespace_skill_count() {
         .success();
 
     creft_with(&creft_home)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("mypkg"))
@@ -363,7 +363,7 @@ fn test_list_drill_into_namespace() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hello\ndescription: Greets someone\n---\n\n```bash\necho hello\n```\n",
         )
@@ -371,19 +371,19 @@ fn test_list_drill_into_namespace() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list", "tavily"])
+        .args(["cmd", "list", "tavily"])
         .assert()
         .success()
         .get_output()
@@ -430,26 +430,26 @@ fn test_list_deep_namespace() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: aws s3 copy\ndescription: Copy objects between S3 buckets\n---\n\n```bash\necho copy\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: aws s3 sync\ndescription: Sync a local directory to S3\n---\n\n```bash\necho sync\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: aws ec2 list\ndescription: List EC2 instances\n---\n\n```bash\necho list\n```\n")
         .assert()
         .success();
 
     // creft list aws — should show sub-namespaces aws s3 and aws ec2 as collapsed entries.
     let aws_output = creft_with(&dir)
-        .args(["list", "aws"])
+        .args(["cmd", "list", "aws"])
         .assert()
         .success()
         .get_output()
@@ -482,7 +482,7 @@ fn test_list_deep_namespace() {
 
     // creft list aws s3 — should show leaf skills aws s3 copy and aws s3 sync.
     let s3_output = creft_with(&dir)
-        .args(["list", "aws", "s3"])
+        .args(["cmd", "list", "aws", "s3"])
         .assert()
         .success()
         .get_output()
@@ -527,13 +527,13 @@ fn test_list_long_description_truncated() {
     );
 
     creft_with(&dir)
-        .args(["add", "--no-validate"])
+        .args(["cmd", "add", "--no-validate"])
         .write_stdin(markdown.as_str())
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         // The truncated output should contain "..." (ellipsis suffix).
@@ -552,13 +552,13 @@ fn test_list_short_description_not_truncated() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(markdown.as_str())
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains(short_desc))
@@ -574,7 +574,7 @@ fn hidden_top_level_command_excluded_from_list() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: _internal\ndescription: private\n---\n\n```bash\necho internal\n```\n",
         )
@@ -582,13 +582,13 @@ fn hidden_top_level_command_excluded_from_list() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: visible\ndescription: public\n---\n\n```bash\necho visible\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("visible"))
@@ -603,13 +603,13 @@ fn hidden_subcommand_excluded_from_namespace_drill_in() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
         )
@@ -618,7 +618,7 @@ fn hidden_subcommand_excluded_from_namespace_drill_in() {
 
     // Top-level list: hooks namespace appears with count of 1 (only visible command).
     let top_output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -636,7 +636,7 @@ fn hidden_subcommand_excluded_from_namespace_drill_in() {
 
     // Drill-in: hooks deploy appears, hooks _guard does not.
     creft_with(&dir)
-        .args(["list", "hooks"])
+        .args(["cmd", "list", "hooks"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hooks deploy"))
@@ -649,13 +649,13 @@ fn hidden_namespace_excluded_from_list() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: _private mycommand\ndescription: secret\n---\n\n```bash\necho secret\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("_private").not());
@@ -667,13 +667,13 @@ fn explicit_hidden_prefix_shows_hidden_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: _private mycommand\ndescription: secret\n---\n\n```bash\necho secret\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "_private"])
+        .args(["cmd", "list", "_private"])
         .assert()
         .success()
         .stdout(predicate::str::contains("_private mycommand"));
@@ -685,7 +685,7 @@ fn hidden_command_executes_normally() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: _internal\ndescription: private\n---\n\n```bash\necho hidden-output\n```\n",
         )
@@ -705,7 +705,7 @@ fn show_works_on_hidden_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: _internal\ndescription: private\n---\n\n```bash\necho hidden-output\n```\n",
         )
@@ -713,7 +713,7 @@ fn show_works_on_hidden_command() {
         .success();
 
     creft_with(&dir)
-        .args(["show", "_internal"])
+        .args(["cmd", "show", "_internal"])
         .assert()
         .success()
         .stdout(predicate::str::contains("name: _internal"));
@@ -725,19 +725,19 @@ fn tag_filter_excludes_hidden_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: _internal\ndescription: private\ntags:\n  - ops\n---\n\n```bash\necho internal\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: visible\ndescription: public\ntags:\n  - ops\n---\n\n```bash\necho visible\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "--tag", "ops"])
+        .args(["cmd", "list", "--tag", "ops"])
         .assert()
         .success()
         .stdout(predicate::str::contains("visible"))
@@ -750,19 +750,19 @@ fn test_list_shows_footer_with_namespaces() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -776,19 +776,19 @@ fn test_list_drill_in_no_footer() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "tavily"])
+        .args(["cmd", "list", "tavily"])
         .assert()
         .success()
         .stdout(predicate::str::contains("See 'creft <skill> --help' for details.").not());
@@ -800,7 +800,7 @@ fn test_list_footer_always_shown_at_root() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hello\ndescription: Greets someone\n---\n\n```bash\necho hello\n```\n",
         )
@@ -808,13 +808,13 @@ fn test_list_footer_always_shown_at_root() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: world\ndescription: Says world\n---\n\n```bash\necho world\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -830,7 +830,7 @@ fn list_all_includes_hidden_top_level_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: _internal\ndescription: private\n---\n\n```bash\necho internal\n```\n",
         )
@@ -838,13 +838,13 @@ fn list_all_includes_hidden_top_level_commands() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: visible\ndescription: public\n---\n\n```bash\necho visible\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "--all"])
+        .args(["cmd", "list", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("visible"))
@@ -857,13 +857,13 @@ fn list_all_includes_hidden_namespaced_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
         )
@@ -871,7 +871,7 @@ fn list_all_includes_hidden_namespaced_commands() {
         .success();
 
     creft_with(&dir)
-        .args(["list", "--all"])
+        .args(["cmd", "list", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hooks deploy"))
@@ -884,13 +884,13 @@ fn list_namespace_all_includes_hidden_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hooks _guard\ndescription: private guard\n---\n\n```bash\necho guard\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks deploy\ndescription: deploy hook\n---\n\n```bash\necho deploy\n```\n",
         )
@@ -901,7 +901,7 @@ fn list_namespace_all_includes_hidden_commands() {
     // everything after the first positional, so flags placed after are treated as
     // namespace tokens rather than parsed as options.
     creft_with(&dir)
-        .args(["list", "--all", "hooks"])
+        .args(["cmd", "list", "--all", "hooks"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hooks deploy"))
@@ -914,19 +914,19 @@ fn list_all_with_tag_includes_hidden_matching_commands() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: _internal\ndescription: private\ntags:\n  - ops\n---\n\n```bash\necho internal\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: visible\ndescription: public\ntags:\n  - ops\n---\n\n```bash\necho visible\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "--all", "--tag", "ops"])
+        .args(["cmd", "list", "--all", "--tag", "ops"])
         .assert()
         .success()
         .stdout(predicate::str::contains("visible"))
@@ -939,19 +939,19 @@ fn test_list_all_no_footer() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["list", "--all"])
+        .args(["cmd", "list", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("See 'creft <skill> --help' for details.").not());
@@ -965,19 +965,19 @@ fn test_namespace_help() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website from a starting URL\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily extract\ndescription: Extract content from URLs\n---\n\n```bash\necho extract\n```\n")
         .assert()
         .success();
@@ -1027,7 +1027,7 @@ fn test_namespace_help_nonexistent() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
@@ -1048,7 +1048,7 @@ fn test_namespace_help_skill_takes_priority() {
 
     // Add a skill literally named "tavily" (single token).
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: tavily\ndescription: The Tavily skill\n---\n\n```bash\necho tavily\n```\n",
         )
@@ -1057,7 +1057,7 @@ fn test_namespace_help_skill_takes_priority() {
 
     // Also add namespace-prefixed skills.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
@@ -1095,7 +1095,7 @@ fn help_subcommand_listing_suppresses_hidden_subcommands() {
 
     // A skill that acts as both a skill and a namespace prefix.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks\ndescription: Manage hooks\n---\n\n```bash\necho hooks\n```\n",
         )
@@ -1104,7 +1104,7 @@ fn help_subcommand_listing_suppresses_hidden_subcommands() {
 
     // A visible subcommand under hooks.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks deploy\ndescription: Deploy hook\n---\n\n```bash\necho deploy\n```\n",
         )
@@ -1113,7 +1113,7 @@ fn help_subcommand_listing_suppresses_hidden_subcommands() {
 
     // A hidden subcommand under hooks — must not appear in help output.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: hooks _guard\ndescription: Internal guard\n---\n\n```bash\necho guard\n```\n",
         )
@@ -1152,19 +1152,19 @@ fn test_list_has_skills_header() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: alpha\ndescription: first\n---\n\n```bash\necho alpha\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: beta\ndescription: second\n---\n\n```bash\necho beta\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1184,19 +1184,19 @@ fn test_list_drill_in_has_scoped_header() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list", "tavily"])
+        .args(["cmd", "list", "tavily"])
         .assert()
         .success()
         .get_output()
@@ -1216,13 +1216,13 @@ fn test_list_all_has_header() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list", "--all"])
+        .args(["cmd", "list", "--all"])
         .assert()
         .success()
         .get_output()
@@ -1242,13 +1242,13 @@ fn test_list_no_scope_annotation() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1273,25 +1273,25 @@ fn test_list_subskill_count_on_leaf_with_children() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: test\ndescription: Run tests\n---\n\n```bash\necho test\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: test mutants\ndescription: Run mutation testing\n---\n\n```bash\necho mutants\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: test integration\ndescription: Run integration tests\n---\n\n```bash\necho integration\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1325,7 +1325,7 @@ fn test_list_subskill_count_singular() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(
             "---\nname: deploy\ndescription: Deploy the app\n---\n\n```bash\necho deploy\n```\n",
         )
@@ -1333,13 +1333,13 @@ fn test_list_subskill_count_singular() {
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: deploy canary\ndescription: Canary deploy\n---\n\n```bash\necho canary\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1364,13 +1364,13 @@ fn test_list_no_subskill_count_plain_skill() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: hello\ndescription: greet\n---\n\n```bash\necho hello\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1390,19 +1390,19 @@ fn test_list_namespace_without_leaf_no_subskill_annotation() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily search\ndescription: Search the web\n---\n\n```bash\necho search\n```\n")
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin("---\nname: tavily crawl\ndescription: Crawl a website\n---\n\n```bash\necho crawl\n```\n")
         .assert()
         .success();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()
@@ -1429,7 +1429,7 @@ fn test_list_empty_no_header() {
     let dir = creft_env();
 
     let output = creft_with(&dir)
-        .args(["list"])
+        .args(["cmd", "list"])
         .assert()
         .success()
         .get_output()

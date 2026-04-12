@@ -18,6 +18,54 @@ pub struct Cli {
 /// Built-in subcommands dispatched before user-defined skills.
 #[derive(Subcommand, Debug)]
 pub enum BuiltinCommand {
+    /// Manage local and global skills
+    #[command(long_about = CMD_LONG_ABOUT, visible_alias = "command")]
+    Cmd {
+        #[command(subcommand)]
+        action: Option<CmdAction>,
+    },
+
+    /// Manage plugins
+    #[command(long_about = PLUGINS_LONG_ABOUT)]
+    Plugins {
+        #[command(subcommand)]
+        action: Option<PluginAction>,
+    },
+
+    /// Manage settings
+    #[command(long_about = SETTINGS_LONG_ABOUT)]
+    Settings {
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
+    },
+
+    /// Set up creft for a coding AI system
+    #[command(long_about = UP_LONG_ABOUT)]
+    Up {
+        /// Target system (claude-code, cursor, windsurf, aider, copilot, codex, gemini).
+        /// Auto-detects if omitted.
+        system: Option<String>,
+        /// Install globally instead of project-level
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
+
+    /// Initialize local skill storage
+    #[command(long_about = INIT_LONG_ABOUT)]
+    Init,
+
+    /// Check environment and skill health
+    #[command(long_about = DOCTOR_LONG_ABOUT)]
+    Doctor {
+        /// Skill name to check (omit for global health check)
+        #[arg(trailing_var_arg = true)]
+        name: Vec<String>,
+    },
+}
+
+/// Subcommands for `creft cmd`.
+#[derive(Subcommand, Debug)]
+pub enum CmdAction {
     /// Save a new skill from stdin
     #[command(long_about = ADD_LONG_ABOUT)]
     Add {
@@ -65,6 +113,13 @@ pub enum BuiltinCommand {
         name: Vec<String>,
     },
 
+    /// Print a skill's code blocks
+    #[command(long_about = CAT_LONG_ABOUT)]
+    Cat {
+        /// Command name
+        name: Vec<String>,
+    },
+
     /// Delete a skill
     #[command(long_about = RM_LONG_ABOUT)]
     Rm {
@@ -74,46 +129,9 @@ pub enum BuiltinCommand {
         #[arg(short = 'g', long)]
         global: bool,
     },
-
-    /// Print a skill's code blocks
-    #[command(long_about = CAT_LONG_ABOUT)]
-    Cat {
-        /// Command name
-        name: Vec<String>,
-    },
-
-    /// Manage plugins
-    #[command(long_about = PLUGIN_LONG_ABOUT)]
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
-
-    /// Set up creft for a coding AI system
-    #[command(long_about = UP_LONG_ABOUT)]
-    Up {
-        /// Target system (claude-code, cursor, windsurf, aider, copilot, codex, gemini).
-        /// Auto-detects if omitted.
-        system: Option<String>,
-        /// Install globally instead of project-level
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
-
-    /// Initialize local skill storage
-    #[command(long_about = INIT_LONG_ABOUT)]
-    Init,
-
-    /// Check environment and skill health
-    #[command(long_about = DOCTOR_LONG_ABOUT)]
-    Doctor {
-        /// Skill name to check (omit for global health check)
-        #[arg(trailing_var_arg = true)]
-        name: Vec<String>,
-    },
 }
 
-/// Subcommands for `creft plugin`.
+/// Subcommands for `creft plugins`.
 #[derive(Subcommand, Debug)]
 pub enum PluginAction {
     /// Install a plugin from a git repo
@@ -172,5 +190,20 @@ pub enum PluginAction {
     Search {
         /// Search query (matches name, description, tags)
         query: Vec<String>,
+    },
+}
+
+/// Subcommands for `creft settings`.
+#[derive(Subcommand, Debug)]
+pub enum SettingsAction {
+    /// Show current settings
+    Show,
+
+    /// Set a configuration value
+    Set {
+        /// Setting key
+        key: String,
+        /// Setting value
+        value: String,
     },
 }

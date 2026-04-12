@@ -18,7 +18,7 @@ fn test_llm_block_dry_run() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(LLM_CAT_SKILL)
         .assert()
         .success();
@@ -38,7 +38,7 @@ fn test_llm_block_execution_with_cat() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(LLM_CAT_SKILL)
         .assert()
         .success();
@@ -59,7 +59,7 @@ fn test_llm_block_execution_provider_not_found() {
 ```llm\nprovider: nonexistent-llm-xyz\n---\nsome prompt\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -85,7 +85,7 @@ fn test_llm_block_pipe_sponge_prev() {
 ```llm\nprovider: cat\n---\nreceived: {{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -109,7 +109,7 @@ fn test_llm_block_no_header() {
 ```llm\njust a prompt with no yaml header\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -136,7 +136,7 @@ fn test_llm_block_pipe_mode_sponge() {
 ```llm\nprovider: cat\n---\npipe input: {{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -159,7 +159,7 @@ fn test_llm_block_validate_empty_prompt() {
 
     // creft add validates on save — should fail.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .failure()
@@ -173,7 +173,7 @@ fn test_llm_block_doctor_reports_provider() {
 
     // Use cat as provider so it's found on PATH.
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(LLM_CAT_SKILL)
         .assert()
         .success();
@@ -192,7 +192,7 @@ fn test_llm_block_verbose_shows_command() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(LLM_CAT_SKILL)
         .assert()
         .success();
@@ -223,7 +223,7 @@ fn test_llm_pipe_stdin_routes_prev_output() {
 ```bash\ncat\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -252,7 +252,7 @@ fn test_llm_pipe_block0_inherits_parent_stdin() {
 ```llm\nprovider: cat\n---\n{{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -283,7 +283,7 @@ fn test_llm_pipe_empty_prev_sends_eof() {
 ```bash\nwc -c\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -329,7 +329,7 @@ fn test_llm_block_exit_99_early_return() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -357,7 +357,7 @@ fn test_llm_sponge_pipe_streams_to_downstream() {
 ```bash\nwc -c\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -381,7 +381,7 @@ fn test_llm_sponge_multiple_consecutive() {
 ```bash\ncat\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -406,7 +406,7 @@ fn test_llm_sponge_provider_not_found_in_pipe() {
 ```bash\ncat\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -447,7 +447,7 @@ fn test_llm_sponge_exit_99_in_pipe() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -471,7 +471,7 @@ fn test_llm_sponge_first_block() {
 ```bash\ncat\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -494,7 +494,7 @@ fn test_llm_sponge_last_block() {
 ```llm\nprovider: cat\n---\ngot: {{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -518,7 +518,7 @@ args:\n  - name: greeting\n    required: true\n---\n\n\
 ```llm\nprovider: cat\n---\n{{greeting}}: {{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -564,7 +564,7 @@ fn test_pipe_exit_99_prevents_sponge_spawn() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -623,7 +623,7 @@ fn test_pipe_exit_99_sponge_captures_upstream_output() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -692,7 +692,7 @@ fn test_pipe_exit_99_propagates_through_sponge_chain() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -736,7 +736,7 @@ fn test_pipe_sponge_chain_normal_exit_proceeds() {
 ```llm\nprovider: cat\n---\nB:{{prev}}\n```\n";
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill)
         .assert()
         .success();
@@ -783,7 +783,7 @@ fn test_pipe_exit_99_three_block_sponge_captures() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();
@@ -857,7 +857,7 @@ fn test_pipe_sponge_originated_exit_99_cancels_downstream() {
     );
 
     creft_with(&dir)
-        .args(["add"])
+        .args(["cmd", "add"])
         .write_stdin(skill.as_str())
         .assert()
         .success();

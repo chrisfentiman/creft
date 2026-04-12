@@ -1276,26 +1276,31 @@ mod tests {
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
-    #[test]
-    fn test_validate_manifest_name_reserved_add() {
-        let err = validate_manifest_name("add").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
-    }
-
-    /// `install`, `update`, and `uninstall` are no longer reserved names.
-    /// Plugin management moved under `creft plugin`, freeing these names for skill authors.
+    /// `add`, `list`, `install`, `update`, `uninstall`, and `plugin` are no longer
+    /// reserved names. Sub-commands live under `creft cmd` or `creft plugins`, freeing
+    /// these names for skill authors.
     #[rstest]
+    #[case::add("add")]
+    #[case::list("list")]
     #[case::install("install")]
     #[case::update("update")]
     #[case::uninstall("uninstall")]
+    #[case::plugin("plugin")]
     fn formerly_reserved_names_are_now_valid(#[case] name: &str) {
         assert!(validate_manifest_name(name).is_ok());
     }
 
     #[test]
-    fn test_validate_manifest_name_plugin_is_reserved() {
-        // `plugin` is the new reserved name for the plugin management namespace.
-        let err = validate_manifest_name("plugin").unwrap_err();
+    fn test_validate_manifest_name_cmd_is_reserved() {
+        // `cmd` is the new reserved name for the skill management namespace.
+        let err = validate_manifest_name("cmd").unwrap_err();
+        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    }
+
+    #[test]
+    fn test_validate_manifest_name_plugins_is_reserved() {
+        // `plugins` is the reserved name for the plugin management namespace.
+        let err = validate_manifest_name("plugins").unwrap_err();
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
