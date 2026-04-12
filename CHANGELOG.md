@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.8](https://github.com/chrisfentiman/creft/compare/creft-v0.2.7...creft-v0.2.8) (2026-04-12)
+
+
+### Bug Fixes
+
+* **registry:** skip README.md in command discovery ([#45](https://github.com/chrisfentiman/creft/issues/45)) ([fa9c2cf](https://github.com/chrisfentiman/creft/commit/fa9c2cf9aa0e0cbf570490f80c78f8bf1484ed39))
+
 ## [0.2.7](https://github.com/chrisfentiman/creft/compare/creft-v0.2.6...creft-v0.2.7) (2026-04-12)
 
 
