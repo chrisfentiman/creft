@@ -14,7 +14,7 @@ AI coding agents generate useful workflows — deploy scripts, test runners, cod
 - **Skills run deterministically.** No interpretation, no token cost at execution time.
 - **LLM blocks bring AI into the pipeline.** Send output to Claude, Gemini, Codex, or Ollama as a step in the chain.
 - **Skills validate before saving.** Syntax, PATH commands, PyPI/npm dependencies — checked at `creft add` time.
-- **Skills distribute as packages.** `creft install <git-url>` shares workflows across teams.
+- **Plugins extend creft.** Install collections of skills from any git repo and activate them per project.
 
 ## Install
 
@@ -100,13 +100,93 @@ env:
 
 `creft add` checks syntax, verifies template variables are declared, runs shellcheck on bash blocks, and resolves `# deps:` declarations against the PyPI/npm registry before saving the file.
 
-### Packages
+### Plugins
 
-Install a collection of skills from any public git repo. Skills are namespaced under the package name.
+Install a collection of skills from any public git repo. The plugin is cached globally; activate specific commands in a project.
 
 ```sh
-creft install https://github.com/example/k8s-tools
+creft plugin install https://github.com/example/k8s-tools
+creft plugin activate k8s-tools
 creft k8s-tools deploy production
+```
+
+Activate a single command instead of the whole plugin:
+
+```sh
+creft plugin activate k8s-tools/deploy
+```
+
+## Bundled plugins
+
+Creft ships four plugins. Install them individually or search across all of them with `creft plugin search`.
+
+### fetch
+
+Pull dependency source code into `workbench/code/` so agents read the actual implementation instead of guessing signatures.
+
+```sh
+creft plugin install creft-bundled --plugin fetch
+creft plugin activate fetch
+
+creft fetch serde
+creft fetch serde@1.0.196
+creft fetch serde-rs/serde@v1.0.196
+creft fetch --list
+```
+
+Ecosystem detection reads `Cargo.toml`, `package.json`, or `pyproject.toml` to resolve bare package names. Override with `--ecosystem crates`, `--ecosystem npm`, or `--ecosystem pypi`.
+
+### ask
+
+Query a registered project through its own Claude environment, or open a native dialog to collect input from the user.
+
+```sh
+creft plugin install creft-bundled --plugin ask
+creft plugin activate ask
+
+# Query another project
+creft ask weft "how does the router handle auth failures?"
+
+# Ask the user
+creft ask "Which environment?" --type choice --options "staging,production"
+creft ask "Continue?" --type confirm
+```
+
+Projects are registered in `~/.creft/projects.json`. `creft ask --list` shows registered projects.
+
+### mcp
+
+Manage MCP server configurations without editing JSON. Secrets go to the macOS keychain; the settings file is assembled from a vault at sync time.
+
+```sh
+creft plugin install creft-bundled --plugin mcp
+creft plugin activate mcp
+
+creft mcp add arxiv --http https://mcp.arxiv.org --requires-auth
+creft mcp ls
+creft mcp sync
+creft mcp remove arxiv --purge
+```
+
+Default scope installs per-project (`projects[<cwd>].mcpServers` in `~/.claude.json`). Pass `--global` to install at the user level.
+
+### schedule
+
+Schedule recurring agent tasks on macOS via launchd. Jobs persist across reboots, log to a file, and run with your full shell environment.
+
+```sh
+creft plugin install creft-bundled --plugin schedule
+creft plugin activate schedule
+
+creft schedule add daily-brief \
+  --schedule "0 7 * * *" \
+  --command "creft run daily-brief" \
+  --workdir ~/projects/my-repo
+
+creft schedule ls
+creft schedule status daily-brief
+creft schedule run daily-brief
+creft schedule remove daily-brief
 ```
 
 ## Agent integration
@@ -131,6 +211,8 @@ Run `creft up --help` for all systems and the `--global` flag.
 
 ## Commands
 
+### Skill commands
+
 | | |
 |---|---|
 | `creft add` | Save a skill from stdin |
@@ -139,9 +221,25 @@ Run `creft up --help` for all systems and the `--global` flag.
 | `creft list` | List skills |
 | `creft show <name>` | Print a skill's full definition |
 | `creft cat <name>` | Print code blocks only |
-| `creft install <url>` | Install a skill package from git |
-| `creft update [name]` | Update installed packages |
-| `creft uninstall <name>` | Remove a package |
+
+### Plugin commands
+
+| | |
+|---|---|
+| `creft plugin install <url>` | Install a plugin from a git repo |
+| `creft plugin update [name]` | Update installed plugins |
+| `creft plugin uninstall <name>` | Remove a plugin |
+| `creft plugin activate <target>` | Make plugin commands available in a scope |
+| `creft plugin deactivate <target>` | Remove plugin commands from a scope |
+| `creft plugin list [name]` | List installed plugins or commands in a plugin |
+| `creft plugin search <query>` | Search commands across installed plugins |
+
+`<target>` is `plugin-name` to activate all commands or `plugin-name/command` to activate one. Pass `--global` to activate at the user level instead of the nearest `.creft/`.
+
+### Other commands
+
+| | |
+|---|---|
 | `creft up [system]` | Set up AI agent integration |
 | `creft init` | Initialize local `.creft/` |
 | `creft doctor [name]` | Check environment or skill health |
