@@ -65,19 +65,6 @@ pub enum BuiltinCommand {
         name: Vec<String>,
     },
 
-    /// Edit a skill in $EDITOR or from stdin
-    #[command(long_about = EDIT_LONG_ABOUT)]
-    Edit {
-        /// Command name
-        name: Vec<String>,
-        /// Force editing in global ~/.creft/ even if a local version exists
-        #[arg(short = 'g', long)]
-        global: bool,
-        /// Skip code block validation when piping new content
-        #[arg(long)]
-        no_validate: bool,
-    },
-
     /// Delete a skill
     #[command(long_about = RM_LONG_ABOUT)]
     Rm {

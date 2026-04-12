@@ -9,7 +9,7 @@ use crate::markdown;
 use crate::model::{AppContext, CommandDef, ParsedCommand, Scope};
 use crate::store;
 
-/// Manifest from a skill package's `creft.yaml` file.
+/// Manifest for an installed skill package.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackageManifest {
     pub name: String,
@@ -109,8 +109,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CreftError> {
 
 /// Read a `PackageManifest` from an installed package directory.
 ///
-/// Tries `.creft/catalog.json` first (new format), falling back to `creft.yaml`
-/// (legacy format) for backward compatibility. Returns `None` if neither exists.
+/// Reads `.creft/catalog.json`. Returns `None` if no catalog exists.
 pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, String>> {
     let catalog_path = path.join(".creft").join("catalog.json");
     if catalog_path.exists() {
@@ -138,26 +137,13 @@ pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, 
         );
     }
 
-    let yaml_path = path.join("creft.yaml");
-    if yaml_path.exists() {
-        return Some(
-            std::fs::read_to_string(&yaml_path)
-                .map_err(|e| e.to_string())
-                .and_then(|content| {
-                    serde_yaml_ng::from_str::<PackageManifest>(&content).map_err(|e| e.to_string())
-                }),
-        );
-    }
-
     None
 }
 
 /// List all installed packages in the given scope.
 ///
-/// Reads `ctx.packages_dir_for(scope)` and parses the manifest for each
-/// subdirectory. Tries `.creft/catalog.json` first; falls back to `creft.yaml`
-/// for packages installed before the catalog format was introduced.
-/// Entries that fail to parse are skipped with a warning to stderr.
+/// Reads `ctx.packages_dir_for(scope)` and parses `.creft/catalog.json` for each
+/// subdirectory. Entries that fail to parse are skipped with a warning to stderr.
 pub fn list_packages_in(
     ctx: &AppContext,
     scope: Scope,
@@ -198,7 +184,7 @@ pub fn list_packages_in(
 /// Skill names are derived from file paths relative to the package root —
 /// frontmatter `name` fields are ignored.
 ///
-/// Skips `creft.yaml`, dotfiles, and dot-directories.
+/// Skips dotfiles and dot-directories.
 /// Enforces a 3-level nesting cap: files nested more than 3 directory levels
 /// deep within the package root are skipped (to match CLI resolution limits).
 pub fn list_package_skills_in(
@@ -629,8 +615,7 @@ pub fn install_by_name(
 
 /// Update an installed plugin by running `git pull --ff-only` in its directory.
 ///
-/// After pulling, re-reads the manifest from `.creft/catalog.json` or `creft.yaml`
-/// (whichever is present) to return updated metadata.
+/// After pulling, re-reads the manifest from `.creft/catalog.json` to return updated metadata.
 pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
     let plugin_path = ctx.plugins_dir()?.join(name);
     if !plugin_path.exists() {
@@ -1404,12 +1389,11 @@ mod tests {
     fn test_list_packages_returns_installed() {
         let dir = tempfile::TempDir::new().unwrap();
 
-        // Create a package directory with a creft.yaml
         let pkg_dir = dir.path().join("packages").join("my-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
         std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: my-pkg\nversion: 1.0.0\ndescription: A test package\n",
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"my-pkg","description":"A test package","plugins":[{"name":"my-pkg","source":".","description":"A test package","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
 
@@ -1429,17 +1413,17 @@ mod tests {
 
         // Valid package
         let pkg1 = dir.path().join("packages").join("good-pkg");
-        std::fs::create_dir_all(&pkg1).unwrap();
+        std::fs::create_dir_all(pkg1.join(".creft")).unwrap();
         std::fs::write(
-            pkg1.join("creft.yaml"),
-            "name: good-pkg\nversion: 1.0.0\ndescription: Good\n",
+            pkg1.join(".creft").join("catalog.json"),
+            r#"{"name":"good-pkg","description":"Good","plugins":[{"name":"good-pkg","source":".","description":"Good","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
 
-        // Invalid package — missing required fields
+        // Invalid package — malformed catalog.json
         let pkg2 = dir.path().join("packages").join("bad-pkg");
-        std::fs::create_dir_all(&pkg2).unwrap();
-        std::fs::write(pkg2.join("creft.yaml"), "not_valid_yaml: [unclosed").unwrap();
+        std::fs::create_dir_all(pkg2.join(".creft")).unwrap();
+        std::fs::write(pkg2.join(".creft").join("catalog.json"), "not valid json [").unwrap();
 
         let ctx = AppContext::for_test_with_creft_home(
             dir.path().to_path_buf(),
@@ -1450,22 +1434,16 @@ mod tests {
         assert_eq!(pkgs[0].manifest.name, "good-pkg");
     }
 
-    // --- read_manifest_from (Stage 3: catalog-first with creft.yaml fallback) ---
+    // --- read_manifest_from ---
 
     #[test]
-    fn read_manifest_from_prefers_catalog_json() {
+    fn read_manifest_from_reads_catalog_json() {
         let dir = tempfile::TempDir::new().unwrap();
         let catalog_dir = dir.path().join(".creft");
         std::fs::create_dir_all(&catalog_dir).unwrap();
         std::fs::write(
             catalog_dir.join("catalog.json"),
             r#"{"name":"my-pkg","description":"desc","plugins":[{"name":"my-pkg","source":".","description":"From catalog","version":"2.0.0","tags":[]}]}"#,
-        )
-        .unwrap();
-        // Also write creft.yaml — catalog.json should win.
-        std::fs::write(
-            dir.path().join("creft.yaml"),
-            "name: my-pkg\nversion: 1.0.0\ndescription: From yaml\n",
         )
         .unwrap();
 
@@ -1475,22 +1453,16 @@ mod tests {
     }
 
     #[test]
-    fn read_manifest_from_falls_back_to_creft_yaml() {
+    fn read_manifest_from_returns_none_when_no_manifest() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("creft.yaml"),
-            "name: old-pkg\nversion: 1.5.0\ndescription: Legacy package\n",
-        )
-        .unwrap();
-
-        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
-        assert_eq!(manifest.name, "old-pkg");
-        assert_eq!(manifest.version, "1.5.0");
+        assert!(read_manifest_from(dir.path()).is_none());
     }
 
     #[test]
-    fn read_manifest_from_returns_none_when_no_manifest() {
+    fn read_manifest_from_ignores_directory_without_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
+        // Directory exists but contains no .creft/catalog.json.
+        std::fs::create_dir_all(dir.path().join("some-files")).unwrap();
         assert!(read_manifest_from(dir.path()).is_none());
     }
 
@@ -1513,26 +1485,6 @@ mod tests {
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].manifest.name, "catalog-pkg");
         assert_eq!(pkgs[0].manifest.version, "3.0.0");
-    }
-
-    #[test]
-    fn list_packages_backward_compat_creft_yaml() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let pkg_dir = dir.path().join("packages").join("yaml-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: yaml-pkg\nversion: 1.0.0\ndescription: Legacy\n",
-        )
-        .unwrap();
-
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
-        assert_eq!(pkgs.len(), 1);
-        assert_eq!(pkgs[0].manifest.name, "yaml-pkg");
     }
 
     // --- list_package_skills ---
@@ -1621,18 +1573,19 @@ mod tests {
     }
 
     #[test]
-    fn test_list_package_skills_excludes_creft_yaml() {
+    fn test_list_package_skills_excludes_non_md_files() {
         let dir = tempfile::TempDir::new().unwrap();
 
         let pkg_dir = dir.path().join("packages").join("mypkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-
-        // creft.yaml — not a .md file, should be excluded by extension filter
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
         std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: mypkg\nversion: 1.0.0\ndescription: A package\n",
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"mypkg","description":"","plugins":[{"name":"mypkg","source":".","description":"A package","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
+
+        // A non-.md file — should be excluded by extension filter
+        std::fs::write(pkg_dir.join("notes.txt"), "just some notes").unwrap();
 
         // Real skill
         std::fs::write(

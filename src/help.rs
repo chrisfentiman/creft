@@ -189,27 +189,6 @@ The installer never overwrites existing content. Existing creft sections
 are refreshed; non-creft content is preserved. Some systems (Cursor,
 Windsurf) don't support global rules via files.";
 
-/// Extended description shown by `creft edit --help`, covering both pipe-replace and `$EDITOR` modes.
-pub const EDIT_LONG_ABOUT: &str = "\
-Opens a skill for editing
-
-Two modes: pipe new content to stdin (for scripts and AI agents), or
-open in $EDITOR (for humans).
-
-Examples:
-  creft edit hello                         Open in $EDITOR
-  echo \"$content\" | creft edit hello       Replace content from stdin
-  EDITOR=\"code --wait\" creft edit hello    Use VS Code as editor
-  creft edit gh issue-body                 Edit a namespaced skill
-
-Pipe Mode:
-  Pipe valid creft markdown to stdin. The skill file is replaced.
-  Content is validated before writing. Use --no-validate to skip.
-
-Editor Mode:
-  Without piped input, opens in $EDITOR (defaults to vi).
-  Multi-word editors like 'code --wait' are supported.";
-
 /// Extended description shown by `creft doctor --help`, covering global and skill-specific check modes.
 pub const DOCTOR_LONG_ABOUT: &str = "\
 Checks whether your environment can run creft skills
@@ -281,8 +260,8 @@ Installs a plugin from a git repository into the global plugin cache
 Plugin installs are always global (~/.creft/plugins/). Activate commands
 in a project scope with 'creft plugin activate'.
 
-A plugin is a git repo with a .creft/catalog.json manifest (or creft.yaml
-for backward compatibility). Any .md file with valid creft frontmatter
+A plugin is a git repo with a .creft/catalog.json manifest.
+Any .md file with valid creft frontmatter
 becomes an available command, namespaced under the plugin name.
 
 Examples:

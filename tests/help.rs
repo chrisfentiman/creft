@@ -53,7 +53,7 @@ fn test_root_long_help_contains_all_subcommands() {
     let stdout = String::from_utf8(output).unwrap();
 
     let subcommands = [
-        "add", "list", "show", "edit", "rm", "cat", "plugin", "up", "init", "doctor",
+        "add", "list", "show", "rm", "cat", "plugin", "up", "init", "doctor",
     ];
     for cmd in &subcommands {
         assert!(
@@ -542,18 +542,7 @@ fn test_all_builtin_help_has_usage() {
     let dir = creft_env();
 
     let builtins = [
-        "add",
-        "list",
-        "show",
-        "cat",
-        "rm",
-        "up",
-        "edit",
-        "install",
-        "update",
-        "uninstall",
-        "doctor",
-        "init",
+        "add", "list", "show", "cat", "rm", "up", "doctor", "init",
     ];
 
     for cmd in &builtins {
@@ -582,18 +571,7 @@ fn test_no_allcaps_sections_in_help() {
     let dir = creft_env();
 
     let builtins = [
-        "add",
-        "list",
-        "show",
-        "cat",
-        "rm",
-        "up",
-        "edit",
-        "install",
-        "update",
-        "uninstall",
-        "doctor",
-        "init",
+        "add", "list", "show", "cat", "rm", "up", "doctor", "init",
     ];
 
     // Regex: a line that is all uppercase letters and spaces (4+ chars) ending with ':'

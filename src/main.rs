@@ -124,15 +124,6 @@ fn run_builtin(ctx: &model::AppContext, args: Option<Vec<String>>) -> Result<(),
             cmd_show(ctx, &name)
         }
 
-        cli::BuiltinCommand::Edit {
-            name,
-            global,
-            no_validate,
-        } => {
-            let name = name.join(" ");
-            cmd_edit(ctx, &name, global, no_validate)
-        }
-
         cli::BuiltinCommand::Rm { name, global } => {
             let name = name.join(" ");
             cmd_rm(ctx, &name, global)
@@ -709,89 +700,6 @@ fn cmd_show(ctx: &model::AppContext, name: &str) -> Result<(), CreftError> {
     let (resolved_name, _, source) = store::resolve_command(ctx, &args)?;
     let content = store::read_raw_from(ctx, &resolved_name, &source)?;
     println!("{}", content);
-    Ok(())
-}
-
-fn cmd_edit(
-    ctx: &model::AppContext,
-    name: &str,
-    global: bool,
-    no_validate: bool,
-) -> Result<(), CreftError> {
-    let args: Vec<String> = name.split_whitespace().map(String::from).collect();
-    let (resolved_name, _, source) = store::resolve_command(ctx, &args)?;
-
-    match &source {
-        model::SkillSource::Package(_, _) => {
-            return Err(CreftError::Setup(
-                "cannot edit installed package skills -- they are read-only".into(),
-            ));
-        }
-        model::SkillSource::Plugin(_) => {
-            return Err(CreftError::Setup(
-                "cannot edit plugin skills -- they are read-only".into(),
-            ));
-        }
-        model::SkillSource::Owned(_) => {}
-    }
-
-    let scope = if global {
-        model::Scope::Global
-    } else {
-        match &source {
-            model::SkillSource::Owned(s) => *s,
-            model::SkillSource::Package(_, s) => *s,
-            // Unreachable: Plugin is rejected above, but required for exhaustiveness.
-            model::SkillSource::Plugin(_) => model::Scope::Global,
-        }
-    };
-    let path = store::name_to_path_in(ctx, &resolved_name, scope)?;
-    if !path.exists() {
-        return Err(CreftError::CommandNotFound(resolved_name));
-    }
-
-    if std::io::stdin().is_terminal() {
-        // Split on whitespace so multi-word editors like "code --wait" work correctly.
-        let editor_var = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-        let mut parts = editor_var.split_whitespace();
-        let binary = parts.next().unwrap_or("vi");
-        let extra_args: Vec<&str> = parts.collect();
-
-        std::process::Command::new(binary)
-            .args(&extra_args)
-            .arg(&path)
-            .status()
-            .map_err(CreftError::Io)?;
-    } else {
-        let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(CreftError::Io)?;
-
-        // Parse first to validate frontmatter before touching the file.
-        let (def, body) = frontmatter::parse(&input)?;
-
-        if !no_validate {
-            let (_, blocks) = markdown::extract_blocks(&body);
-            let result = validate::validate_skill(&def, &blocks, Some(ctx));
-
-            for w in &result.warnings {
-                eprintln!("warning: {}", w);
-            }
-
-            if result.has_errors() {
-                for e in &result.errors {
-                    eprintln!("error: {}", e);
-                }
-                return Err(CreftError::ValidationErrors(result.errors));
-            }
-        }
-
-        // Write raw stdin content — do NOT re-serialize, to preserve agent formatting.
-        std::fs::write(&path, &input).map_err(CreftError::Io)?;
-        eprintln!("edited: {}", resolved_name);
-    }
-
     Ok(())
 }
 

@@ -142,7 +142,7 @@ pub fn creft_two_scope(env: &TwoScopeEnv) -> Command {
 /// 1. Creates a TempDir.
 /// 2. Runs `git init` inside it.
 /// 3. Configures a dummy git identity (required for `git commit`).
-/// 4. Writes `creft.yaml` with the given package name.
+/// 4. Writes `.creft/catalog.json` with the given package name.
 /// 5. Writes each skill file.
 /// 6. Commits everything.
 pub fn create_test_package(name: &str, skills: &[(&str, &str)]) -> TempDir {

@@ -46,7 +46,7 @@ fn plugin_install_repo_without_manifest_fails() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
 
-    // Init a git repo but do NOT add creft.yaml.
+    // Init a git repo without a .creft/catalog.json manifest.
     std::process::Command::new("git")
         .args(["init"])
         .current_dir(path)
@@ -457,11 +457,11 @@ fn plugin_is_reserved() {
 fn package_skill_resolves_and_runs() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("my-legacy-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: my-legacy-pkg\nversion: 1.0.0\ndescription: legacy package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"my-legacy-pkg","description":"legacy package","plugins":[{"name":"my-legacy-pkg","source":".","description":"legacy package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -488,13 +488,11 @@ fn package_nested_skill_resolves_and_runs() {
         .join("deploy");
     std::fs::create_dir_all(&pkg_dir).unwrap();
 
+    let nested_catalog_dir = creft_home.path().join("packages").join("nested-pkg").join(".creft");
+    std::fs::create_dir_all(&nested_catalog_dir).unwrap();
     std::fs::write(
-        creft_home
-            .path()
-            .join("packages")
-            .join("nested-pkg")
-            .join("creft.yaml"),
-        "name: nested-pkg\nversion: 1.0.0\ndescription: nested package\n",
+        nested_catalog_dir.join("catalog.json"),
+        r#"{"name":"nested-pkg","description":"nested package","plugins":[{"name":"nested-pkg","source":".","description":"nested package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -515,11 +513,11 @@ fn package_nested_skill_resolves_and_runs() {
 fn package_appears_in_list_output() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("listable-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: listable-pkg\nversion: 1.0.0\ndescription: listable package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"listable-pkg","description":"listable package","plugins":[{"name":"listable-pkg","source":".","description":"listable package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -613,9 +611,9 @@ fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
         .stderr(predicate::str::contains("not found in catalog"));
 }
 
-/// A repo missing both `.creft/catalog.json` and `creft.yaml` returns ManifestNotFound.
+/// A repo missing `.creft/catalog.json` returns ManifestNotFound.
 #[test]
-fn plugin_install_repo_without_catalog_or_yaml_fails() {
+fn plugin_install_repo_without_catalog_fails() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
 
@@ -679,11 +677,11 @@ fn plugin_install_github_shorthand_routes_to_github() {
 fn package_missing_skill_returns_command_not_found() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("err-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: err-pkg\nversion: 1.0.0\ndescription: error package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"err-pkg","description":"error package","plugins":[{"name":"err-pkg","source":".","description":"error package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
 

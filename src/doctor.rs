@@ -265,7 +265,6 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
 
     // list_packages_in silently skips unreadable manifests; scan dirs directly
     // to surface broken ones as explicit Fail results.
-    // read_manifest_from tries .creft/catalog.json first, falls back to creft.yaml.
     for scope in &[Scope::Global, Scope::Local] {
         let base = match ctx.packages_dir_for(*scope) {
             Ok(p) => p,
@@ -1842,10 +1841,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx =
             crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        // Create a broken manifest
+        // Create a package with a malformed catalog.json
         let pkg_dir = tmp.path().join(".creft/packages/broken-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(pkg_dir.join("creft.yaml"), "not: valid: yaml: [").unwrap();
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
+        std::fs::write(pkg_dir.join(".creft").join("catalog.json"), "not valid json [").unwrap();
 
         let results = check_packages(&ctx);
         // Should include at least one Fail result for the broken manifest
