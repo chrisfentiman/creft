@@ -1,4 +1,4 @@
-use crate::cmd::skill::{truncate_desc, LIST_DESC_MAX};
+use crate::cmd::skill::{LIST_DESC_MAX, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::{model, registry, style};

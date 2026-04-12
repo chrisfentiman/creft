@@ -3,10 +3,10 @@ use std::sync::atomic::AtomicBool;
 
 use clap::Parser;
 
-use crate::cmd::skill::{format_skill_desc, truncate_desc, LIST_DESC_MAX};
+use crate::cmd::skill::{LIST_DESC_MAX, format_skill_desc, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
-use crate::{cli, model, runner, store, style};
+use crate::{cli, model, runner, shell, store, style};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -91,7 +91,8 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     #[cfg(unix)]
     let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
 
-    let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run);
+    let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
+        .with_shell_preference(shell::detect());
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.

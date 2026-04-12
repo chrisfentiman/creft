@@ -11,6 +11,7 @@ mod registry;
 mod registry_config;
 mod runner;
 mod setup;
+mod shell;
 mod store;
 mod style;
 mod validate;
@@ -93,7 +94,16 @@ fn run_builtin(ctx: &model::AppContext, args: Option<Vec<String>>) -> Result<(),
                 force,
                 no_validate,
                 global,
-            }) => cmd::skill::cmd_add(ctx, name, description, arg_defs, tags, force, no_validate, global),
+            }) => cmd::skill::cmd_add(
+                ctx,
+                name,
+                description,
+                arg_defs,
+                tags,
+                force,
+                no_validate,
+                global,
+            ),
             Some(cli::CmdAction::List {
                 tag,
                 all,
@@ -118,9 +128,7 @@ fn run_builtin(ctx: &model::AppContext, args: Option<Vec<String>>) -> Result<(),
             Some(cli::PluginAction::Install { source, plugin }) => {
                 cmd::plugin::cmd_plugin_install(ctx, &source, plugin.as_deref())
             }
-            Some(cli::PluginAction::Update { name }) => {
-                cmd::plugin::cmd_plugin_update(ctx, name)
-            }
+            Some(cli::PluginAction::Update { name }) => cmd::plugin::cmd_plugin_update(ctx, name),
             Some(cli::PluginAction::Uninstall { name }) => {
                 cmd::plugin::cmd_plugin_uninstall(ctx, &name)
             }

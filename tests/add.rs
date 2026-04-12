@@ -350,7 +350,10 @@ fn test_rm_command() {
         .assert()
         .success();
 
-    creft_with(&dir).args(["cmd", "rm", "hello"]).assert().success();
+    creft_with(&dir)
+        .args(["cmd", "rm", "hello"])
+        .assert()
+        .success();
 
     // After removal the list is empty.
     creft_with(&dir)

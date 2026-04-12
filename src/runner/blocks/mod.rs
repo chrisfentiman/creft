@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::error::CreftError;
 use crate::model::CodeBlock;
+use crate::shell as detect_shell;
 
 use super::RunContext;
 
@@ -150,6 +151,22 @@ pub(crate) fn spawn_block(
 ) -> Result<(std::process::Child, Option<tempfile::TempDir>), CreftError> {
     let env_pairs = ctx.env_pairs();
     let cwd = ctx.cwd();
+
+    // Resolve shell preference: if the block's language is in the shell family
+    // and the user's preferred shell is also in the shell family, substitute it.
+    // This lets a zsh user run bash-tagged blocks under zsh, and vice versa.
+    let resolved_block: CodeBlock;
+    let block = if let Some(resolved_lang) =
+        detect_shell::resolve_shell(&block.lang, ctx.shell_preference())
+    {
+        resolved_block = CodeBlock {
+            lang: resolved_lang.to_string(),
+            ..block.clone()
+        };
+        &resolved_block
+    } else {
+        block
+    };
 
     let runner = runner_for(&block.lang);
     let (mut cmd, node_deps_dir) = runner.build_command(block, script_path)?;

@@ -40,6 +40,13 @@ pub(crate) struct RunContext {
 
     /// Whether `--dry-run` was passed. Controls execution vs. print-only.
     dry_run: bool,
+
+    /// Caller's preferred shell (e.g., "zsh", "bash").
+    ///
+    /// When set, shell-family blocks (`bash`, `sh`, `zsh`) use this shell
+    /// instead of the block's declared language tag. Set from shell detection
+    /// at skill invocation time. `None` means use block language literally.
+    shell_preference: Option<String>,
 }
 
 impl RunContext {
@@ -56,7 +63,22 @@ impl RunContext {
             env,
             verbose,
             dry_run,
+            shell_preference: None,
         }
+    }
+
+    /// Set the caller's shell preference.
+    ///
+    /// When `Some(shell)`, shell-family code blocks run under the given shell
+    /// rather than the shell named in the block's language tag.
+    pub(crate) fn with_shell_preference(mut self, preference: Option<String>) -> Self {
+        self.shell_preference = preference;
+        self
+    }
+
+    /// Borrow the shell preference, if one was detected.
+    pub(crate) fn shell_preference(&self) -> Option<&str> {
+        self.shell_preference.as_deref()
     }
 
     /// Check whether cancellation has been requested.

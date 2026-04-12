@@ -7,6 +7,7 @@ use regex::Regex;
 use crate::error::CreftError;
 use crate::model::{AppContext, CodeBlock, SkillSource};
 use crate::registry;
+use crate::shell;
 use crate::store;
 use crate::style;
 
@@ -180,6 +181,26 @@ fn check_optional_tool(name: &str, purpose: &str) -> CheckResult {
             label: name.to_string(),
             status: CheckStatus::Optional,
             detail: format!("not found ({})", purpose),
+        },
+    }
+}
+
+/// Report the caller's detected shell preference.
+///
+/// This is informational only — the check never fails. It shows which shell
+/// will be used to run shell-family code blocks, so users can confirm the
+/// detected value matches their expectation.
+fn check_shell_preference() -> CheckResult {
+    match shell::detect() {
+        Some(name) => CheckResult {
+            label: "shell preference".to_string(),
+            status: CheckStatus::Info,
+            detail: format!("{name} (override with CREFT_SHELL=<name> or CREFT_SHELL=none)"),
+        },
+        None => CheckResult {
+            label: "shell preference".to_string(),
+            status: CheckStatus::Info,
+            detail: "none detected (set SHELL or CREFT_SHELL to enable)".to_string(),
         },
     }
 }
@@ -492,6 +513,8 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.extend(check_packages(ctx));
     results.extend(check_flat_files(ctx));
     results.extend(check_activations(ctx));
+
+    results.push(check_shell_preference());
 
     results
 }

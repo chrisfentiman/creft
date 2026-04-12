@@ -110,7 +110,11 @@ fn plugin_install_invalid_url_fails() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", "/nonexistent/path/that/does/not/exist"])
+        .args([
+            "plugins",
+            "install",
+            "/nonexistent/path/that/does/not/exist",
+        ])
         .assert()
         .failure()
         .code(1)
