@@ -963,11 +963,34 @@ fn cmd_plugin_list(ctx: &model::AppContext, name: Option<&str>) -> Result<(), Cr
     Ok(())
 }
 
-fn cmd_plugin_search(ctx: &model::AppContext, _query: &[String]) -> Result<(), CreftError> {
-    let _ = ctx;
-    Err(CreftError::Setup(
-        "creft plugin search is not yet implemented".into(),
-    ))
+fn cmd_plugin_search(ctx: &model::AppContext, query: &[String]) -> Result<(), CreftError> {
+    let matches = registry::plugin_search(ctx, query)?;
+
+    if matches.is_empty() {
+        if query.is_empty() {
+            eprintln!("no plugins installed");
+        } else {
+            eprintln!("no matching skills found");
+        }
+        return Ok(());
+    }
+
+    let ansi = style::use_ansi();
+    let max_name = matches.iter().map(|m| m.def.name.len()).max().unwrap_or(0);
+
+    for m in &matches {
+        let desc = truncate_desc(&m.def.description, LIST_DESC_MAX);
+        let pad = " ".repeat(max_name - m.def.name.len());
+        println!(
+            "  {}{}  {}  (plugin: {})",
+            style::bold(&m.def.name, ansi),
+            pad,
+            desc,
+            m.plugin_name
+        );
+    }
+
+    Ok(())
 }
 
 fn cmd_up(ctx: &model::AppContext, system: Option<String>, global: bool) -> Result<(), CreftError> {

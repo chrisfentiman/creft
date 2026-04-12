@@ -1098,6 +1098,84 @@ pub fn plugin_skill_file_path(
     Err(CreftError::PackageNotFound(skill_name.to_string()))
 }
 
+/// A skill match returned by `plugin_search`.
+#[derive(Debug, Clone)]
+pub struct PluginSkillMatch {
+    /// The plugin that contains this skill.
+    pub plugin_name: String,
+    /// The skill definition (name set to the full skill name).
+    pub def: crate::model::CommandDef,
+}
+
+/// Search for skills across all installed plugins.
+///
+/// Returns every skill from every installed plugin whose name, description, or
+/// tags contain at least one of the `query` terms (case-insensitive substring).
+/// When `query` is empty, all skills from all plugins are returned.
+///
+/// Skills are returned sorted by plugin name, then by skill name within each plugin.
+pub fn plugin_search(
+    ctx: &AppContext,
+    query: &[String],
+) -> Result<Vec<PluginSkillMatch>, CreftError> {
+    let plugins_dir = ctx.plugins_dir()?;
+    if !plugins_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    // Normalize query terms once — case-insensitive substring match.
+    let terms: Vec<String> = query.iter().map(|t| t.to_lowercase()).collect();
+
+    let mut matches: Vec<PluginSkillMatch> = Vec::new();
+
+    let mut plugin_names: Vec<String> = std::fs::read_dir(&plugins_dir)?
+        .filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_type().ok()?.is_dir() {
+                e.file_name().into_string().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    plugin_names.sort();
+
+    for plugin_name in plugin_names {
+        let skills = list_plugin_skills_in(ctx, &plugin_name)?;
+        for def in skills {
+            if skill_matches_query(&def, &terms) {
+                matches.push(PluginSkillMatch {
+                    plugin_name: plugin_name.clone(),
+                    def,
+                });
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+/// Returns `true` if `def` matches all of the given query `terms`.
+///
+/// An empty `terms` slice matches everything. Each term must appear as a
+/// case-insensitive substring in at least one of: skill name, description,
+/// or any tag. All terms must match (AND semantics).
+fn skill_matches_query(def: &crate::model::CommandDef, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let name_lower = def.name.to_lowercase();
+    let desc_lower = def.description.to_lowercase();
+    let tags_lower: Vec<String> = def.tags.iter().map(|t| t.to_lowercase()).collect();
+
+    terms.iter().all(|term| {
+        name_lower.contains(term.as_str())
+            || desc_lower.contains(term.as_str())
+            || tags_lower.iter().any(|tag| tag.contains(term.as_str()))
+    })
+}
+
 /// Load and parse a skill from an installed plugin.
 pub fn load_plugin_skill(
     ctx: &AppContext,
