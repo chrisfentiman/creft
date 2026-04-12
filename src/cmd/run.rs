@@ -118,7 +118,8 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                     env,
                     false,
                     true,
-                );
+                )
+                .with_shell_preference(run_ctx.shell_preference().map(String::from));
                 return runner::run(&cmd, &remaining, &native_ctx);
             } else {
                 return runner::dry_run(&cmd, &remaining, &run_ctx);
