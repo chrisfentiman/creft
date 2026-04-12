@@ -17,7 +17,7 @@ fn test_root_long_help_contains_tagline() {
         .args(["--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Executable skills for Agents"));
+        .stdout(predicate::str::contains("Executable skills for AI agents"));
 }
 
 /// `creft --help` shows the quick-start examples from ROOT_LONG_ABOUT.
@@ -70,7 +70,7 @@ fn test_root_short_help_contains_tagline() {
         .args(["-h"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Executable skills for Agents"));
+        .stdout(predicate::str::contains("Executable skills for AI agents"));
 }
 
 // ── Subcommand description length ─────────────────────────────────────────────
@@ -174,7 +174,7 @@ fn test_long_help_flag_shows_long_about() {
         .assert()
         .success()
         // This string appears in ROOT_LONG_ABOUT only, not in the short ROOT_ABOUT.
-        .stdout(predicate::str::contains("Skills are stored in .creft/"));
+        .stdout(predicate::str::contains("creft cmd list                 list available skills"));
 }
 
 // ── Terminology: "skill" not "command" for user-authored skills ────────────────
@@ -410,7 +410,7 @@ fn test_help_subcommand_no_args() {
 
     // Root help always contains the tagline and the list of subcommands.
     assert!(
-        stdout.contains("Executable skills for Agents"),
+        stdout.contains("Executable skills for AI agents"),
         "creft help should show root help tagline; got: {stdout:?}"
     );
 }
