@@ -140,27 +140,16 @@ mod tests {
 
     // ── resolve_shell() ───────────────────────────────────────────────────────
 
-    /// zsh user + bash block → zsh wins.
-    #[test]
-    fn resolve_shell_zsh_preference_overrides_bash_block() {
-        assert_eq!(resolve_shell("bash", Some("zsh")), Some("zsh"));
-    }
-
-    /// bash user + zsh block → bash wins.
-    #[test]
-    fn resolve_shell_bash_preference_overrides_zsh_block() {
-        assert_eq!(resolve_shell("zsh", Some("bash")), Some("bash"));
-    }
-
-    /// Non-shell block is never overridden by shell preference.
-    #[test]
-    fn resolve_shell_ignores_preference_for_python_block() {
-        assert_eq!(resolve_shell("python", Some("zsh")), None);
-    }
-
-    /// No preference → fall through to block lang.
-    #[test]
-    fn resolve_shell_returns_none_when_preference_is_none() {
-        assert_eq!(resolve_shell("bash", None), None);
+    #[rstest]
+    #[case::zsh_preference_overrides_bash_block("bash", Some("zsh"), Some("zsh"))]
+    #[case::bash_preference_overrides_zsh_block("zsh", Some("bash"), Some("bash"))]
+    #[case::ignores_preference_for_non_shell_block("python", Some("zsh"), None)]
+    #[case::returns_none_when_no_preference("bash", None, None)]
+    fn resolve_shell_applies_preference_to_shell_blocks_only(
+        #[case] lang: &str,
+        #[case] preference: Option<&str>,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(resolve_shell(lang, preference), expected);
     }
 }
