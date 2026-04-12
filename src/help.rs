@@ -210,51 +210,6 @@ Editor Mode:
   Without piped input, opens in $EDITOR (defaults to vi).
   Multi-word editors like 'code --wait' are supported.";
 
-/// Extended description shown by `creft install --help`, covering package manifest format and namespacing.
-pub const INSTALL_LONG_ABOUT: &str = "\
-Installs a skill package from a git repository
-
-A skill package is a git repo with a creft.yaml manifest. Any .md file
-with valid creft frontmatter becomes an available skill, namespaced
-under the package name.
-
-Examples:
-  creft install https://github.com/someone/k8s-tools
-  creft install git@github.com:someone/k8s-tools.git
-  creft install /path/to/local/repo
-
-After installing, skills are available as subcommands:
-  creft k8s-tools deploy production
-
-Manifest Format (creft.yaml):
-  name: k8s-tools
-  version: 0.1.0
-  description: Kubernetes deployment skills
-
-The package name in the manifest determines the namespace, not the
-repo name. Packages install to nearest .creft/packages/ or ~/.creft/packages/.
-Use --global to always install globally.";
-
-/// Extended description shown by `creft update --help`, explaining single-package and all-packages modes.
-pub const UPDATE_LONG_ABOUT: &str = "\
-Updates installed skill packages
-
-Runs git pull on the package's cloned repository.
-
-Examples:
-  creft update k8s-tools    Update a specific package
-  creft update              Update all installed packages";
-
-/// Extended description shown by `creft uninstall --help`, clarifying that local skills are unaffected.
-pub const UNINSTALL_LONG_ABOUT: &str = "\
-Removes an installed skill package
-
-Deletes the package directory and all its skills. Local (user-created)
-skills are not affected.
-
-Examples:
-  creft uninstall k8s-tools";
-
 /// Extended description shown by `creft doctor --help`, covering global and skill-specific check modes.
 pub const DOCTOR_LONG_ABOUT: &str = "\
 Checks whether your environment can run creft skills
@@ -297,3 +252,99 @@ Examples:
 
 Safe to run multiple times -- if .creft/ already exists, prints a message
 and exits successfully.";
+
+/// One-line description shown in the root help for the plugin subcommand.
+pub const PLUGIN_LONG_ABOUT: &str = "\
+Manages creft plugins
+
+Plugins extend creft with new commands from a git repository.
+Install a plugin globally, then activate specific commands in a project.
+
+Examples:
+  creft plugin install https://github.com/user/my-plugin
+  creft plugin update
+  creft plugin uninstall my-plugin
+
+Plugin commands:
+  install     Install a plugin from a git repo
+  update      Update installed plugins
+  uninstall   Remove an installed plugin
+  activate    Make plugin commands available in a scope
+  deactivate  Remove plugin commands from a scope
+  list        List installed plugins or commands in a plugin
+  search      Search for commands across installed plugins";
+
+/// Extended description shown by `creft plugin install --help`.
+pub const PLUGIN_INSTALL_LONG_ABOUT: &str = "\
+Installs a plugin from a git repository into the global plugin cache
+
+Plugin installs are always global (~/.creft/plugins/). Activate commands
+in a project scope with 'creft plugin activate'.
+
+A plugin is a git repo with a .creft/catalog.json manifest (or creft.yaml
+for backward compatibility). Any .md file with valid creft frontmatter
+becomes an available command, namespaced under the plugin name.
+
+Examples:
+  creft plugin install https://github.com/user/my-plugin
+  creft plugin install git@github.com:user/my-plugin.git
+  creft plugin install /path/to/local/plugin-repo
+  creft plugin install https://github.com/org/multi-plugin --plugin fetch";
+
+/// Extended description shown by `creft plugin update --help`.
+pub const PLUGIN_UPDATE_LONG_ABOUT: &str = "\
+Updates installed plugins
+
+Runs git pull on the plugin's cloned repository.
+
+Examples:
+  creft plugin update my-plugin    Update a specific plugin
+  creft plugin update              Update all installed plugins";
+
+/// Extended description shown by `creft plugin uninstall --help`.
+pub const PLUGIN_UNINSTALL_LONG_ABOUT: &str = "\
+Removes an installed plugin from the global cache
+
+Deletes the plugin directory and all its commands.
+
+Examples:
+  creft plugin uninstall my-plugin";
+
+/// Extended description shown by `creft plugin activate --help`.
+pub const PLUGIN_ACTIVATE_LONG_ABOUT: &str = "\
+Makes commands from an installed plugin available in a scope
+
+Writes activation state to .creft/plugins/settings.json (local scope,
+default) or ~/.creft/plugins/settings.json (global scope, --global).
+
+Examples:
+  creft plugin activate my-plugin            Activate all commands
+  creft plugin activate my-plugin/fetch      Activate a single command
+  creft plugin activate my-plugin --global   Activate globally";
+
+/// Extended description shown by `creft plugin deactivate --help`.
+pub const PLUGIN_DEACTIVATE_LONG_ABOUT: &str = "\
+Removes plugin commands from a scope
+
+Examples:
+  creft plugin deactivate my-plugin           Deactivate all commands
+  creft plugin deactivate my-plugin/fetch     Deactivate a single command
+  creft plugin deactivate my-plugin --global  Deactivate from global scope";
+
+/// Extended description shown by `creft plugin list --help`.
+pub const PLUGIN_LIST_LONG_ABOUT: &str = "\
+Lists installed plugins, or commands in a specific plugin
+
+Examples:
+  creft plugin list               Show all installed plugins
+  creft plugin list my-plugin     Show commands in my-plugin";
+
+/// Extended description shown by `creft plugin search --help`.
+pub const PLUGIN_SEARCH_LONG_ABOUT: &str = "\
+Searches for commands across installed plugins
+
+Matches against command name, description, and tags.
+
+Examples:
+  creft plugin search deploy
+  creft plugin search kubernetes deploy";

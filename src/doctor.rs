@@ -265,6 +265,7 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
 
     // list_packages_in silently skips unreadable manifests; scan dirs directly
     // to surface broken ones as explicit Fail results.
+    // read_manifest_from tries .creft/catalog.json first, falls back to creft.yaml.
     for scope in &[Scope::Global, Scope::Local] {
         let base = match ctx.packages_dir_for(*scope) {
             Ok(p) => p,
@@ -279,41 +280,19 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
                 if !path.is_dir() {
                     continue;
                 }
-                let manifest_path = path.join("creft.yaml");
-                if !manifest_path.exists() {
-                    continue;
-                }
-                match std::fs::read_to_string(&manifest_path) {
-                    Ok(content) => {
-                        if let Err(e) =
-                            serde_yaml_ng::from_str::<registry::PackageManifest>(&content)
-                        {
-                            failures += 1;
-                            results.push(CheckResult {
-                                label: format!(
-                                    "package {}",
-                                    path.file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "unknown".to_string())
-                                ),
-                                status: CheckStatus::Fail,
-                                detail: format!("invalid manifest: {}", e),
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        failures += 1;
-                        results.push(CheckResult {
-                            label: format!(
-                                "package {}",
-                                path.file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| "unknown".to_string())
-                            ),
-                            status: CheckStatus::Fail,
-                            detail: format!("could not read manifest: {}", e),
-                        });
-                    }
+                // Only report entries that have at least one manifest file.
+                if let Some(Err(e)) = registry::read_manifest_from(&path) {
+                    failures += 1;
+                    results.push(CheckResult {
+                        label: format!(
+                            "package {}",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        ),
+                        status: CheckStatus::Fail,
+                        detail: format!("invalid manifest: {}", e),
+                    });
                 }
             }
         }
@@ -418,6 +397,56 @@ pub(crate) fn check_flat_files(ctx: &AppContext) -> Vec<CheckResult> {
 // ── Global check ──────────────────────────────────────────────────────────────
 
 /// Run all global health checks and return the results.
+/// Check activation settings for stale entries (activated plugins that no longer exist).
+fn check_activations(ctx: &AppContext) -> Vec<CheckResult> {
+    use crate::model::Scope;
+
+    let mut results = Vec::new();
+
+    let scopes = {
+        let mut v = vec![Scope::Global];
+        if ctx.find_local_root().is_some() {
+            v.push(Scope::Local);
+        }
+        v
+    };
+
+    for scope in scopes {
+        let settings = match registry::load_settings(ctx, scope) {
+            Ok(s) => s,
+            Err(e) => {
+                results.push(CheckResult {
+                    label: format!("plugin activations ({})", scope_name(scope)),
+                    status: CheckStatus::Fail,
+                    detail: format!("could not read settings.json: {}", e),
+                });
+                continue;
+            }
+        };
+
+        for plugin_name in settings.activated.keys() {
+            let plugins_dir = match ctx.plugins_dir() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let plugin_dir = plugins_dir.join(plugin_name);
+            if !plugin_dir.is_dir() {
+                results.push(CheckResult {
+                    label: format!("plugin activation ({}) {}", scope_name(scope), plugin_name),
+                    status: CheckStatus::Warn,
+                    detail: format!(
+                        "stale activation: plugin '{}' is not installed. \
+                         Run 'creft plugin deactivate {}' to clean up.",
+                        plugin_name, plugin_name
+                    ),
+                });
+            }
+        }
+    }
+
+    results
+}
+
 pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     let mut results = Vec::new();
 
@@ -463,6 +492,7 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.push(check_local_dir(ctx));
     results.extend(check_packages(ctx));
     results.extend(check_flat_files(ctx));
+    results.extend(check_activations(ctx));
 
     results
 }
@@ -1098,6 +1128,7 @@ fn describe_source(source: &SkillSource) -> String {
     match source {
         SkillSource::Owned(scope) => format!("{} owned", scope_name(*scope)),
         SkillSource::Package(pkg, scope) => format!("package {} ({})", pkg, scope_name(*scope)),
+        SkillSource::Plugin(name) => format!("plugin {}", name),
     }
 }
 

@@ -2,8 +2,72 @@
 
 mod helpers;
 
-use helpers::{create_test_package, creft_env, creft_with};
+use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
+
+// ── package skill guard tests ─────────────────────────────────────────────────
+//
+// These tests exercise the read-only guards in cmd_edit and cmd_rm that reject
+// mutations against skills from the packages/ directory. The guard code still
+// exists; these tests ensure a future refactor cannot accidentally remove it.
+
+/// `creft edit <pkg> <skill>` against a packages/ skill is rejected with a
+/// "read-only" error. Editing package skills is not supported — the package
+/// must be updated through plugin lifecycle commands.
+#[test]
+fn edit_package_skill_is_rejected_as_read_only() {
+    let creft_home = creft_env();
+    let pkg_dir = creft_home.path().join("packages").join("guard-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+
+    std::fs::write(
+        pkg_dir.join("creft.yaml"),
+        "name: guard-pkg\nversion: 1.0.0\ndescription: guard test package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("do-thing.md"),
+        "---\nname: do-thing\ndescription: does a thing\n---\n\n```bash\necho thing\n```\n",
+    )
+    .unwrap();
+
+    creft_with(&creft_home)
+        .args(["edit", "guard-pkg", "do-thing"])
+        .write_stdin(
+            "---\nname: do-thing\ndescription: mutated\n---\n\n```bash\necho mutated\n```\n",
+        )
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("read-only"));
+}
+
+/// `creft rm <pkg> <skill>` against a packages/ skill is rejected with an
+/// actionable error directing the user to uninstall the whole package instead.
+#[test]
+fn rm_package_skill_is_rejected() {
+    let creft_home = creft_env();
+    let pkg_dir = creft_home.path().join("packages").join("rm-guard-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+
+    std::fs::write(
+        pkg_dir.join("creft.yaml"),
+        "name: rm-guard-pkg\nversion: 1.0.0\ndescription: rm guard test package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("build.md"),
+        "---\nname: build\ndescription: builds the thing\n---\n\n```bash\necho building\n```\n",
+    )
+    .unwrap();
+
+    creft_with(&creft_home)
+        .args(["rm", "rm-guard-pkg", "build"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("cannot remove"));
+}
 
 // ── edit stdin tests ──────────────────────────────────────────────────────────
 
@@ -103,31 +167,18 @@ fn test_edit_stdin_nonexistent_command_fails() {
         .code(2);
 }
 
-/// Piping content to an installed package skill is rejected (read-only).
+/// Editing a command that does not exist fails with "command not found".
 #[test]
-fn test_edit_stdin_package_skill_is_rejected() {
-    let pkg_repo = create_test_package(
-        "stdin-edit-pkg",
-        &[(
-            "deploy.md",
-            "---\nname: deploy\ndescription: Deploy\n---\n\n```bash\necho deploying\n```\n",
-        )],
-    );
+fn test_edit_nonexistent_fails() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
-        .assert()
-        .success();
-
-    let new_content = "---\nname: deploy\ndescription: hacked\n---\n\n```bash\necho hacked\n```\n";
-    creft_with(&creft_home)
-        .args(["edit", "stdin-edit-pkg", "deploy"])
-        .write_stdin(new_content)
+        .args(["edit", "nonexistent-skill"])
+        .write_stdin("---\nname: nonexistent-skill\ndescription: x\n---\n\n```bash\necho x\n```\n")
         .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("read-only"));
+        .code(2)
+        .stderr(predicate::str::contains("command not found"));
 }
 
 /// Piping content with a description longer than 80 characters emits a warning

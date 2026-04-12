@@ -53,18 +53,7 @@ fn test_root_long_help_contains_all_subcommands() {
     let stdout = String::from_utf8(output).unwrap();
 
     let subcommands = [
-        "add",
-        "list",
-        "show",
-        "edit",
-        "rm",
-        "cat",
-        "install",
-        "update",
-        "uninstall",
-        "up",
-        "init",
-        "doctor",
+        "add", "list", "show", "edit", "rm", "cat", "plugin", "up", "init", "doctor",
     ];
     for cmd in &subcommands {
         assert!(

@@ -1384,27 +1384,44 @@ pub(super) fn run_pipe_chain(
         }
     }
 
-    // Last block success wins: earlier blocks dying from SIGPIPE (consumer exited
-    // early) is normal pipeline behavior, not an error.
     let last = results.last().expect("at least one block");
+
+    // Find the root cause before checking whether the last block succeeded.
+    // Unlike a shell pipe ("last command wins"), creft blocks share a single
+    // purpose: if an upstream block fails, the skill failed regardless of what
+    // the downstream blocks did with the broken stdin they received.
+    //
+    // Signal-killed blocks (SIGPIPE, etc.) are side-effects of normal pipeline
+    // topology and are excluded by the `exit_code_of` filter.
+    if let Some(root) = find_root_cause(&results) {
+        if !ctx.is_verbose() && !root.stderr.is_empty() {
+            let _ = std::io::stderr().write_all(&root.stderr);
+        }
+        return Err(make_execution_error(root.block, &root.lang, &root.status));
+    }
+
+    // No non-signal failure found. If the last block succeeded (or all failures
+    // were signal kills), the pipeline is considered successful.
     if last.status.success() {
         return Ok(());
     }
 
-    // Signal-killed upstream blocks (e.g. SIGPIPE when consumer exits early) are
-    // side-effects, not root causes. Find the earliest non-signal failure instead.
-    let root = results
+    // Last block failed and no upstream root cause exists (all upstream blocks
+    // were signal-killed, e.g. by SIGPIPE). Report the last block.
+    if !ctx.is_verbose() && !last.stderr.is_empty() {
+        let _ = std::io::stderr().write_all(&last.stderr);
+    }
+    Err(make_execution_error(last.block, &last.lang, &last.status))
+}
+
+/// Find the root-cause block: the earliest block that exited with a non-zero
+/// exit code (not a signal kill). SIGPIPE-killed blocks are excluded because
+/// they are side-effects of a downstream block exiting early, not independent
+/// failures.
+fn find_root_cause(results: &[PipeResult]) -> Option<&PipeResult> {
+    results
         .iter()
         .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
-        .unwrap_or(last);
-
-    // When not in verbose mode, the root block's stderr has not yet been emitted.
-    // In verbose mode it was already written above with the block prefix.
-    if !ctx.is_verbose() && !root.stderr.is_empty() {
-        let _ = std::io::stderr().write_all(&root.stderr);
-    }
-
-    Err(make_execution_error(root.block, &root.lang, &root.status))
 }
 
 #[cfg(test)]

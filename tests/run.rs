@@ -642,6 +642,211 @@ fn test_pipe_exit_99_middle_block() {
     );
 }
 
+// ── upstream block failure reporting ─────────────────────────────────────────
+
+/// When block 0 fails and block 1 succeeds, creft must surface the upstream
+/// failure rather than treating last-block success as overall success.
+#[test]
+fn upstream_block_failure_reported_when_last_block_succeeds() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: upstream-fail-last-ok\n",
+            "description: upstream block fails, downstream succeeds\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo upstream-error-output >&2\n",
+            "exit 1\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["upstream-fail-last-ok"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "skill must fail when upstream block exits 1"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "exit code must match the upstream block's exit code"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("upstream-error-output"),
+        "upstream block's stderr must appear in creft's output; got: {stderr:?}"
+    );
+}
+
+/// When block 0 fails and block 1 also fails, the root cause is the earliest
+/// failure (block 0), not the last block.
+#[test]
+fn earliest_failure_is_root_cause_when_multiple_blocks_fail() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: both-fail\n",
+            "description: both blocks fail\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo first-block-error >&2\n",
+            "exit 1\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "exit 2\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir).args(["both-fail"]).output().unwrap();
+
+    assert!(!output.status.success(), "skill must fail");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "exit code must be from the earliest (block 0) failure, not block 1"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("first-block-error"),
+        "block 0's stderr must appear; got: {stderr:?}"
+    );
+}
+
+/// When all blocks succeed, creft returns 0. The upstream failure check must
+/// not fire for healthy pipelines.
+#[test]
+fn all_blocks_succeed_returns_ok() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: all-ok\n",
+            "description: all blocks succeed\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo hello\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir).args(["all-ok"]).assert().success();
+}
+
+/// When an upstream block produces more output than the consumer reads and
+/// exits with code 0 (producer finishes before consumer stops reading), the
+/// pipeline must succeed. This verifies the `find_root_cause` filter does not
+/// misreport a clean exit as a failure.
+///
+/// Note: the inverse case — an upstream block killed by SIGPIPE because the
+/// consumer exits early — is covered by `find_root_cause`'s `exit_code_of`
+/// filter at the unit-test level. An end-to-end SIGPIPE integration test
+/// requires creft to actively kill the upstream process group when the last
+/// block exits, which is outside Stage 1's scope.
+#[test]
+fn upstream_exit_zero_with_partial_consumer_returns_ok() {
+    let dir = creft_env();
+
+    // Block 0: echo 5 lines. Block 1: read all of them (cat).
+    // Both blocks exit 0. No root cause. creft must return 0.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: multi-line-cat\n",
+            "description: multi-line producer with cat consumer\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "printf 'line1\\nline2\\nline3\\nline4\\nline5\\n'\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir).args(["multi-line-cat"]).assert().success();
+}
+
+/// In a 3-block chain where the middle block fails and the last block gets
+/// EOF and exits 0, the middle block is reported as the root cause.
+#[test]
+fn middle_block_failure_reported_in_three_block_chain() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: mid-fail-three\n",
+            "description: middle block fails in three-block chain\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo data\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "echo mid-block-error >&2\n",
+            "exit 3\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir).args(["mid-fail-three"]).output().unwrap();
+
+    assert!(
+        !output.status.success(),
+        "skill must fail when middle block exits 3"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "exit code must be the middle block's exit code (3)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mid-block-error"),
+        "middle block's stderr must appear; got: {stderr:?}"
+    );
+}
+
 // ── parent/child coexistence tests ────────────────────────────────────────────
 
 /// When both `test` (with a positional arg) and `test mutants` exist,
@@ -2549,4 +2754,166 @@ fn test_sequential_sigterm_preserves_stderr() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("sigterm-sentinel"));
+}
+
+// ── env var injection tests ───────────────────────────────────────────────────
+
+/// A flag is accessible as an environment variable ($FORMAT) in bash blocks.
+#[test]
+fn test_flag_injected_as_env_var() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-format\n",
+            "description: echo the format flag\n",
+            "flags:\n",
+            "  - name: format\n",
+            "    description: output format\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$FORMAT\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-format", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("json"));
+}
+
+/// A positional arg is accessible as an environment variable ($TARGET) in bash blocks.
+#[test]
+fn test_arg_injected_as_env_var() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-target\n",
+            "description: echo the target arg\n",
+            "args:\n",
+            "  - name: target\n",
+            "    description: deployment target\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$TARGET\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-target", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("production"));
+}
+
+/// A hyphenated flag name is accessible as an env var with underscores ($ALWAYS_CONFIRM).
+#[test]
+fn test_hyphenated_flag_injected_with_underscores() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: echo-confirm\n",
+            "description: echo the always-confirm flag\n",
+            "flags:\n",
+            "  - name: always-confirm\n",
+            "    description: skip confirmation prompts\n",
+            "    type: bool\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"$ALWAYS_CONFIRM\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["echo-confirm", "--always-confirm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("true"));
+}
+
+/// Template substitution ({{format}}) and env var access ($FORMAT) both work in the same block.
+#[test]
+fn test_template_and_env_var_both_resolve() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: dual-access\n",
+            "description: access flag via template and env var\n",
+            "flags:\n",
+            "  - name: format\n",
+            "    description: output format\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"template={{format}} env=$FORMAT\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["dual-access", "--format", "yaml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("template=yaml env=yaml"));
+}
+
+/// In a multi-block pipe chain, all blocks see the injected env vars.
+#[test]
+fn test_pipe_chain_blocks_see_env_vars() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-env-check\n",
+            "description: verify env vars reach all pipe blocks\n",
+            "flags:\n",
+            "  - name: tag\n",
+            "    description: a tag value\n",
+            "    type: string\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo \"block1:$TAG\"\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat -\n",
+            "echo \"block2:$TAG\"\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["pipe-env-check", "--tag", "v1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("block1:v1"))
+        .stdout(predicate::str::contains("block2:v1"));
 }

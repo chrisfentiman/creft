@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::catalog::{self, CatalogEntry};
 use crate::error::CreftError;
 use crate::frontmatter;
 use crate::markdown;
@@ -59,240 +60,6 @@ pub fn validate_manifest_name(name: &str) -> Result<(), CreftError> {
     store::validate_name(name).map_err(|e| CreftError::InvalidManifest(e.to_string()))
 }
 
-/// Find which scope a package is installed in.
-///
-/// When `creft_home` is set, only one scope exists — check it and return
-/// `Scope::Global` (both scopes resolve to the same path in `creft_home` mode).
-///
-/// Otherwise, check local scope first, then global. Returns
-/// `CreftError::PackageNotFound` if the package is not found in either scope.
-pub fn find_package_scope(ctx: &AppContext, name: &str) -> Result<Scope, CreftError> {
-    if ctx.creft_home.is_some() {
-        // CREFT_HOME mode: single scope, both resolve to same path.
-        let path = ctx.packages_dir_for(Scope::Global)?.join(name);
-        if path.exists() {
-            return Ok(Scope::Global);
-        }
-        return Err(CreftError::PackageNotFound(name.to_string()));
-    }
-
-    // Check local scope first.
-    if ctx.find_local_root().is_some() {
-        let local_path = ctx.packages_dir_for(Scope::Local)?.join(name);
-        if local_path.exists() {
-            return Ok(Scope::Local);
-        }
-    }
-
-    // Fall back to global scope.
-    let global_path = ctx.packages_dir_for(Scope::Global)?.join(name);
-    if global_path.exists() {
-        return Ok(Scope::Global);
-    }
-
-    Err(CreftError::PackageNotFound(name.to_string()))
-}
-
-/// Install a skill package from a git URL into the given scope.
-///
-/// 1. Clone the repo to a temp directory with `git clone --depth 1 -- <url> <dest>`.
-/// 2. Read and validate `creft.yaml`.
-/// 3. Check both scopes for an existing package with the same name.
-/// 4. Move the clone to `ctx.packages_dir_for(scope)/<name>/`.
-///
-/// Returns the installed package info.
-pub fn install(ctx: &AppContext, url: &str, scope: Scope) -> Result<InstalledPackage, CreftError> {
-    let tmp = tempfile::TempDir::new()?;
-    let tmp_path = tmp.path().to_path_buf();
-
-    // The `--` separator prevents a user-supplied URL starting with `-`
-    // (e.g., `--upload-pack=...`) from being interpreted as a git flag.
-    let output = std::process::Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            "--",
-            url,
-            tmp_path.to_str().unwrap_or_default(),
-        ])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                CreftError::Git(
-                    "git is not installed. Install git to use package management.".into(),
-                )
-            } else {
-                CreftError::Git(e.to_string())
-            }
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CreftError::Git(stderr));
-    }
-
-    let manifest_path = tmp_path.join("creft.yaml");
-    if !manifest_path.exists() {
-        return Err(CreftError::ManifestNotFound);
-    }
-
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
-        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
-
-    validate_manifest_name(&manifest.name)?;
-
-    // Reject if the name already exists in either scope — a package present in
-    // both scopes would cause ambiguous resolution.
-    let local_dest = ctx.packages_dir_for(Scope::Local)?.join(&manifest.name);
-    let global_dest = ctx.packages_dir_for(Scope::Global)?.join(&manifest.name);
-    if local_dest.exists() || global_dest.exists() {
-        return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
-    }
-
-    let dest = ctx.packages_dir_for(scope)?.join(&manifest.name);
-
-    let pkgs = ctx.packages_dir_for(scope)?;
-    if !pkgs.exists() {
-        std::fs::create_dir_all(&pkgs)?;
-    }
-
-    // keep() is called after move_dir so TempDir's Drop still cleans up if
-    // move_dir fails; move_dir itself cleans partial dst on failure.
-    move_dir(&tmp_path, &dest)?;
-    let _ = tmp.keep();
-
-    Ok(InstalledPackage {
-        manifest,
-        path: dest,
-    })
-}
-
-/// Update a single installed package by running `git pull --ff-only` in its directory.
-///
-/// Resolves which scope the package lives in via `find_package_scope`, then
-/// runs the update in that scope's directory. After pull, re-reads and re-validates
-/// the manifest to pick up any metadata changes. Returns the updated package info.
-pub fn update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
-    let scope = find_package_scope(ctx, name)?;
-    let pkg_path = ctx.packages_dir_for(scope)?.join(name);
-    if !pkg_path.exists() {
-        return Err(CreftError::PackageNotFound(name.to_string()));
-    }
-
-    // --ff-only prevents merge commits if the local state was manually tampered with.
-    let output = std::process::Command::new("git")
-        .args([
-            "-C",
-            pkg_path.to_str().unwrap_or_default(),
-            "pull",
-            "--ff-only",
-        ])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                CreftError::Git(
-                    "git is not installed. Install git to use package management.".into(),
-                )
-            } else {
-                CreftError::Git(e.to_string())
-            }
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CreftError::Git(stderr));
-    }
-
-    // Re-read manifest to pick up any metadata changes in the update.
-    let manifest_path = pkg_path.join("creft.yaml");
-    if !manifest_path.exists() {
-        return Err(CreftError::ManifestNotFound);
-    }
-
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: PackageManifest = serde_yaml_ng::from_str(&manifest_content)
-        .map_err(|e| CreftError::InvalidManifest(e.to_string()))?;
-
-    validate_manifest_name(&manifest.name)?;
-
-    // The directory is named after the original name and cannot be safely
-    // renamed here; reject and require uninstall + reinstall.
-    if manifest.name != name {
-        return Err(CreftError::InvalidManifest(format!(
-            "package name changed from '{}' to '{}' -- uninstall and reinstall",
-            name, manifest.name
-        )));
-    }
-
-    Ok(InstalledPackage {
-        manifest,
-        path: pkg_path,
-    })
-}
-
-/// Update all installed packages from both scopes. Returns results for each.
-///
-/// The outer `Result` is for the case where reading the package directories fails.
-/// Individual update failures are collected into the inner `Result` entries —
-/// a failure for one package does not stop the others from being attempted.
-///
-/// Packages are deduplicated by name (local shadows global) so a package
-/// that exists in both scopes is only updated once (from whichever scope
-/// `find_package_scope` resolves first, which is local).
-pub fn update_all(
-    ctx: &AppContext,
-) -> Result<Vec<Result<InstalledPackage, CreftError>>, CreftError> {
-    let mut results = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
-
-    // CREFT_HOME mode: both scopes resolve to the same path, so one pass suffices.
-    let scopes: &[Scope] = if ctx.creft_home.is_some() {
-        &[Scope::Global]
-    } else {
-        &[Scope::Local, Scope::Global]
-    };
-
-    for &scope in scopes {
-        let base = ctx.packages_dir_for(scope)?;
-        if !base.exists() {
-            continue;
-        }
-        let entries = std::fs::read_dir(&base)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                // Local shadows global: skip packages seen in a higher-priority scope.
-                if seen_names.insert(name.to_string()) {
-                    results.push(update(ctx, name));
-                }
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-/// Remove an installed package by deleting its directory.
-///
-/// Resolves which scope the package lives in via `find_package_scope`, then
-/// removes the package from that scope's directory.
-pub fn uninstall(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
-    let scope = find_package_scope(ctx, name)?;
-    let pkg_path = ctx.packages_dir_for(scope)?.join(name);
-    if !pkg_path.exists() {
-        return Err(CreftError::PackageNotFound(name.to_string()));
-    }
-
-    std::fs::remove_dir_all(&pkg_path)?;
-    Ok(())
-}
-
 /// Move a directory from `src` to `dst`.
 ///
 /// Tries `std::fs::rename` first (fast, atomic on same filesystem).
@@ -340,9 +107,56 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CreftError> {
     Ok(())
 }
 
+/// Read a `PackageManifest` from an installed package directory.
+///
+/// Tries `.creft/catalog.json` first (new format), falling back to `creft.yaml`
+/// (legacy format) for backward compatibility. Returns `None` if neither exists.
+pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, String>> {
+    let catalog_path = path.join(".creft").join("catalog.json");
+    if catalog_path.exists() {
+        return Some(
+            std::fs::read_to_string(&catalog_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    let label = catalog_path.display().to_string();
+                    catalog::parse_catalog(&content, &label)
+                        .map_err(|e| e.to_string())
+                        .and_then(|cat| {
+                            cat.plugins
+                                .into_iter()
+                                .next()
+                                .map(|entry| PackageManifest {
+                                    name: entry.name,
+                                    version: entry.version.unwrap_or_else(|| "0.0.0".into()),
+                                    description: entry.description,
+                                    author: None,
+                                    license: None,
+                                })
+                                .ok_or_else(|| "catalog has no plugin entries".to_string())
+                        })
+                }),
+        );
+    }
+
+    let yaml_path = path.join("creft.yaml");
+    if yaml_path.exists() {
+        return Some(
+            std::fs::read_to_string(&yaml_path)
+                .map_err(|e| e.to_string())
+                .and_then(|content| {
+                    serde_yaml_ng::from_str::<PackageManifest>(&content).map_err(|e| e.to_string())
+                }),
+        );
+    }
+
+    None
+}
+
 /// List all installed packages in the given scope.
 ///
-/// Reads `ctx.packages_dir_for(scope)` and parses `creft.yaml` for each subdirectory.
+/// Reads `ctx.packages_dir_for(scope)` and parses the manifest for each
+/// subdirectory. Tries `.creft/catalog.json` first; falls back to `creft.yaml`
+/// for packages installed before the catalog format was introduced.
 /// Entries that fail to parse are skipped with a warning to stderr.
 pub fn list_packages_in(
     ctx: &AppContext,
@@ -361,21 +175,16 @@ pub fn list_packages_in(
         if !path.is_dir() {
             continue;
         }
-        let manifest_path = path.join("creft.yaml");
-        match std::fs::read_to_string(&manifest_path) {
-            Ok(content) => match serde_yaml_ng::from_str::<PackageManifest>(&content) {
-                Ok(manifest) => packages.push(InstalledPackage { manifest, path }),
-                Err(e) => eprintln!(
-                    "warning: skipping {}: invalid manifest: {}",
-                    path.display(),
-                    e
-                ),
-            },
-            Err(e) => eprintln!(
-                "warning: skipping {}: could not read creft.yaml: {}",
+        match read_manifest_from(&path) {
+            Some(Ok(manifest)) => packages.push(InstalledPackage { manifest, path }),
+            Some(Err(e)) => eprintln!(
+                "warning: skipping {}: invalid manifest: {}",
                 path.display(),
                 e
             ),
+            None => {
+                // No manifest found — skip silently (directory may not be a package).
+            }
         }
     }
 
@@ -477,8 +286,12 @@ fn collect_package_skills(
 /// Compute a namespaced skill name from a package name and a relative file path.
 ///
 /// Directory separators become spaces and the `.md` extension is stripped.
+/// When the file is at the package root and its stem matches the package name,
+/// the stem is omitted to avoid redundant names (e.g. `fetch/fetch.md` → `"fetch"`
+/// instead of `"fetch fetch"`).
 ///
 /// Examples:
+/// - `"fetch"`, `"fetch.md"` -> `"fetch"` (dedup: root file matches package name)
 /// - `"pkg"`, `"deploy.md"` -> `"pkg deploy"`
 /// - `"k8s-tools"`, `"networking/check-dns.md"` -> `"k8s-tools networking check-dns"`
 fn skill_name_from_path(pkg_name: &str, rel: &Path) -> String {
@@ -489,7 +302,13 @@ fn skill_name_from_path(pkg_name: &str, rel: &Path) -> String {
         }
     }
     if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
-        parts.push(stem.to_string());
+        let at_root = rel.parent().is_none_or(|p| p == Path::new(""));
+        if at_root && stem == pkg_name {
+            // Root-level file matching package name — skip the stem to avoid
+            // "fetch fetch" when the package and file share the same name.
+        } else {
+            parts.push(stem.to_string());
+        }
     }
     parts.join(" ")
 }
@@ -580,10 +399,802 @@ pub fn load_package_skill(ctx: &AppContext, full_name: &str) -> Result<ParsedCom
     Ok(ParsedCommand { def, docs, blocks })
 }
 
+/// The creft repo shorthand resolves to this URL.
+const CREFT_REPO: &str = "https://github.com/chrisfentiman/creft";
+
+/// Install a plugin from a git URL into the global plugin cache.
+///
+/// 1. Clone the repo to a temp directory with `git clone --depth 1`.
+/// 2. Read `.creft/catalog.json` from the cloned repo root.
+/// 3. For multi-plugin repos, select the entry named by `plugin_filter`,
+///    or return an error listing available plugins when no filter is given.
+/// 4. Move or copy the plugin to `ctx.plugins_dir()/<name>/`.
+///
+/// Catalog entries with a `Path` source are installed from within the cloned
+/// repo via `install_from_path`. All other entry types are treated as the
+/// entire cloned repo.
+pub fn plugin_install(
+    ctx: &AppContext,
+    url: &str,
+    plugin_filter: Option<&str>,
+) -> Result<InstalledPackage, CreftError> {
+    let tmp = tempfile::TempDir::new()?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    // The `--` separator prevents a user-supplied URL starting with `-`
+    // from being interpreted as a git flag.
+    let output = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--",
+            url,
+            tmp_path.to_str().unwrap_or_default(),
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CreftError::Git(
+                    "git is not installed. Install git to use plugin management.".into(),
+                )
+            } else {
+                CreftError::Git(e.to_string())
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CreftError::Git(stderr));
+    }
+
+    let catalog_path = tmp_path.join(".creft").join("catalog.json");
+    if !catalog_path.exists() {
+        return Err(CreftError::ManifestNotFound);
+    }
+
+    let catalog_content = std::fs::read_to_string(&catalog_path)?;
+    let cat = catalog::parse_catalog(&catalog_content, url)?;
+
+    if cat.plugins.is_empty() {
+        return Err(CreftError::InvalidManifest(
+            "catalog has no plugin entries".into(),
+        ));
+    }
+
+    let entry: &CatalogEntry = if cat.plugins.len() > 1 {
+        // Multi-plugin repo: a filter is required.
+        match plugin_filter {
+            Some(name) => cat.plugins.iter().find(|p| p.name == name).ok_or_else(|| {
+                let available: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
+                CreftError::PluginNotInCatalog {
+                    catalog: url.to_string(),
+                    plugin: name.to_string(),
+                    available: available.join(", "),
+                }
+            })?,
+            None => {
+                let names: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
+                return Err(CreftError::InvalidManifest(format!(
+                    "repository contains {} plugins: {}. Use --plugin <name> to install a specific one",
+                    cat.plugins.len(),
+                    names.join(", ")
+                )));
+            }
+        }
+    } else {
+        // Single-plugin repo: validate the filter if provided.
+        let single = &cat.plugins[0];
+        if let Some(name) = plugin_filter
+            && single.name != name
+        {
+            return Err(CreftError::PluginNotInCatalog {
+                catalog: url.to_string(),
+                plugin: name.to_string(),
+                available: single.name.clone(),
+            });
+        }
+        single
+    };
+
+    // For path-based entries, the plugin files live inside the cloned repo.
+    if let catalog::PluginSource::Path(ref rel_path) = entry.source {
+        let source_path = tmp_path.join(rel_path.trim_start_matches("./"));
+        return install_from_path(ctx, &source_path, entry);
+    }
+
+    // For non-path entries (the whole repo is the plugin), move the clone.
+    let manifest = PackageManifest {
+        name: entry.name.clone(),
+        version: entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+        description: entry.description.clone(),
+        author: None,
+        license: None,
+    };
+    validate_manifest_name(&manifest.name)?;
+
+    let plugins = ctx.plugins_dir()?;
+    let dest = plugins.join(&manifest.name);
+    if dest.exists() {
+        return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
+    }
+    if !plugins.exists() {
+        std::fs::create_dir_all(&plugins)?;
+    }
+
+    move_dir(&tmp_path, &dest)?;
+    let _ = tmp.keep();
+
+    Ok(InstalledPackage {
+        manifest,
+        path: dest,
+    })
+}
+
+/// Install a plugin from a local directory path (path-based catalog entries).
+///
+/// Copies the directory into the global plugin cache and writes a synthetic
+/// `.creft/catalog.json` so `list_packages_in` and `doctor` can read metadata.
+pub fn install_from_path(
+    ctx: &AppContext,
+    source_path: &Path,
+    entry: &CatalogEntry,
+) -> Result<InstalledPackage, CreftError> {
+    let manifest = PackageManifest {
+        name: entry.name.clone(),
+        version: entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+        description: entry.description.clone(),
+        author: None,
+        license: None,
+    };
+    validate_manifest_name(&manifest.name)?;
+
+    let plugins = ctx.plugins_dir()?;
+    let dest = plugins.join(&manifest.name);
+    if dest.exists() {
+        return Err(CreftError::PackageAlreadyInstalled(manifest.name.clone()));
+    }
+    if !plugins.exists() {
+        std::fs::create_dir_all(&plugins)?;
+    }
+
+    copy_dir_recursive(source_path, &dest)?;
+
+    // Write a synthetic catalog only when the copy did not bring one over.
+    // This happens when the plugin is a subdirectory of the catalog repo
+    // without its own .creft/catalog.json. When source is "." (the whole repo),
+    // the real catalog was already copied and must not be overwritten — the
+    // installed directory may have a live .git, and overwriting a tracked file
+    // would cause `git pull` to abort with "local changes would be overwritten".
+    let catalog_dir = dest.join(".creft");
+    let catalog_file = catalog_dir.join("catalog.json");
+    if !catalog_file.exists() {
+        let synthetic_catalog = serde_json::json!({
+            "name": entry.name,
+            "description": entry.description,
+            "plugins": [{
+                "name": entry.name,
+                "source": ".",
+                "description": entry.description,
+                "version": entry.version.clone().unwrap_or_else(|| "0.0.0".into()),
+                "tags": entry.tags,
+            }]
+        });
+        std::fs::create_dir_all(&catalog_dir)?;
+        std::fs::write(
+            &catalog_file,
+            serde_json::to_string_pretty(&synthetic_catalog)
+                .map_err(|e| CreftError::Serialization(e.to_string()))?,
+        )?;
+    }
+
+    Ok(InstalledPackage {
+        manifest,
+        path: dest,
+    })
+}
+
+/// Install a plugin by shorthand name.
+///
+/// `creft/<plugin>` resolves to the official creft repo. All other
+/// `owner/repo` patterns resolve to `https://github.com/<owner>/<repo>`.
+/// Bare names (no `/`) return an error.
+pub fn install_by_name(
+    ctx: &AppContext,
+    qualified_name: &str,
+    plugin_filter: Option<&str>,
+) -> Result<InstalledPackage, CreftError> {
+    let Some(slash_pos) = qualified_name.find('/') else {
+        return Err(CreftError::InvalidManifest(format!(
+            "'{qualified_name}' is not a valid plugin source — use owner/repo or a full git URL"
+        )));
+    };
+
+    let owner = &qualified_name[..slash_pos];
+    let plugin = &qualified_name[slash_pos + 1..];
+
+    if owner == "creft" {
+        // creft shorthand: clone the official repo and install the named plugin.
+        plugin_install(ctx, CREFT_REPO, Some(plugin))
+    } else {
+        // Treat as GitHub owner/repo shorthand.
+        let url = format!("https://github.com/{owner}/{plugin}");
+        plugin_install(ctx, &url, plugin_filter)
+    }
+}
+
+/// Update an installed plugin by running `git pull --ff-only` in its directory.
+///
+/// After pulling, re-reads the manifest from `.creft/catalog.json` or `creft.yaml`
+/// (whichever is present) to return updated metadata.
+pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
+    let plugin_path = ctx.plugins_dir()?.join(name);
+    if !plugin_path.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            plugin_path.to_str().unwrap_or_default(),
+            "pull",
+            "--ff-only",
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CreftError::Git(
+                    "git is not installed. Install git to use plugin management.".into(),
+                )
+            } else {
+                CreftError::Git(e.to_string())
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CreftError::Git(stderr));
+    }
+
+    let manifest = read_manifest_from(&plugin_path)
+        .ok_or(CreftError::ManifestNotFound)?
+        .map_err(CreftError::InvalidManifest)?;
+
+    validate_manifest_name(&manifest.name)?;
+
+    if manifest.name != name {
+        return Err(CreftError::InvalidManifest(format!(
+            "plugin name changed from '{}' to '{}' -- uninstall and reinstall",
+            name, manifest.name
+        )));
+    }
+
+    Ok(InstalledPackage {
+        manifest,
+        path: plugin_path,
+    })
+}
+
+/// Update all installed plugins. Returns results for each.
+///
+/// Individual update failures are collected — a failure for one plugin does not
+/// stop the others from being attempted.
+pub fn plugin_update_all(
+    ctx: &AppContext,
+) -> Result<Vec<Result<InstalledPackage, CreftError>>, CreftError> {
+    let base = ctx.plugins_dir()?;
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    for entry in std::fs::read_dir(&base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            results.push(plugin_update(ctx, name));
+        }
+    }
+    Ok(results)
+}
+
+/// Remove an installed plugin by deleting its directory from the global cache.
+pub fn plugin_uninstall(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
+    let plugin_path = ctx.plugins_dir()?.join(name);
+    if !plugin_path.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+    std::fs::remove_dir_all(&plugin_path)?;
+    Ok(())
+}
+
+/// List all skill definitions in an installed plugin.
+///
+/// Walks the plugin directory recursively for `.md` files. Skill names are
+/// derived from file paths relative to the plugin root. Dotfiles, symlinks,
+/// and files nested more than 3 levels deep are skipped.
+///
+/// Skill names include the plugin name as the first token, consistent with
+/// how `creft list` groups namespaced commands. Use
+/// `list_plugin_skills_unprefixed` when resolving skills by short name.
+pub fn list_plugin_skills_in(ctx: &AppContext, name: &str) -> Result<Vec<CommandDef>, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(name);
+    if !plugin_dir.exists() {
+        return Err(CreftError::PackageNotFound(name.to_string()));
+    }
+
+    let mut skills = Vec::new();
+    collect_package_skills(name, &plugin_dir, &plugin_dir, 0, &mut skills)?;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+/// List skill definitions in an installed plugin without the plugin name prefix.
+///
+/// `hello.md` in plugin `my-tools` produces skill name `"hello"` rather than
+/// `"my-tools hello"`. This form is used when adding plugin skills to the
+/// global skill list — the plugin name is tracked in `SkillSource::Plugin` instead.
+pub fn list_plugin_skills_unprefixed(
+    ctx: &AppContext,
+    plugin_name: &str,
+) -> Result<Vec<CommandDef>, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(plugin_name);
+    if !plugin_dir.exists() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    let mut skills = Vec::new();
+    collect_plugin_skills_unprefixed(&plugin_dir, &plugin_dir, 0, &mut skills)?;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+/// Recursively collect `.md` skills from a plugin directory, naming them without
+/// the plugin name prefix.
+///
+/// `hello.md` at the plugin root becomes `"hello"`, not `"plugin-name hello"`.
+fn collect_plugin_skills_unprefixed(
+    plugin_root: &Path,
+    dir: &Path,
+    depth: usize,
+    skills: &mut Vec<CommandDef>,
+) -> Result<(), CreftError> {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if depth < 3 {
+                collect_plugin_skills_unprefixed(plugin_root, &path, depth + 1, skills)?;
+            }
+            continue;
+        }
+
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(plugin_root)
+            .expect("path must be under plugin_root");
+
+        // Build skill name from path components, without the plugin name.
+        let mut parts = Vec::new();
+        if let Some(parent) = rel.parent() {
+            for component in parent.components() {
+                parts.push(component.as_os_str().to_string_lossy().into_owned());
+            }
+        }
+        if let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) {
+            parts.push(stem.to_string());
+        }
+        let skill_name = parts.join(" ");
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match crate::frontmatter::parse(&content) {
+                Ok((mut def, _)) => {
+                    def.name = skill_name;
+                    skills.push(def);
+                }
+                Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
+            },
+            Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
+        }
+    }
+    Ok(())
+}
+
+/// Activation state for all plugins in a single scope.
+///
+/// Stored at `.creft/plugins/settings.json` (local scope) or
+/// `~/.creft/plugins/settings.json` (global scope).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginSettings {
+    /// Activated plugin commands.
+    ///
+    /// Keys are plugin names. Values describe which commands are active.
+    /// An `All(true)` value means every command from the plugin is active.
+    /// A `Commands(list)` value means only the listed command names are active.
+    #[serde(default)]
+    pub activated: std::collections::BTreeMap<String, ActivationEntry>,
+}
+
+/// Activation state for a single plugin within a scope.
+///
+/// Deserialization: `true` → `All(true)`, `["cmd1", "cmd2"]` → `Commands(vec)`.
+/// `false` is rejected by `PluginSettings::validate`. An empty command list
+/// is normalized to `All(true)` by `validate` — key presence means active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActivationEntry {
+    /// All commands from this plugin are active.
+    All(bool),
+    /// Only specific named commands are active.
+    Commands(Vec<String>),
+}
+
+impl PluginSettings {
+    /// Validate and normalize settings after deserialization.
+    ///
+    /// - Rejects `All(false)`: to deactivate a plugin, remove its key.
+    /// - Normalizes `Commands([])` to `All(true)`: empty list is equivalent to all.
+    pub fn validate(&mut self) -> Result<(), CreftError> {
+        let mut to_normalize = Vec::new();
+        for (name, entry) in &self.activated {
+            match entry {
+                ActivationEntry::All(false) => {
+                    return Err(CreftError::InvalidManifest(format!(
+                        "plugin '{}' has activation value 'false'; \
+                         remove the key to deactivate instead",
+                        name
+                    )));
+                }
+                ActivationEntry::Commands(cmds) if cmds.is_empty() => {
+                    to_normalize.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+        for name in to_normalize {
+            self.activated.insert(name, ActivationEntry::All(true));
+        }
+        Ok(())
+    }
+}
+
+/// Load activation settings for a scope from `settings.json`.
+///
+/// Returns a default (empty) `PluginSettings` when the file does not exist.
+/// Calls `validate()` after deserialization to reject invalid states.
+pub fn load_settings(ctx: &AppContext, scope: Scope) -> Result<PluginSettings, CreftError> {
+    let path = ctx.plugin_settings_path(scope)?;
+    if !path.exists() {
+        return Ok(PluginSettings::default());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut settings: PluginSettings = serde_json::from_str(&content)
+        .map_err(|e| CreftError::InvalidManifest(format!("settings.json parse error: {e}")))?;
+    settings.validate()?;
+    Ok(settings)
+}
+
+/// Save activation settings for a scope to `settings.json`.
+///
+/// Creates the `.creft/plugins/` directory if it does not exist.
+pub fn save_settings(
+    ctx: &AppContext,
+    scope: Scope,
+    settings: &PluginSettings,
+) -> Result<(), CreftError> {
+    let path = ctx.plugin_settings_path(scope)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(settings)
+        .map_err(|e| CreftError::Serialization(e.to_string()))?;
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Activate a command or all commands from an installed plugin.
+///
+/// `target` is either `plugin` (activate all) or `plugin/cmd` (one command).
+/// Validates the plugin is installed and the command exists before writing.
+/// Writes activation state to the `settings.json` for the given scope.
+pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), CreftError> {
+    let (plugin_name, cmd_name) = parse_activation_target(target);
+
+    let plugins_dir = ctx.plugins_dir()?;
+    let plugin_dir = plugins_dir.join(plugin_name);
+    if !plugin_dir.is_dir() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    if let Some(cmd) = cmd_name {
+        // Validate the specific command exists.
+        plugin_skill_file_path(ctx, plugin_name, cmd)?;
+    }
+
+    let mut settings = load_settings(ctx, scope)?;
+
+    if let Some(cmd) = cmd_name {
+        match settings.activated.get_mut(plugin_name) {
+            Some(ActivationEntry::All(true)) => {
+                // Already all-active; no change needed.
+            }
+            Some(ActivationEntry::Commands(cmds)) => {
+                if !cmds.contains(&cmd.to_string()) {
+                    cmds.push(cmd.to_string());
+                }
+            }
+            _ => {
+                settings.activated.insert(
+                    plugin_name.to_string(),
+                    ActivationEntry::Commands(vec![cmd.to_string()]),
+                );
+            }
+        }
+    } else {
+        settings
+            .activated
+            .insert(plugin_name.to_string(), ActivationEntry::All(true));
+    }
+
+    save_settings(ctx, scope, &settings)?;
+    Ok(())
+}
+
+/// Deactivate a command or all commands from a plugin.
+///
+/// When `global_only` is false, removes the entry from every scope that contains
+/// it (local first, then global). This matches the user's intent: "make this
+/// stop appearing" should clear all scopes, not leave a stale activation elsewhere.
+///
+/// When `global_only` is true, only the global scope is checked and modified.
+///
+/// Returns `ActivationNotFound` when the target exists in no checked scope.
+pub fn deactivate(ctx: &AppContext, target: &str, global_only: bool) -> Result<(), CreftError> {
+    let (plugin_name, cmd_name) = parse_activation_target(target);
+
+    let scopes_to_check: Vec<Scope> = if global_only {
+        vec![Scope::Global]
+    } else {
+        // Always check global; check local only when a local root exists.
+        let mut scopes = Vec::new();
+        if ctx.find_local_root().is_some() {
+            scopes.push(Scope::Local);
+        }
+        scopes.push(Scope::Global);
+        scopes
+    };
+
+    let mut found_in_any = false;
+
+    for scope in scopes_to_check {
+        let mut settings = load_settings(ctx, scope)?;
+        let changed = remove_from_settings(&mut settings, plugin_name, cmd_name);
+        if changed {
+            found_in_any = true;
+            save_settings(ctx, scope, &settings)?;
+        }
+    }
+
+    if !found_in_any {
+        return Err(CreftError::ActivationNotFound {
+            plugin: plugin_name.to_string(),
+            cmd: cmd_name.unwrap_or("(all)").to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Remove a plugin or specific command from settings. Returns true if anything changed.
+fn remove_from_settings(
+    settings: &mut PluginSettings,
+    plugin_name: &str,
+    cmd_name: Option<&str>,
+) -> bool {
+    match cmd_name {
+        None => {
+            // Deactivate the whole plugin.
+            settings.activated.remove(plugin_name).is_some()
+        }
+        Some(cmd) => {
+            match settings.activated.get_mut(plugin_name) {
+                Some(ActivationEntry::All(true)) => {
+                    // Can't selectively remove from "all" — remove the whole entry.
+                    settings.activated.remove(plugin_name);
+                    true
+                }
+                Some(ActivationEntry::Commands(cmds)) => {
+                    let before = cmds.len();
+                    cmds.retain(|c| c != cmd);
+                    let removed = cmds.len() < before;
+                    // Clean up empty command list.
+                    if cmds.is_empty() {
+                        settings.activated.remove(plugin_name);
+                    }
+                    removed
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// Parse a `plugin` or `plugin/cmd` activation target string.
+///
+/// Returns `(plugin_name, None)` for whole-plugin targets and
+/// `(plugin_name, Some(cmd_name))` for specific-command targets.
+fn parse_activation_target(target: &str) -> (&str, Option<&str>) {
+    if let Some(idx) = target.find('/') {
+        let plugin = &target[..idx];
+        let cmd = &target[idx + 1..];
+        (plugin, Some(cmd))
+    } else {
+        (target, None)
+    }
+}
+
+/// Resolve the filesystem path for a skill within an installed plugin.
+///
+/// Looks in `plugins_dir()/<plugin_name>/`. When `skill_name` equals
+/// `plugin_name` (the dedup case: `fetch/fetch.md` → name `"fetch"`),
+/// looks for `<plugin_name>.md` at the plugin root. Otherwise, treats
+/// whitespace-separated tokens as path components with the last getting
+/// a `.md` suffix.
+pub fn plugin_skill_file_path(
+    ctx: &AppContext,
+    plugin_name: &str,
+    skill_name: &str,
+) -> Result<PathBuf, CreftError> {
+    let plugin_dir = ctx.plugins_dir()?.join(plugin_name);
+    if !plugin_dir.is_dir() {
+        return Err(CreftError::PackageNotFound(plugin_name.to_string()));
+    }
+
+    if skill_name == plugin_name {
+        // Dedup case: the skill file is at the plugin root with a matching name.
+        let path = plugin_dir.join(format!("{}.md", plugin_name));
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(CreftError::PackageNotFound(skill_name.to_string()));
+    }
+
+    let tokens: Vec<&str> = skill_name.split_whitespace().collect();
+    for token in &tokens {
+        store::validate_path_token(token)?;
+    }
+    let mut file_path = plugin_dir;
+    for (i, token) in tokens.iter().enumerate() {
+        if i == tokens.len() - 1 {
+            file_path = file_path.join(format!("{}.md", token));
+        } else {
+            file_path = file_path.join(token);
+        }
+    }
+    if file_path.exists() {
+        return Ok(file_path);
+    }
+    Err(CreftError::PackageNotFound(skill_name.to_string()))
+}
+
+/// A skill match returned by `plugin_search`.
+#[derive(Debug, Clone)]
+pub struct PluginSkillMatch {
+    /// The plugin that contains this skill.
+    pub plugin_name: String,
+    /// The skill definition (name set to the full skill name).
+    pub def: crate::model::CommandDef,
+}
+
+/// Search for skills across all installed plugins.
+///
+/// Returns every skill from every installed plugin whose name, description, or
+/// tags contain at least one of the `query` terms (case-insensitive substring).
+/// When `query` is empty, all skills from all plugins are returned.
+///
+/// Skills are returned sorted by plugin name, then by skill name within each plugin.
+pub fn plugin_search(
+    ctx: &AppContext,
+    query: &[String],
+) -> Result<Vec<PluginSkillMatch>, CreftError> {
+    let plugins_dir = ctx.plugins_dir()?;
+    if !plugins_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    // Normalize query terms once — case-insensitive substring match.
+    let terms: Vec<String> = query.iter().map(|t| t.to_lowercase()).collect();
+
+    let mut matches: Vec<PluginSkillMatch> = Vec::new();
+
+    let mut plugin_names: Vec<String> = std::fs::read_dir(&plugins_dir)?
+        .filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_type().ok()?.is_dir() {
+                e.file_name().into_string().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    plugin_names.sort();
+
+    for plugin_name in plugin_names {
+        let skills = list_plugin_skills_in(ctx, &plugin_name)?;
+        for def in skills {
+            if skill_matches_query(&def, &terms) {
+                matches.push(PluginSkillMatch {
+                    plugin_name: plugin_name.clone(),
+                    def,
+                });
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+/// Returns `true` if `def` matches all of the given query `terms`.
+///
+/// An empty `terms` slice matches everything. Each term must appear as a
+/// case-insensitive substring in at least one of: skill name, description,
+/// or any tag. All terms must match (AND semantics).
+fn skill_matches_query(def: &crate::model::CommandDef, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let name_lower = def.name.to_lowercase();
+    let desc_lower = def.description.to_lowercase();
+    let tags_lower: Vec<String> = def.tags.iter().map(|t| t.to_lowercase()).collect();
+
+    terms.iter().all(|term| {
+        name_lower.contains(term.as_str())
+            || desc_lower.contains(term.as_str())
+            || tags_lower.iter().any(|tag| tag.contains(term.as_str()))
+    })
+}
+
+/// Load and parse a skill from an installed plugin.
+pub fn load_plugin_skill(
+    ctx: &AppContext,
+    plugin_name: &str,
+    skill_name: &str,
+) -> Result<ParsedCommand, CreftError> {
+    let file_path = plugin_skill_file_path(ctx, plugin_name, skill_name)?;
+    let content = std::fs::read_to_string(&file_path)?;
+    let (mut def, body) = crate::frontmatter::parse(&content)?;
+    let (docs, blocks) = crate::markdown::extract_blocks(&body);
+    def.name = skill_name.to_string();
+    Ok(ParsedCommand { def, docs, blocks })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     // --- PackageManifest deserialization ---
 
@@ -678,21 +1289,20 @@ mod tests {
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
-    #[test]
-    fn test_validate_manifest_name_reserved_install() {
-        let err = validate_manifest_name("install").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    /// `install`, `update`, and `uninstall` are no longer reserved names.
+    /// Plugin management moved under `creft plugin`, freeing these names for skill authors.
+    #[rstest]
+    #[case::install("install")]
+    #[case::update("update")]
+    #[case::uninstall("uninstall")]
+    fn formerly_reserved_names_are_now_valid(#[case] name: &str) {
+        assert!(validate_manifest_name(name).is_ok());
     }
 
     #[test]
-    fn test_validate_manifest_name_reserved_update() {
-        let err = validate_manifest_name("update").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
-    }
-
-    #[test]
-    fn test_validate_manifest_name_reserved_uninstall() {
-        let err = validate_manifest_name("uninstall").unwrap_err();
+    fn test_validate_manifest_name_plugin_is_reserved() {
+        // `plugin` is the new reserved name for the plugin management namespace.
+        let err = validate_manifest_name("plugin").unwrap_err();
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
@@ -752,6 +1362,21 @@ mod tests {
         let rel = Path::new("deploy.md");
         let name = skill_name_from_path("k8s-tools", rel);
         assert!(name.starts_with("k8s-tools "));
+    }
+
+    // Stage 3: dedup — root-level file matching package name omits the stem.
+    #[rstest]
+    #[case::root_match("fetch", "fetch.md", "fetch")]
+    #[case::root_mismatch("foo", "bar.md", "foo bar")]
+    #[case::subdir_match("fetch", "sub/fetch.md", "fetch sub fetch")]
+    #[case::subdir_different("k8s-tools", "sub/deploy.md", "k8s-tools sub deploy")]
+    fn skill_name_from_path_dedup(
+        #[case] pkg_name: &str,
+        #[case] rel_str: &str,
+        #[case] expected: &str,
+    ) {
+        let rel = Path::new(rel_str);
+        assert_eq!(skill_name_from_path(pkg_name, rel), expected);
     }
 
     // --- list_packages ---
@@ -815,6 +1440,91 @@ mod tests {
         let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].manifest.name, "good-pkg");
+    }
+
+    // --- read_manifest_from (Stage 3: catalog-first with creft.yaml fallback) ---
+
+    #[test]
+    fn read_manifest_from_prefers_catalog_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog_dir = dir.path().join(".creft");
+        std::fs::create_dir_all(&catalog_dir).unwrap();
+        std::fs::write(
+            catalog_dir.join("catalog.json"),
+            r#"{"name":"my-pkg","description":"desc","plugins":[{"name":"my-pkg","source":".","description":"From catalog","version":"2.0.0","tags":[]}]}"#,
+        )
+        .unwrap();
+        // Also write creft.yaml — catalog.json should win.
+        std::fs::write(
+            dir.path().join("creft.yaml"),
+            "name: my-pkg\nversion: 1.0.0\ndescription: From yaml\n",
+        )
+        .unwrap();
+
+        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.version, "2.0.0");
+        assert_eq!(manifest.description, "From catalog");
+    }
+
+    #[test]
+    fn read_manifest_from_falls_back_to_creft_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("creft.yaml"),
+            "name: old-pkg\nversion: 1.5.0\ndescription: Legacy package\n",
+        )
+        .unwrap();
+
+        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.name, "old-pkg");
+        assert_eq!(manifest.version, "1.5.0");
+    }
+
+    #[test]
+    fn read_manifest_from_returns_none_when_no_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(read_manifest_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn list_packages_reads_catalog_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("packages").join("catalog-pkg");
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
+        std::fs::write(
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"catalog-pkg","description":"","plugins":[{"name":"catalog-pkg","source":".","description":"A plugin","version":"3.0.0","tags":[]}]}"#,
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].manifest.name, "catalog-pkg");
+        assert_eq!(pkgs[0].manifest.version, "3.0.0");
+    }
+
+    #[test]
+    fn list_packages_backward_compat_creft_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("packages").join("yaml-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("creft.yaml"),
+            "name: yaml-pkg\nversion: 1.0.0\ndescription: Legacy\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].manifest.name, "yaml-pkg");
     }
 
     // --- list_package_skills ---
@@ -1122,497 +1832,6 @@ mod tests {
         assert!(dst.exists(), "destination should exist");
     }
 
-    // --- install: unit-level validation edge cases ---
-
-    #[test]
-    fn test_install_manifest_not_found_returns_error() {
-        // Create a git repo without creft.yaml, verify ManifestNotFound is returned.
-        let repo_dir = tempfile::TempDir::new().unwrap();
-        let path = repo_dir.path();
-
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(path)
-            .output()
-            .expect("git init");
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@t.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config");
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(path)
-            .output()
-            .expect("git config name");
-        std::fs::write(path.join("README.md"), "no manifest").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let result = install(&ctx, path.to_str().unwrap(), Scope::Global);
-        assert!(
-            matches!(result, Err(CreftError::ManifestNotFound)),
-            "expected ManifestNotFound, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_install_already_installed_returns_error() {
-        // Install a valid package, then install again. Expect PackageAlreadyInstalled.
-        let repo_dir = tempfile::TempDir::new().unwrap();
-        let path = repo_dir.path();
-
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(path)
-            .output()
-            .expect("git init");
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@t.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config");
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(path)
-            .output()
-            .expect("git config name");
-        std::fs::write(
-            path.join("creft.yaml"),
-            "name: test-pkg\nversion: 0.1.0\ndescription: test\n",
-        )
-        .unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        // First install succeeds.
-        install(&ctx, path.to_str().unwrap(), Scope::Global).unwrap();
-
-        // Second install fails.
-        let result = install(&ctx, path.to_str().unwrap(), Scope::Global);
-        assert!(
-            matches!(result, Err(CreftError::PackageAlreadyInstalled(_))),
-            "expected PackageAlreadyInstalled, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_install_invalid_manifest_name_rejected() {
-        // A repo with a creft.yaml whose `name` field contains invalid characters.
-        let repo_dir = tempfile::TempDir::new().unwrap();
-        let path = repo_dir.path();
-
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(path)
-            .output()
-            .expect("git init");
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@t.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config");
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(path)
-            .output()
-            .expect("git config name");
-        // Invalid name: contains a space.
-        std::fs::write(
-            path.join("creft.yaml"),
-            "name: bad name\nversion: 0.1.0\ndescription: test\n",
-        )
-        .unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let result = install(&ctx, path.to_str().unwrap(), Scope::Global);
-        assert!(
-            matches!(result, Err(CreftError::InvalidManifest(_))),
-            "expected InvalidManifest, got: {:?}",
-            result
-        );
-
-        // The invalid clone should not have been installed.
-        assert!(
-            !ctx.packages_dir_for(Scope::Global)
-                .unwrap()
-                .join("bad name")
-                .exists(),
-            "package directory should not have been created for invalid name"
-        );
-    }
-
-    #[test]
-    fn test_install_git_not_found_error() {
-        // Use a path that does not exist — git clone will fail.
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let result = install(&ctx, "/this/path/does/not/exist", Scope::Global);
-        assert!(
-            matches!(result, Err(CreftError::Git(_))),
-            "expected Git error, got: {:?}",
-            result
-        );
-    }
-
-    // --- update ---
-
-    /// Helper: create a minimal git repo with creft.yaml and optional skill files.
-    /// Returns the TempDir (caller must keep alive).
-    fn make_git_repo(name: &str, skills: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path();
-
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(path)
-            .output()
-            .expect("git init");
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@t.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config email");
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(path)
-            .output()
-            .expect("git config name");
-
-        std::fs::write(
-            path.join("creft.yaml"),
-            format!("name: {}\nversion: 0.1.0\ndescription: test\n", name),
-        )
-        .unwrap();
-
-        for (filename, content) in skills {
-            let file_path = path.join(filename);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(file_path, content).unwrap();
-        }
-
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
-
-        dir
-    }
-
-    #[test]
-    fn test_update_not_found() {
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let result = update(&ctx, "nonexistent-pkg");
-        assert!(
-            matches!(result, Err(CreftError::PackageNotFound(_))),
-            "expected PackageNotFound, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_update_picks_up_new_commit() {
-        // Install a package, add a new commit to the source repo, update, verify new version.
-        let repo = make_git_repo("update-pkg", &[]);
-        let repo_path = repo.path();
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        // Install using git clone.
-        install(&ctx, repo_path.to_str().unwrap(), Scope::Global).expect("install should succeed");
-
-        // Add a second commit to the source repo (bump version in manifest).
-        std::fs::write(
-            repo_path.join("creft.yaml"),
-            "name: update-pkg\nversion: 0.2.0\ndescription: updated\n",
-        )
-        .unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "bump version"])
-            .current_dir(repo_path)
-            .output()
-            .expect("git commit");
-
-        // Run update — should pull the new commit.
-        let pkg = update(&ctx, "update-pkg").expect("update should succeed");
-        assert_eq!(
-            pkg.manifest.version, "0.2.0",
-            "expected version 0.2.0 after update"
-        );
-    }
-
-    #[test]
-    fn test_update_manifest_removed_after_pull() {
-        // Install a package, then remove creft.yaml in the source, update should return ManifestNotFound.
-        let repo = make_git_repo("rm-manifest-pkg", &[]);
-        let repo_path = repo.path();
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        install(&ctx, repo_path.to_str().unwrap(), Scope::Global).expect("install should succeed");
-
-        // Remove creft.yaml and commit.
-        std::fs::remove_file(repo_path.join("creft.yaml")).unwrap();
-        // Add a placeholder file so the commit is non-empty.
-        std::fs::write(
-            repo_path.join("placeholder.md"),
-            "---\nname: x\ndescription: x\n---\n\n```bash\necho\n```\n",
-        )
-        .unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "remove manifest"])
-            .current_dir(repo_path)
-            .output()
-            .expect("git commit");
-
-        let result = update(&ctx, "rm-manifest-pkg");
-        assert!(
-            matches!(result, Err(CreftError::ManifestNotFound)),
-            "expected ManifestNotFound, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_update_manifest_name_changed_rejected() {
-        // Install a package, then change the name in creft.yaml, update should reject.
-        let repo = make_git_repo("name-change-pkg", &[]);
-        let repo_path = repo.path();
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        install(&ctx, repo_path.to_str().unwrap(), Scope::Global).expect("install should succeed");
-
-        // Change manifest name in source.
-        std::fs::write(
-            repo_path.join("creft.yaml"),
-            "name: different-name\nversion: 0.2.0\ndescription: changed\n",
-        )
-        .unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "change name"])
-            .current_dir(repo_path)
-            .output()
-            .expect("git commit");
-
-        let result = update(&ctx, "name-change-pkg");
-        assert!(
-            matches!(result, Err(CreftError::InvalidManifest(_))),
-            "expected InvalidManifest for name change, got: {:?}",
-            result
-        );
-        // Error message should mention both old and new name.
-        if let Err(CreftError::InvalidManifest(msg)) = result {
-            assert!(
-                msg.contains("name-change-pkg") && msg.contains("different-name"),
-                "error should mention both names: {}",
-                msg
-            );
-        }
-    }
-
-    #[test]
-    fn test_update_all_empty_when_no_packages() {
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let results = update_all(&ctx).expect("update_all should not fail with empty packages dir");
-        assert!(
-            results.is_empty(),
-            "expected empty results, got: {:?}",
-            results.len()
-        );
-    }
-
-    #[test]
-    fn test_update_all_updates_all_packages() {
-        let repo1 = make_git_repo("pkg-a", &[]);
-        let repo2 = make_git_repo("pkg-b", &[]);
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        install(&ctx, repo1.path().to_str().unwrap(), Scope::Global).expect("install pkg-a");
-        install(&ctx, repo2.path().to_str().unwrap(), Scope::Global).expect("install pkg-b");
-
-        let results = update_all(&ctx).expect("update_all should succeed");
-        assert_eq!(results.len(), 2, "expected 2 results");
-        for result in &results {
-            assert!(
-                result.is_ok(),
-                "expected all updates to succeed, got: {:?}",
-                result
-            );
-        }
-    }
-
-    // --- uninstall ---
-
-    #[test]
-    fn test_uninstall_not_found() {
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        let result = uninstall(&ctx, "nonexistent-pkg");
-        assert!(
-            matches!(result, Err(CreftError::PackageNotFound(_))),
-            "expected PackageNotFound, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_uninstall_removes_directory() {
-        let repo = make_git_repo("uninstall-pkg", &[]);
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        install(&ctx, repo.path().to_str().unwrap(), Scope::Global)
-            .expect("install should succeed");
-
-        // Verify directory exists before uninstall.
-        let pkg_dir = ctx
-            .packages_dir_for(Scope::Global)
-            .unwrap()
-            .join("uninstall-pkg");
-        assert!(
-            pkg_dir.exists(),
-            "package dir should exist before uninstall"
-        );
-
-        uninstall(&ctx, "uninstall-pkg").expect("uninstall should succeed");
-
-        assert!(
-            !pkg_dir.exists(),
-            "package dir should be gone after uninstall"
-        );
-    }
-
-    #[test]
-    fn test_uninstall_then_reinstall_succeeds() {
-        // After uninstall, installing the same package again should succeed.
-        let repo = make_git_repo("reinstall-pkg", &[]);
-
-        let creft_home = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            creft_home.path().to_path_buf(),
-            creft_home.path().to_path_buf(),
-        );
-
-        install(&ctx, repo.path().to_str().unwrap(), Scope::Global).expect("first install");
-        uninstall(&ctx, "reinstall-pkg").expect("uninstall");
-        install(&ctx, repo.path().to_str().unwrap(), Scope::Global)
-            .expect("second install after uninstall");
-
-        let pkg_dir = ctx
-            .packages_dir_for(Scope::Global)
-            .unwrap()
-            .join("reinstall-pkg");
-        assert!(pkg_dir.exists(), "package dir should exist after reinstall");
-    }
-
     #[test]
     fn test_skill_file_path_rejects_traversal() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1743,59 +1962,10 @@ mod tests {
         assert_eq!(names[0], "mypkg real");
     }
 
-    // --- find_package_scope ---
+    // --- packages_dir_for ---
 
     #[test]
-    fn test_find_package_scope_creft_home_found() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-
-        let pkg_dir = dir.path().join("packages").join("my-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-
-        let scope = find_package_scope(&ctx, "my-pkg").unwrap();
-        assert_eq!(scope, Scope::Global);
-    }
-
-    #[test]
-    fn test_find_package_scope_creft_home_not_found() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-
-        let result = find_package_scope(&ctx, "nonexistent");
-        assert!(matches!(result, Err(CreftError::PackageNotFound(_))));
-    }
-
-    #[test]
-    fn test_find_package_scope_global_only() {
-        // No local .creft/ and no CREFT_HOME — package is in the global scope.
-        let global_home = tempfile::TempDir::new().unwrap();
-        let project_dir = tempfile::TempDir::new().unwrap();
-        // Use CREFT_HOME to isolate the global scope.
-        let ctx = AppContext::for_test_with_creft_home(
-            global_home.path().to_path_buf(),
-            global_home.path().to_path_buf(),
-        );
-
-        let pkg_dir = global_home.path().join("packages").join("global-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-
-        let scope = find_package_scope(&ctx, "global-pkg").unwrap();
-        assert_eq!(scope, Scope::Global);
-
-        let _ = project_dir;
-    }
-
-    // --- install with scope ---
-
-    #[test]
-    fn test_install_scope_determines_destination() {
+    fn test_packages_dir_creft_home_both_scopes_resolve_to_same_path() {
         // Verify that packages_dir_for (via AppContext) resolves correctly under CREFT_HOME.
         let dir = tempfile::TempDir::new().unwrap();
         let ctx = AppContext::for_test_with_creft_home(
@@ -1808,59 +1978,6 @@ mod tests {
         let global_pkgs = ctx.packages_dir_for(Scope::Global).unwrap();
         assert_eq!(local_pkgs, global_pkgs);
         assert_eq!(local_pkgs, dir.path().join("packages"));
-    }
-
-    #[test]
-    fn test_uninstall_uses_find_package_scope() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-
-        // Create a package directory directly (bypass install's git clone).
-        let pkg_dir = dir.path().join("packages").join("test-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: test-pkg\nversion: 1.0.0\ndescription: test\n",
-        )
-        .unwrap();
-
-        // Verify the package is found before uninstall.
-        assert!(find_package_scope(&ctx, "test-pkg").is_ok());
-
-        // Uninstall should remove it.
-        uninstall(&ctx, "test-pkg").unwrap();
-        assert!(!pkg_dir.exists());
-
-        // After uninstall, it should not be found.
-        let result = find_package_scope(&ctx, "test-pkg");
-        assert!(matches!(result, Err(CreftError::PackageNotFound(_))));
-    }
-
-    #[test]
-    fn test_uninstall_scope_not_found() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-
-        let result = uninstall(&ctx, "nonexistent-pkg");
-        assert!(matches!(result, Err(CreftError::PackageNotFound(_))));
-    }
-
-    #[test]
-    fn test_update_all_no_packages() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-
-        let results = update_all(&ctx).unwrap();
-        assert!(results.is_empty());
     }
 
     #[test]

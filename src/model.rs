@@ -162,10 +162,30 @@ impl AppContext {
         Ok(self.resolve_root(scope)?.join("packages"))
     }
 
+    /// Global plugin cache directory (`~/.creft/plugins/`).
+    ///
+    /// Uses `resolve_root(Scope::Global)` so `CREFT_HOME` redirects plugin
+    /// storage for test isolation. Install is always global — there is no
+    /// per-scope plugin directory.
+    pub fn plugins_dir(&self) -> Result<PathBuf, CreftError> {
+        Ok(self.resolve_root(Scope::Global)?.join("plugins"))
+    }
+
+    /// Path to the plugin activation settings file for a scope.
+    ///
+    /// Local scope: `.creft/plugins/settings.json` (nearest project root).
+    /// Global scope: `~/.creft/plugins/settings.json`.
+    pub fn plugin_settings_path(&self, scope: Scope) -> Result<PathBuf, CreftError> {
+        Ok(self
+            .resolve_root(scope)?
+            .join("plugins")
+            .join("settings.json"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)
-    /// - Global skills: captured CWD
+    /// - Global skills and plugin skills: captured CWD
     /// - `CREFT_HOME` mode: captured CWD (no project root concept)
     pub fn derive_cwd(&self, source: &SkillSource) -> PathBuf {
         if self.creft_home.is_some() {
@@ -176,9 +196,9 @@ impl AppContext {
                 .find_local_root()
                 .and_then(|creft_dir| creft_dir.parent().map(|p| p.to_path_buf()))
                 .unwrap_or_else(|| self.cwd.clone()),
-            SkillSource::Owned(Scope::Global) | SkillSource::Package(_, Scope::Global) => {
-                self.cwd.clone()
-            }
+            SkillSource::Owned(Scope::Global)
+            | SkillSource::Package(_, Scope::Global)
+            | SkillSource::Plugin(_) => self.cwd.clone(),
         }
     }
 }
@@ -236,6 +256,8 @@ pub enum SkillSource {
     Owned(Scope),
     /// An installed package skill, with its storage scope.
     Package(String, Scope),
+    /// A skill from an activated plugin in the global plugin cache.
+    Plugin(String),
 }
 
 /// Skill definition parsed from YAML frontmatter.
