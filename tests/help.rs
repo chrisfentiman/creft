@@ -541,9 +541,7 @@ fn test_up_help_has_supported_systems() {
 fn test_all_builtin_help_has_usage() {
     let dir = creft_env();
 
-    let builtins = [
-        "add", "list", "show", "cat", "rm", "up", "doctor", "init",
-    ];
+    let builtins = ["add", "list", "show", "cat", "rm", "up", "doctor", "init"];
 
     for cmd in &builtins {
         let output = creft_with(&dir)
@@ -570,9 +568,7 @@ fn test_all_builtin_help_has_usage() {
 fn test_no_allcaps_sections_in_help() {
     let dir = creft_env();
 
-    let builtins = [
-        "add", "list", "show", "cat", "rm", "up", "doctor", "init",
-    ];
+    let builtins = ["add", "list", "show", "cat", "rm", "up", "doctor", "init"];
 
     // Regex: a line that is all uppercase letters and spaces (4+ chars) ending with ':'
     // This catches headers like "FRONTMATTER FIELDS:" or "CODE BLOCKS:" but not

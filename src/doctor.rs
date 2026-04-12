@@ -1844,7 +1844,11 @@ mod tests {
         // Create a package with a malformed catalog.json
         let pkg_dir = tmp.path().join(".creft/packages/broken-pkg");
         std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
-        std::fs::write(pkg_dir.join(".creft").join("catalog.json"), "not valid json [").unwrap();
+        std::fs::write(
+            pkg_dir.join(".creft").join("catalog.json"),
+            "not valid json [",
+        )
+        .unwrap();
 
         let results = check_packages(&ctx);
         // Should include at least one Fail result for the broken manifest

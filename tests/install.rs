@@ -488,7 +488,11 @@ fn package_nested_skill_resolves_and_runs() {
         .join("deploy");
     std::fs::create_dir_all(&pkg_dir).unwrap();
 
-    let nested_catalog_dir = creft_home.path().join("packages").join("nested-pkg").join(".creft");
+    let nested_catalog_dir = creft_home
+        .path()
+        .join("packages")
+        .join("nested-pkg")
+        .join(".creft");
     std::fs::create_dir_all(&nested_catalog_dir).unwrap();
     std::fs::write(
         nested_catalog_dir.join("catalog.json"),
