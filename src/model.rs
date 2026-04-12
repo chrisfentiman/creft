@@ -182,6 +182,11 @@ impl AppContext {
             .join("settings.json"))
     }
 
+    /// Path to the global settings file (`~/.creft/settings.json`).
+    pub fn settings_path(&self) -> Result<std::path::PathBuf, CreftError> {
+        Ok(self.resolve_root(Scope::Global)?.join("settings.json"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)

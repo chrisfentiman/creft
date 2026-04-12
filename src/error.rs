@@ -95,6 +95,9 @@ pub enum CreftError {
     #[error("validation failed")]
     ValidationErrors(Vec<crate::validate::ValidationDiagnostic>),
 
+    #[error("settings error: {0}")]
+    SettingsError(String),
+
     /// A block exited with code 99: stop the pipeline and return success.
     ///
     /// This variant is an internal signal used by the runner. It is never

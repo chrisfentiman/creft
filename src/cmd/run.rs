@@ -6,6 +6,7 @@ use clap::Parser;
 use crate::cmd::skill::{LIST_DESC_MAX, format_skill_desc, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::settings::Settings;
 use crate::{cli, model, runner, shell, store, style};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
@@ -91,8 +92,16 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     #[cfg(unix)]
     let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
 
+    // Load settings to resolve the persistent shell preference. A corrupt or
+    // missing settings file falls back gracefully — skill execution continues
+    // using the $SHELL env var.
+    let settings_shell_pref = ctx
+        .settings_path()
+        .ok()
+        .and_then(|p| Settings::load(&p).ok())
+        .and_then(|s| s.get("shell").map(str::to_string));
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
-        .with_shell_preference(shell::detect());
+        .with_shell_preference(shell::detect(settings_shell_pref.as_deref()));
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.

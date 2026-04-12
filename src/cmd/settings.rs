@@ -1,17 +1,35 @@
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::settings::Settings;
 
-/// Show current settings.
+/// Show all current settings.
 ///
-/// Stub for stage 5 — the settings subsystem is not yet implemented.
-pub fn cmd_settings_show(_ctx: &AppContext) -> Result<(), CreftError> {
-    eprintln!("no settings configured");
+/// Prints each setting as `key = value`. Prints "no settings configured"
+/// when the settings file is absent or empty.
+pub fn cmd_settings_show(ctx: &AppContext) -> Result<(), CreftError> {
+    let path = ctx.settings_path()?;
+    let settings = Settings::load(&path)?;
+
+    let mut any = false;
+    for (key, value) in settings.iter() {
+        println!("{key} = {value}");
+        any = true;
+    }
+    if !any {
+        println!("no settings configured");
+    }
     Ok(())
 }
 
 /// Set a configuration value.
 ///
-/// Stub for stage 5 — the settings subsystem is not yet implemented.
-pub fn cmd_settings_set(_ctx: &AppContext, key: &str, _value: &str) -> Result<(), CreftError> {
-    Err(CreftError::InvalidName(format!("unknown setting '{key}'")))
+/// Persists the key/value pair to the settings file. Returns an error for
+/// unknown keys.
+pub fn cmd_settings_set(ctx: &AppContext, key: &str, value: &str) -> Result<(), CreftError> {
+    let path = ctx.settings_path()?;
+    let mut settings = Settings::load(&path)?;
+    settings.set(key, value)?;
+    settings.save(&path)?;
+    println!("set {key} = {value}");
+    Ok(())
 }

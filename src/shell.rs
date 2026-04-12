@@ -1,18 +1,30 @@
 /// Detect the user's preferred shell.
 ///
 /// Resolution order:
-/// 1. `CREFT_SHELL` env var (explicit override)
-/// 2. `SHELL` env var (standard Unix convention)
-/// 3. None (use block language literally)
+/// 1. `CREFT_SHELL` env var (highest priority — one-off overrides)
+/// 2. `settings_shell` — the persistent `shell` setting from settings.json
+/// 3. `SHELL` env var (system default)
+/// 4. None (use block language literally)
 ///
-/// Returns the shell name (e.g., "bash", "zsh", "fish") or None.
-pub fn detect() -> Option<String> {
+/// The caller loads settings and passes `settings.get("shell")`. This keeps
+/// `shell.rs` free of filesystem dependencies and fully testable with pure values.
+///
+/// Returns the shell name (e.g., "bash", "zsh", "fish") or `None`.
+pub fn detect(settings_shell: Option<&str>) -> Option<String> {
     if let Ok(val) = std::env::var("CREFT_SHELL") {
-        if !val.is_empty() && val != "none" {
-            return Some(normalize(&val));
-        }
         if val == "none" {
             return None;
+        }
+        if !val.is_empty() {
+            return Some(normalize(&val));
+        }
+    }
+    if let Some(val) = settings_shell {
+        if val == "none" {
+            return None;
+        }
+        if !val.is_empty() {
+            return Some(normalize(val));
         }
     }
     std::env::var("SHELL")
@@ -81,7 +93,7 @@ mod tests {
             std::env::remove_var("CREFT_SHELL");
             std::env::set_var("SHELL", "/bin/zsh");
         }
-        assert_eq!(detect(), Some("zsh".to_string()));
+        assert_eq!(detect(None), Some("zsh".to_string()));
     }
 
     #[test]
@@ -91,7 +103,7 @@ mod tests {
             std::env::remove_var("CREFT_SHELL");
             std::env::set_var("SHELL", "/usr/local/bin/bash");
         }
-        assert_eq!(detect(), Some("bash".to_string()));
+        assert_eq!(detect(None), Some("bash".to_string()));
     }
 
     #[test]
@@ -101,7 +113,7 @@ mod tests {
             std::env::remove_var("CREFT_SHELL");
             std::env::remove_var("SHELL");
         }
-        assert_eq!(detect(), None);
+        assert_eq!(detect(None), None);
     }
 
     #[test]
@@ -111,7 +123,7 @@ mod tests {
             std::env::set_var("CREFT_SHELL", "none");
             std::env::set_var("SHELL", "/bin/zsh");
         }
-        assert_eq!(detect(), None);
+        assert_eq!(detect(None), None);
     }
 
     /// CREFT_SHELL takes precedence over SHELL, and full paths are normalized.
@@ -122,7 +134,40 @@ mod tests {
             std::env::set_var("CREFT_SHELL", "/usr/bin/fish");
             std::env::set_var("SHELL", "/bin/bash");
         }
-        assert_eq!(detect(), Some("fish".to_string()));
+        assert_eq!(detect(None), Some("fish".to_string()));
+    }
+
+    /// Settings value fills the gap between CREFT_SHELL and $SHELL.
+    #[test]
+    fn detect_returns_settings_shell_when_creft_shell_absent() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::remove_var("CREFT_SHELL");
+            std::env::set_var("SHELL", "/bin/bash");
+        }
+        assert_eq!(detect(Some("zsh")), Some("zsh".to_string()));
+    }
+
+    /// CREFT_SHELL beats settings when both are set.
+    #[test]
+    fn detect_creft_shell_overrides_settings() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::set_var("CREFT_SHELL", "fish");
+            std::env::set_var("SHELL", "/bin/bash");
+        }
+        assert_eq!(detect(Some("zsh")), Some("fish".to_string()));
+    }
+
+    /// Settings value "none" disables shell detection even when $SHELL is set.
+    #[test]
+    fn detect_returns_none_when_settings_shell_is_none_literal() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::remove_var("CREFT_SHELL");
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        assert_eq!(detect(Some("none")), None);
     }
 
     // ── is_shell_family() ─────────────────────────────────────────────────────

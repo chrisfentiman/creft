@@ -10,6 +10,7 @@ mod model;
 mod registry;
 mod registry_config;
 mod runner;
+mod settings;
 mod setup;
 mod shell;
 mod store;

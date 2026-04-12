@@ -7,6 +7,7 @@ use regex::Regex;
 use crate::error::CreftError;
 use crate::model::{AppContext, CodeBlock, SkillSource};
 use crate::registry;
+use crate::settings::Settings;
 use crate::shell;
 use crate::store;
 use crate::style;
@@ -190,8 +191,8 @@ fn check_optional_tool(name: &str, purpose: &str) -> CheckResult {
 /// This is informational only — the check never fails. It shows which shell
 /// will be used to run shell-family code blocks, so users can confirm the
 /// detected value matches their expectation.
-fn check_shell_preference() -> CheckResult {
-    match shell::detect() {
+fn check_shell_preference(settings_shell: Option<&str>) -> CheckResult {
+    match shell::detect(settings_shell) {
         Some(name) => CheckResult {
             label: "shell preference".to_string(),
             status: CheckStatus::Info,
@@ -514,7 +515,15 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.extend(check_flat_files(ctx));
     results.extend(check_activations(ctx));
 
-    results.push(check_shell_preference());
+    // Load the settings shell preference for doctor display. A corrupt or
+    // missing settings file is treated as no preference — the check is
+    // informational and must not itself fail.
+    let settings_shell_pref = ctx
+        .settings_path()
+        .ok()
+        .and_then(|p| Settings::load(&p).ok())
+        .and_then(|s| s.get("shell").map(str::to_string));
+    results.push(check_shell_preference(settings_shell_pref.as_deref()));
 
     results
 }
