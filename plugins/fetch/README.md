@@ -4,11 +4,17 @@ Pull dependency source code into your project for AI agent context.
 
 ## The problem
 
-AI agents make mistakes when they call functions they haven't read. They guess signatures, miss error variants, assume APIs that changed two major versions ago. The fix is obvious: read the source. The problem is getting the source without burning half your context window on a `git clone` that includes test fixtures, CI configs, and five years of history you don't need.
+Web search creates a bad game of telephone. The Vercel team discovered this while building v0: a smaller model summarizes search results, the main model acts on those summaries, and hallucinations compound at each step. Their answer was [opensrc](https://github.com/vercel-labs/opensrc) — inject actual source files directly into agents' read-only filesystems. When v0 needed to use the AI SDK, it searched hand-curated directories with real code patterns. Web search went away entirely.
 
-Browsing registry documentation doesn't help either. Docs lag behind the implementation. They omit edge cases. They describe what the function is supposed to do, not what it actually does. The only reliable source of truth is the source code at the exact version you're using.
+`creft fetch` extends that idea beyond npm. Agents make mistakes when they call functions they haven't read. They guess signatures, miss error variants, assume APIs that changed two major versions ago. The fix is obvious: read the source. The problem is getting the source at the exact version you're using, without history and test fixtures burning context.
 
-`creft fetch` resolves a package name to its repository, shallow-clones the exact release tag, strips `.git` history, and drops the result in `workbench/code/` where agents can read it directly.
+`creft fetch` resolves a package name to its repository, shallow-clones the exact release tag, strips `.git` history, and drops the source in `workbench/code/` where agents can read it directly.
+
+## How it differs from Context7 and DeepWiki
+
+Context7 (Upstash) injects live documentation — the right solution for "which version of the API am I using?" but it gives you docs, not source. DeepWiki (Cognition) generates wiki documentation with architecture diagrams — the right solution for "how is this repo structured?" but it's AI-generated understanding, not the actual code.
+
+`creft fetch` gives you the source at the exact version tag. These are complementary layers, not competitors: Context7 for correct API usage, `creft fetch` for implementation details, DeepWiki for architectural understanding.
 
 ## Usage
 
@@ -83,7 +89,7 @@ The `.git` directory is removed. You get the source tree, not the history.
 
 Append `@version` to any spec. For registry packages, creft tries common tag patterns in order: `v1.0.0`, `1.0.0`, `serde-v1.0.0`, `serde-1.0.0`. If none match, it falls back to the default branch.
 
-For GitHub shorthands and URLs, the version string is used directly as a branch or tag ref.
+For GitHub shorthands and URLs, creft tries the version string as a tag or branch, then tries it with a `v` prefix. If neither matches, it falls back to the default branch.
 
 ## Already cached
 

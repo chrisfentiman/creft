@@ -8,7 +8,9 @@ MCP server configurations live in `~/.claude.json` as raw JSON. Adding a server 
 
 Sharing a setup between machines means copying JSON around. Rotating a token means finding every place it appears and updating it. There's no audit trail of what's installed where, no way to verify that a server's credentials are still valid, and no way to reinstall from scratch after a machine wipe without re-entering everything from memory.
 
-The `mcp` plugin solves this with a vault. Server configurations are stored as templates in `~/.creft/mcp/vault/`. Secrets are stored in the macOS keychain. The settings file is assembled from the vault at install or sync time. Rotating a secret means updating the keychain and running `creft mcp sync`.
+There's a deeper problem too: Claude can't safely manage its own MCP servers. Editing the JSON file that controls its own tool access mid-session is a recipe for corruption — especially if a write fails partway through.
+
+The `mcp` plugin solves this with a vault. Server configurations are stored as templates in `~/.creft/mcp/vault/`. Secrets are stored in the macOS keychain. The settings file is assembled from the vault at install or sync time — atomically, with rollback. Rotating a secret means updating the keychain and running `creft mcp sync`.
 
 ## Commands
 

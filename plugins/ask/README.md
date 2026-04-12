@@ -6,15 +6,17 @@ Ask questions across project boundaries, or ask the user directly from inside an
 
 ### Querying another project
 
-You're working in one repo and need to understand something about another. You could grep through the foreign codebase yourself, but you'd be doing it without that project's CLAUDE.md, its custom rules, its specialized agents. You'd be applying your current context to a codebase that has its own context.
+You're working in one repo and need to understand something about another. Grepping through the foreign codebase works, but you'd be doing it without that project's CLAUDE.md, its custom rules, its specialized agents. You'd be applying your current context to a codebase that has its own context.
 
-`creft ask <project> "question"` spawns Claude Code in the registered project's directory. The target project's full environment — CLAUDE.md, rules files, agents — becomes the context for answering your question. The answer comes back to stdout. Your agent reads it.
+This matters more than it sounds. Multi-agent architectures where specialized agents delegate to each other depend on each agent operating within the right environment. Querying a codebase without its native context means getting answers shaped by your project's rules, not the target project's.
+
+`creft ask <project> "question"` spawns Claude Code in the registered project's directory. The target project's full environment — CLAUDE.md, rules files, agents, MCP servers — becomes the context for answering your question. The answer comes back on stdout. Your agent reads it and continues.
 
 This is different from grepping a codebase or reading its source directly. When you ask a project, you get answers shaped by that project's own understanding of itself.
 
 ### Asking the user
 
-Agents sometimes need human input: a decision, a secret, a choice between options. Without a dialog mechanism, agents have to halt and print to stdout, which gets buried in conversation history or lost in a pipeline.
+Agents sometimes need human input: a decision, a secret, a choice between options. Without a dialog mechanism, agents halt and print to stdout — which gets buried in conversation history or lost in a pipeline.
 
 `creft ask "question"` opens a native tkinter dialog on the user's screen and returns the answer on stdout. The agent continues when the user responds.
 

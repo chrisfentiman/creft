@@ -4,9 +4,11 @@ Schedule recurring agent tasks to run locally on your machine.
 
 ## The problem
 
-Claude has scheduled tasks, but they run on Anthropic's servers. You can't point them at local files, local databases, or tools that only exist on your machine. You can't inspect them, modify them, or verify what they did. They run on someone else's infrastructure against a snapshot of your project.
+Claude has scheduled tasks, but they come with hard constraints. Cloud tasks run on Anthropic's servers — no local file access, fresh repo clone each run, 1-hour minimum interval. Desktop tasks require the app to be open — they die when you close it. `/loop` is session-scoped — it dies when the session closes.
 
-`creft schedule` puts scheduled work on your machine, under your control. Jobs run via macOS launchd, with your shell environment, your filesystem, your tools. They log to a file you can read. They run on a cron schedule you can understand. Nothing leaves your machine.
+The broader ecosystem has the same tradeoff. Most AI agent scheduling tools (Computer Agents, Relevance AI, Perplexity Computer) are cloud-based. They're "always on," but they trade away local access to get there. GitHub Actions with the Claude API works, but it's API-driven and requires implementing the scheduling yourself. Native cron plus Claude CLI is possible, but each job is a manual setup: shell wrappers, log rotation, status checking.
+
+`creft schedule` puts scheduled work on your machine, under your control. Jobs run via macOS launchd, with your shell environment, your filesystem, your tools. They persist across reboots. They log to a file you can read. They run on a cron schedule you understand. Nothing leaves your machine.
 
 ## Commands
 
