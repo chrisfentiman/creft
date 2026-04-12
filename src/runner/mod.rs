@@ -1585,18 +1585,19 @@ mod tests {
 
     #[test]
     fn test_pipe_block0_fails() {
-        // Block 0 exits non-zero. Block 1 reads EOF on stdin (block 0 died),
-        // and succeeds (wc -l prints 0). Because the LAST block succeeds,
-        // the overall result is Ok (last block exit determines success).
-        // When block 0 AND the last block both fail, the error is from block 0.
+        // Block 0 exits non-zero. Block 1 reads EOF on stdin and succeeds
+        // (wc -l prints 0). The upstream failure must be reported regardless
+        // of whether the last block succeeded — creft reports the root cause,
+        // not the last block's exit code.
         let cmd = make_pipe_cmd_multi(&["exit 1", "wc -l"]);
         let cwd = std::path::Path::new("/tmp");
         let result = run_for_test(&cmd, &[], &[], cwd);
-        // Block 1 (wc -l) succeeds because it just sees EOF on stdin.
-        // Last block exit determines the result; wc -l exits 0, so overall Ok.
         assert!(
-            result.is_ok(),
-            "when last block succeeds, overall result is Ok even if block 0 fails: {:?}",
+            matches!(
+                result,
+                Err(crate::error::CreftError::ExecutionFailed { block: 0, .. })
+            ),
+            "block 0 failure must be reported even when the last block succeeds: {:?}",
             result
         );
     }
