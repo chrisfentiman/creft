@@ -108,10 +108,16 @@ const CREFT_INSTRUCTIONS: &str = concat!(
     "\
 # creft -- Executable Skills for AI Agents
 
-creft is a skill system that saves reusable commands as markdown files and
-runs them as CLI subcommands. Skills can contain bash, python, node, or
-any interpreter -- with arguments, flags, dependency management, and
-multi-step pipelines.
+creft saves reusable commands as markdown files and runs them as CLI
+subcommands. Skills persist between sessions -- create once, use from any
+directory, on any machine. LLM blocks call AI providers (claude, gemini,
+codex, ollama) as pipeline steps.
+
+## When to create a skill
+
+  Run once, never again:              run inline, don't make a skill
+  Run again, or share with the team:  make it a skill
+  Pipe output to an LLM:              use an LLM block in the skill
 
 ## Discovering skills
 
@@ -122,9 +128,10 @@ multi-step pipelines.
 
 ## Running skills
 
-Skills are invoked directly as creft subcommands:
-
   creft <name> [args...] [--flags...]
+
+  --dry-run     Preview rendered blocks without executing
+  --verbose     Print rendered blocks to stderr before execution
 
 ## Creating skills
 
@@ -134,11 +141,14 @@ Skills are invoked directly as creft subcommands:
   description: Deploys the app to staging or production.
   args:
     - name: env
-      description: target environment
   ---
 
   ```bash
   echo \"Deploying to {{env}}...\"
+  ```
+
+  ```llm
+  Confirm deployment to {{env}} succeeded.
   ```
   EOF
 
@@ -146,7 +156,6 @@ Run `creft cmd add --help` for the complete format reference.
 
 ## Managing skills
 
-  creft cmd list                  List skills
   creft cmd show <name>           View full definition
   creft cmd cat <name>            View code blocks only
   creft cmd rm <name>             Remove a skill
@@ -549,6 +558,15 @@ mod tests {
         assert!(content.contains("# creft"));
         assert!(content.contains(VERSION_MARKER));
         assert!(content.contains("creft cmd list"));
+    }
+
+    #[test]
+    fn test_instructions_contain_llm_block_awareness() {
+        // The instructions must document LLM blocks so agents know to use them.
+        assert!(
+            CREFT_INSTRUCTIONS.contains("llm"),
+            "CREFT_INSTRUCTIONS must document LLM block support"
+        );
     }
 
     #[test]
