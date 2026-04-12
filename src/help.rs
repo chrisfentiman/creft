@@ -191,6 +191,8 @@ Installs creft instructions for your coding AI
 
 Detects which AI coding systems are present and installs the appropriate
 instruction file so the LLM knows how to discover and use creft skills.
+The installed instructions reflect the v0.3.0 CLI structure (creft cmd,
+creft plugins).
 
 Examples:
   creft up                  Auto-detect and install for all found systems
@@ -208,8 +210,9 @@ Supported Systems:
   gemini         GEMINI.md (appends)
 
 The installer never overwrites existing content. Existing creft sections
-are refreshed; non-creft content is preserved. Some systems (Cursor,
-Windsurf) don't support global rules via files.";
+are refreshed; non-creft content is preserved. Files already containing
+current instructions are skipped. Some systems (Cursor, Windsurf) don't
+support global rules via files.";
 
 /// Extended description shown by `creft doctor --help`, covering global and skill-specific check modes.
 pub const DOCTOR_LONG_ABOUT: &str = "\

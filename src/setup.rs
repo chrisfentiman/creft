@@ -109,12 +109,10 @@ multi-step pipelines.
 
 ## Discovering skills
 
-Find what skills are available before doing anything else:
-
-  creft list                    Show all skills, grouped by namespace
-  creft list <namespace>        Drill into a namespace
-  creft <skill> --help          See what a skill does and what it accepts
-  creft show <skill>            Read the full skill definition
+  creft cmd list                  Show all skills, grouped by namespace
+  creft cmd list <namespace>      Drill into a namespace
+  creft <skill> --help            See what a skill does and what it accepts
+  creft cmd show <skill>          Read the full skill definition
 
 ## Running skills
 
@@ -122,25 +120,15 @@ Skills are invoked directly as creft subcommands:
 
   creft <name> [args...] [--flags...]
 
-Examples:
-  creft hello World
-  creft gh issue-body myorg/repo 42 --format json
-
 ## Creating skills
 
-Pipe a markdown definition to `creft add`:
-
-  creft add <<'EOF'
+  creft cmd add <<'EOF'
   ---
   name: deploy
   description: Deploys the app to staging or production.
   args:
     - name: env
-      description: target environment (staging or production)
-  flags:
-    - name: dry-run
-      type: bool
-      description: show what would happen without executing
+      description: target environment
   ---
 
   ```bash
@@ -148,32 +136,29 @@ Pipe a markdown definition to `creft add`:
   ```
   EOF
 
-Run `creft add --help` for the complete format reference including
-dependencies, validation, environment variables, and multi-block pipelines.
+Run `creft cmd add --help` for the complete format reference.
 
-## Editing skills
+## Managing skills
 
-Pipe updated content to `creft edit`:
+  creft cmd list                  List skills
+  creft cmd show <name>           View full definition
+  creft cmd cat <name>            View code blocks only
+  creft cmd rm <name>             Remove a skill
+  creft cmd add --force <<'EOF'   Update an existing skill
 
-  cat updated-skill.md | creft edit <name>
+## Plugins
 
-## Installing skill packages
-
-Install a collection of skills from a git repository:
-
-  creft install <git-url>
-  creft install https://github.com/someone/k8s-tools
-
-After installing, the package's skills appear as namespaced subcommands:
-  creft k8s-tools deploy production
+  creft plugins install <git-url>           Install a plugin
+  creft plugins activate <plugin>/<cmd>     Activate a command
+  creft plugins list                        List installed plugins
 
 ## Skill storage
 
   Local:   .creft/ in the project directory (travels with the repo)
-  Global:  ~/.creft/ (available everywhere on your machine)
+  Global:  ~/.creft/ (available everywhere)
 
 Local skills shadow global ones with the same name.
-<!-- creft:v1 -->
+<!-- creft:v2 -->
 ";
 
 /// Write creft instructions for `system` into `project_dir` (or the user's home
@@ -208,7 +193,7 @@ pub fn install(
     if path.exists() {
         let existing = std::fs::read_to_string(&path)?;
 
-        if existing.contains("<!-- creft:v1 -->") {
+        if existing.contains("<!-- creft:v2 -->") {
             eprintln!(
                 "  skipped: {} (creft instructions are current)",
                 path.display()
@@ -258,9 +243,9 @@ fn is_creft_owned_file(system: System) -> bool {
 
 /// Replace the creft section in a shared file.
 ///
-/// Looks for a line starting with `# creft` and ending with the `<!-- creft:v1 -->`
-/// marker (or the next top-level heading, or end of file). Replaces that range with
-/// `new_content`. Falls back to appending if no creft heading is found.
+/// Looks for a line starting with `# creft` and ending at the next top-level
+/// heading or end of file. Replaces that range with `new_content`. Falls back
+/// to appending if no creft heading is found.
 fn replace_creft_section(existing: &str, new_content: &str) -> String {
     let lines: Vec<&str> = existing.lines().collect();
 
@@ -554,7 +539,8 @@ mod tests {
         assert_eq!(path, dir.path().join("GEMINI.md"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# creft"));
-        assert!(content.contains("<!-- creft:v1 -->"));
+        assert!(content.contains("<!-- creft:v2 -->"));
+        assert!(content.contains("creft cmd list"));
     }
 
     #[test]
@@ -612,9 +598,9 @@ mod tests {
     #[test]
     fn test_install_skip_current_version() {
         let dir = TempDir::new().unwrap();
-        // Pre-write a file that already contains the current version marker.
+        // Pre-write a file that already contains the current (v2) version marker.
         let path = dir.path().join("GEMINI.md");
-        std::fs::write(&path, "# creft\nsome content\n<!-- creft:v1 -->\n").unwrap();
+        std::fs::write(&path, "# creft\nsome content\n<!-- creft:v2 -->\n").unwrap();
         let original_content = std::fs::read_to_string(&path).unwrap();
         let ctx = ctx_no_home(dir.path());
 
@@ -630,7 +616,7 @@ mod tests {
     #[test]
     fn test_install_updates_stale_version() {
         let dir = TempDir::new().unwrap();
-        // Pre-write a file with old creft instructions (has # creft heading but no v1 marker).
+        // Pre-write a file with old creft instructions (has # creft heading but no version marker).
         let path = dir.path().join("GEMINI.md");
         std::fs::write(&path, "# creft\nold content without version marker\n").unwrap();
         let ctx = ctx_no_home(dir.path());
@@ -639,12 +625,37 @@ mod tests {
 
         let after_content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            after_content.contains("<!-- creft:v1 -->"),
-            "stale instructions should be updated to include version marker"
+            after_content.contains("<!-- creft:v2 -->"),
+            "stale instructions should be updated to include current version marker"
         );
         assert!(
             !after_content.contains("old content without version marker"),
             "old content should be replaced"
+        );
+    }
+
+    #[test]
+    fn test_install_upgrades_v1_to_v2() {
+        let dir = TempDir::new().unwrap();
+        // Pre-write a file with v1 instructions — these are now stale and must be replaced.
+        let path = dir.path().join("GEMINI.md");
+        std::fs::write(&path, "# creft\ncreft list\ncreft add\n<!-- creft:v1 -->\n").unwrap();
+        let ctx = ctx_no_home(dir.path());
+
+        install(&ctx, System::Gemini, dir.path(), false).unwrap();
+
+        let after_content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after_content.contains("<!-- creft:v2 -->"),
+            "v1 marker should be upgraded to v2"
+        );
+        assert!(
+            !after_content.contains("<!-- creft:v1 -->"),
+            "v1 marker should not remain after upgrade"
+        );
+        assert!(
+            after_content.contains("creft cmd list"),
+            "updated content should use v0.3.0 command paths"
         );
     }
 
@@ -653,7 +664,7 @@ mod tests {
     #[test]
     fn test_replace_creft_section_replaces_content() {
         let existing = "# Other Section\nother content\n\n# creft\nold creft stuff\n";
-        let new_content = "# creft\nnew creft content\n<!-- creft:v1 -->\n";
+        let new_content = "# creft\nnew creft content\n<!-- creft:v2 -->\n";
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("# Other Section"));
         assert!(result.contains("other content"));
@@ -674,7 +685,7 @@ mod tests {
     #[test]
     fn test_replace_creft_section_preserves_content_after() {
         let existing = "# creft\nold stuff\n\n# After Section\nafter content\n";
-        let new_content = "# creft\nnew creft\n<!-- creft:v1 -->\n";
+        let new_content = "# creft\nnew creft\n<!-- creft:v2 -->\n";
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("new creft"));
         assert!(!result.contains("old stuff"));
@@ -779,7 +790,7 @@ mod tests {
         install(&ctx, System::Aider, dir.path(), false).unwrap();
 
         let content = std::fs::read_to_string(&conventions_path).unwrap();
-        assert!(content.contains("<!-- creft:v1 -->"));
+        assert!(content.contains("<!-- creft:v2 -->"));
         assert!(!content.contains("old instructions"));
         // Other section should be preserved
         assert!(content.contains("# Other section"));
@@ -888,7 +899,7 @@ mod tests {
     fn test_replace_creft_section_case_insensitive() {
         // "# CREFT" should match as a creft heading
         let existing = "# CREFT\nold stuff\n";
-        let new_content = "# creft\nnew stuff\n<!-- creft:v1 -->\n";
+        let new_content = "# creft\nnew stuff\n<!-- creft:v2 -->\n";
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("new stuff"));
         assert!(!result.contains("old stuff"));
