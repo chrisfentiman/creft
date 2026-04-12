@@ -344,7 +344,7 @@ fn install_cursor(project_dir: &Path, global: bool) -> Result<(PathBuf, String),
     let content = format!(
         "\
 ---
-description: creft is installed in this project. Use it to discover and run reusable skills (creft list, creft <skill>), create new skills (creft add), and install skill packages (creft install <git-url>).
+description: creft is installed in this project. Use it to discover and run reusable skills (creft cmd list, creft <skill>), create new skills (creft cmd add), and install plugins (creft plugins install <git-url>).
 globs:
 alwaysApply: true
 ---
