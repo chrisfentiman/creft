@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/chrisfentiman/creft/compare/creft-v0.2.6...creft-v0.2.7) (2026-04-12)
+
+
+### Features
+
+* **plugin:** plugin marketplace with install/activate lifecycle ([1a1a1ed](https://github.com/chrisfentiman/creft/commit/1a1a1edc76b84818b6e553fad5c0dba48cda2f56))
+
 ## [0.2.6](https://github.com/chrisfentiman/creft/compare/creft-v0.2.5...creft-v0.2.6) (2026-04-11)
 
 
