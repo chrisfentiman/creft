@@ -181,9 +181,15 @@ fn collect_commands(dir: &Path, defs: &mut Vec<CommandDef>) -> Result<(), CreftE
         }
 
         let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if file_type.is_dir() {
             collect_commands(&path, defs)?;
-        } else if path.extension().is_some_and(|e| e == "md") {
+        } else if path.extension().is_some_and(|e| e == "md")
+            && !file_name.eq_ignore_ascii_case("README.md")
+        {
             match std::fs::read_to_string(&path) {
                 Ok(content) => match frontmatter::parse(&content) {
                     Ok((def, _)) => defs.push(def),
@@ -1243,6 +1249,42 @@ mod tests {
             all.len(),
             1,
             "only the real command should be listed, got: {:?}",
+            names
+        );
+        assert_eq!(names[0], "real");
+    }
+
+    #[test]
+    fn collect_commands_skips_readme() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        let cmd_dir = dir.path().join("commands");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+
+        std::fs::write(
+            cmd_dir.join("real.md"),
+            "---\nname: real\ndescription: real command\n---\n\n```bash\necho real\n```\n",
+        )
+        .unwrap();
+
+        // README.md must not appear as a command.
+        std::fs::write(
+            cmd_dir.join("README.md"),
+            "# Commands\n\nDocumentation here.\n",
+        )
+        .unwrap();
+
+        let all = list_all_in(&ctx, Scope::Global).unwrap();
+        let names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
+
+        assert_eq!(
+            all.len(),
+            1,
+            "README.md must not appear as a command, got: {:?}",
             names
         );
         assert_eq!(names[0], "real");
