@@ -204,7 +204,12 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             }
             Short(ch) => {
                 if let Some(&flag_name) = short_to_flag.get(&ch) {
-                    let flag_def = cmd.def.flags.iter().find(|f| f.name == flag_name).unwrap();
+                    let flag_def = cmd
+                        .def
+                        .flags
+                        .iter()
+                        .find(|f| f.name == flag_name)
+                        .expect("short_to_flag built from cmd.def.flags; name must exist");
                     if flag_def.r#type == "bool" {
                         flag_bools.insert(flag_def.name.clone());
                     } else {
