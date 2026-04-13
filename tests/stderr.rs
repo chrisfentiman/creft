@@ -15,7 +15,7 @@ fn stderr_from_successful_block_is_discarded() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: noisy-success\n",
@@ -45,7 +45,7 @@ fn stderr_from_failed_block_appears_in_error_output() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: noisy-fail\n",
@@ -79,7 +79,7 @@ fn ansi_sequences_in_stderr_are_captured_not_displayed() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: ansi-noise\n",
@@ -113,7 +113,7 @@ fn stderr_from_successful_pipe_block_is_discarded() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-noisy-success\n",
@@ -147,7 +147,7 @@ fn stderr_from_failed_last_pipe_block_appears_in_error_output() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: pipe-last-noisy-fail\n",
@@ -188,7 +188,7 @@ fn verbose_shows_stderr_from_successful_block() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: verbose-stderr-success\n",
@@ -227,7 +227,7 @@ fn non_verbose_hides_stderr_from_successful_block() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: non-verbose-stderr-success\n",
@@ -256,7 +256,7 @@ fn verbose_shows_stderr_from_pipe_chain_blocks() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: verbose-pipe-stderr\n",
@@ -298,7 +298,7 @@ fn stdout_unaffected_by_stderr_capture() {
     let dir = creft_env();
 
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(concat!(
             "---\n",
             "name: stdout-check\n",

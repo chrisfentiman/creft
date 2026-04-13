@@ -23,7 +23,7 @@ fn plugin_install_local_repo_succeeds() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicate::str::contains("installed: my-tools"));
@@ -77,7 +77,7 @@ fn plugin_install_repo_without_manifest_fails() {
 
     let creft_home = creft_env();
     creft_with(&creft_home)
-        .args(["plugins", "install", path.to_str().unwrap()])
+        .args(["plugin", "install",path.to_str().unwrap()])
         .assert()
         .failure()
         .code(1)
@@ -92,12 +92,12 @@ fn plugin_install_duplicate_fails() {
     let url = pkg_repo.path().to_str().unwrap();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", url])
+        .args(["plugin", "install",url])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", url])
+        .args(["plugin", "install",url])
         .assert()
         .failure()
         .code(1)
@@ -111,7 +111,7 @@ fn plugin_install_invalid_url_fails() {
 
     creft_with(&creft_home)
         .args([
-            "plugins",
+            "plugin",
             "install",
             "/nonexistent/path/that/does/not/exist",
         ])
@@ -129,7 +129,7 @@ fn plugin_update_not_found() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "update", "nonexistent-plugin"])
+        .args(["plugin", "update","nonexistent-plugin"])
         .assert()
         .failure()
         .code(2)
@@ -142,7 +142,7 @@ fn plugin_update_all_no_plugins() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "update"])
+        .args(["plugin", "update"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no plugins installed"));
@@ -156,7 +156,7 @@ fn plugin_update_picks_up_new_version() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", repo_path.to_str().unwrap()])
+        .args(["plugin", "install",repo_path.to_str().unwrap()])
         .assert()
         .success();
 
@@ -180,7 +180,7 @@ fn plugin_update_picks_up_new_version() {
         .expect("git commit failed");
 
     creft_with(&creft_home)
-        .args(["plugins", "update", "update-test-plugin"])
+        .args(["plugin", "update","update-test-plugin"])
         .assert()
         .success()
         .stderr(predicate::str::contains(
@@ -196,16 +196,16 @@ fn plugin_update_all_updates_plugins() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", repo1.path().to_str().unwrap()])
+        .args(["plugin", "install",repo1.path().to_str().unwrap()])
         .assert()
         .success();
     creft_with(&creft_home)
-        .args(["plugins", "install", repo2.path().to_str().unwrap()])
+        .args(["plugin", "install",repo2.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "update"])
+        .args(["plugin", "update"])
         .assert()
         .success()
         .stderr(
@@ -222,7 +222,7 @@ fn plugin_uninstall_not_found() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "uninstall", "nonexistent-plugin"])
+        .args(["plugin", "uninstall","nonexistent-plugin"])
         .assert()
         .failure()
         .code(2)
@@ -242,12 +242,12 @@ fn plugin_uninstall_removes_plugin() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "uninstall", "removable-plugin"])
+        .args(["plugin", "uninstall","removable-plugin"])
         .assert()
         .success()
         .stderr(predicate::str::contains("uninstalled: removable-plugin"));
@@ -266,17 +266,17 @@ fn plugin_uninstall_then_reinstall() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "uninstall", "reinstall-plugin"])
+        .args(["plugin", "uninstall","reinstall-plugin"])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicate::str::contains("installed: reinstall-plugin"));
@@ -290,7 +290,7 @@ fn plugin_list_no_plugins() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "list"])
+        .args(["plugin", "list"])
         .assert()
         .success()
         .stderr(predicate::str::contains("no plugins installed"));
@@ -309,12 +309,12 @@ fn plugin_list_shows_installed_plugins() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "list"])
+        .args(["plugin", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("list-plugin"));
@@ -333,12 +333,12 @@ fn plugin_list_shows_plugin_commands() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_with(&creft_home)
-        .args(["plugins", "list", "cmd-list-plugin"])
+        .args(["plugin", "list","cmd-list-plugin"])
         .assert()
         .success()
         .stdout(predicate::str::contains("cmd-list-plugin deploy"));
@@ -354,7 +354,7 @@ fn plugin_install_respects_creft_home() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
@@ -425,21 +425,21 @@ fn formerly_reserved_names_are_now_valid_skill_names(#[case] name: &str) {
     );
 
     creft_with(&creft_home)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(stdin.as_str())
         .assert()
         .success();
 }
 
-/// `plugins` is a reserved name (it is a built-in subcommand).
+/// `plugin` is a reserved name (it is a built-in subcommand).
 #[test]
 fn plugins_is_reserved() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(
-            "---\nname: plugins\ndescription: shadow plugins\n---\n\n```bash\necho oops\n```\n",
+            "---\nname: plugin\ndescription: shadow plugin\n---\n\n```bash\necho oops\n```\n",
         )
         .assert()
         .failure()
@@ -540,7 +540,7 @@ fn package_appears_in_list_output() {
 
     // `creft list` shows packages by name with a skill count summary.
     creft_with(&creft_home)
-        .args(["cmd", "list"])
+        .args(["list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("listable-pkg"));
@@ -553,7 +553,7 @@ fn package_appears_in_list_output() {
 fn plugin_install_bare_name_without_slash_fails() {
     let creft_home = creft_env();
     creft_with(&creft_home)
-        .args(["plugins", "install", "fetch"])
+        .args(["plugin", "install","fetch"])
         .assert()
         .failure()
         .code(1)
@@ -567,7 +567,7 @@ fn plugin_install_multi_plugin_repo_without_filter_fails() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
-        .args(["plugins", "install", repo.path().to_str().unwrap()])
+        .args(["plugin", "install",repo.path().to_str().unwrap()])
         .assert()
         .failure()
         .code(1)
@@ -582,7 +582,7 @@ fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
 
     creft_with(&creft_home)
         .args([
-            "plugins",
+            "plugin",
             "install",
             repo.path().to_str().unwrap(),
             "--plugin",
@@ -606,7 +606,7 @@ fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
 
     creft_with(&creft_home)
         .args([
-            "plugins",
+            "plugin",
             "install",
             repo.path().to_str().unwrap(),
             "--plugin",
@@ -653,7 +653,7 @@ fn plugin_install_repo_without_catalog_fails() {
 
     let creft_home = creft_env();
     creft_with(&creft_home)
-        .args(["plugins", "install", path.to_str().unwrap()])
+        .args(["plugin", "install",path.to_str().unwrap()])
         .assert()
         .failure()
         .code(1)
@@ -668,7 +668,7 @@ fn plugin_install_repo_without_catalog_fails() {
 fn plugin_install_github_shorthand_routes_to_github() {
     let creft_home = creft_env();
     creft_with(&creft_home)
-        .args(["plugins", "install", "someowner/somerepo"])
+        .args(["plugin", "install","someowner/somerepo"])
         .assert()
         .failure()
         .code(1)

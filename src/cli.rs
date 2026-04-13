@@ -137,7 +137,6 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
     };
 
     match first.as_str() {
-        // ── Current command names ─────────────────────────────────────────────
         "add" => parse_add(parser),
         "list" => parse_list(parser),
         "show" => parse_show(parser, false),
@@ -149,15 +148,7 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
         "doctor" => parse_doctor(parser),
         "completions" => parse_completions(parser),
 
-        // ── Stage-3 backward-compat bridge (removed in Stage 4) ──────────────
-        // `creft cmd <subcommand>` routes to the same handlers as the current names.
-        "cmd" | "command" => parse_cmd_compat(parser),
-        // `creft plugins` routes to `creft plugin`.
-        "plugins" => parse_plugin(parser),
-        // `creft rm` routes to `creft remove`.
-        "rm" => parse_remove(parser),
-
-        // ── Not a built-in: caller should try as a user skill ─────────────────
+        // Not a built-in: caller should try as a user skill.
         _ => return Ok(None),
     }
     .map(Some)
@@ -225,7 +216,7 @@ fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     }))
 }
 
-/// Parse `show` (or `cat`, which maps to `show --blocks`).
+/// Parse `show`. When `initial_blocks` is true, only code blocks are printed.
 fn parse_show(parser: &mut lexopt::Parser, initial_blocks: bool) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
@@ -613,31 +604,3 @@ fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     Ok(Parsed::Command(Command::Completions { shell }))
 }
 
-// ── Stage-3 backward-compat bridge ───────────────────────────────────────────
-// `creft cmd <subcommand>` still works during Stage 3. Removed in Stage 4.
-
-fn parse_cmd_compat(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
-    use lexopt::prelude::*;
-
-    let sub = match parser.next()? {
-        None | Some(Long("help") | Short('h')) => {
-            return Ok(Parsed::Command(Command::List {
-                tag: None,
-                all: false,
-                namespace: vec![],
-            }));
-        }
-        Some(Value(v)) => v.string()?,
-        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
-    };
-
-    match sub.as_str() {
-        "add" => parse_add(parser),
-        "list" => parse_list(parser),
-        "show" => parse_show(parser, false),
-        // `creft cmd cat <name>` maps to `show --blocks` behavior.
-        "cat" => parse_show(parser, true),
-        "rm" => parse_remove(parser),
-        other => Err(CliError::UnknownCommand(format!("cmd {other}"))),
-    }
-}

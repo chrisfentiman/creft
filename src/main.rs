@@ -98,11 +98,7 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
 
         cli::Command::Show { name, blocks } => {
             let name = name.join(" ");
-            if blocks {
-                cmd::skill::cmd_cat(ctx, &name)
-            } else {
-                cmd::skill::cmd_show(ctx, &name)
-            }
+            cmd::skill::cmd_show(ctx, &name, blocks)
         }
 
         cli::Command::Remove { name, global } => {

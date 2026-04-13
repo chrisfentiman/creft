@@ -1314,24 +1314,23 @@ mod tests {
 
     #[test]
     fn test_extract_creft_calls_in_subshell() {
-        // "cmd" is the top-level reserved builtin for skill management; should be filtered out.
-        let result = extract_creft_calls("$(creft cmd list)");
+        // "list" is a reserved builtin; should be filtered out.
+        let result = extract_creft_calls("$(creft list)");
         assert!(
             result.is_empty(),
-            "creft cmd is a builtin, should be filtered, got: {:?}",
+            "creft list is a builtin, should be filtered, got: {:?}",
             result
         );
     }
 
     #[test]
     fn test_extract_creft_calls_filters_reserved() {
-        let code = "creft cmd list\ncreft plugins install foo\ncreft my-skill";
+        let code = "creft list\ncreft plugin install foo\ncreft my-skill";
         let result = extract_creft_calls(code);
-        // "cmd" and "plugins" are reserved top-level builtins; "my-skill" is a skill.
-        assert!(!result.contains(&"cmd list".to_string()));
-        assert!(!result.contains(&"cmd".to_string()));
-        assert!(!result.contains(&"plugins install foo".to_string()));
-        assert!(!result.contains(&"plugins".to_string()));
+        // "list" and "plugin" are reserved top-level builtins; "my-skill" is a skill.
+        assert!(!result.contains(&"list".to_string()));
+        assert!(!result.contains(&"plugin install foo".to_string()));
+        assert!(!result.contains(&"plugin".to_string()));
         assert!(
             result.contains(&"my-skill".to_string()),
             "got: {:?}",

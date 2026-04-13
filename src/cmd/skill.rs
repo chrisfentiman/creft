@@ -456,20 +456,22 @@ fn render_skill_entries_limited(
     (out, max_name)
 }
 
-pub fn cmd_show(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
+/// Show a skill definition.
+///
+/// When `blocks` is `false`, prints the full raw markdown (frontmatter + body).
+/// When `blocks` is `true`, prints only the code block contents — equivalent to
+/// the old `creft show --blocks` behavior.
+pub fn cmd_show(ctx: &AppContext, name: &str, blocks: bool) -> Result<(), CreftError> {
     let args: Vec<String> = name.split_whitespace().map(String::from).collect();
     let (resolved_name, _, source) = store::resolve_command(ctx, &args)?;
-    let content = store::read_raw_from(ctx, &resolved_name, &source)?;
-    println!("{}", content);
-    Ok(())
-}
-
-pub fn cmd_cat(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
-    let args: Vec<String> = name.split_whitespace().map(String::from).collect();
-    let (resolved_name, _, source) = store::resolve_command(ctx, &args)?;
-    let cmd = store::load_from(ctx, &resolved_name, &source)?;
-    for block in &cmd.blocks {
-        println!("{}", block.code);
+    if blocks {
+        let cmd = store::load_from(ctx, &resolved_name, &source)?;
+        for block in &cmd.blocks {
+            println!("{}", block.code);
+        }
+    } else {
+        let content = store::read_raw_from(ctx, &resolved_name, &source)?;
+        println!("{}", content);
     }
     Ok(())
 }

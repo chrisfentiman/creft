@@ -1276,32 +1276,41 @@ mod tests {
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
-    /// `add`, `list`, `install`, `update`, `uninstall`, and `plugin` are no longer
-    /// reserved names. Sub-commands live under `creft cmd` or `creft plugins`, freeing
-    /// these names for skill authors.
+    /// Top-level builtins are reserved and cannot be used as package names.
     #[rstest]
     #[case::add("add")]
     #[case::list("list")]
+    #[case::show("show")]
+    #[case::remove("remove")]
+    #[case::plugin("plugin")]
+    #[case::settings("settings")]
+    #[case::up("up")]
+    #[case::help("help")]
+    #[case::version("version")]
+    #[case::init("init")]
+    #[case::doctor("doctor")]
+    #[case::completions("completions")]
+    fn reserved_builtins_are_rejected(#[case] name: &str) {
+        let err = validate_manifest_name(name).unwrap_err();
+        assert!(
+            matches!(err, CreftError::InvalidManifest(_)),
+            "{name} should be rejected as reserved"
+        );
+    }
+
+    /// Former namespace names (`cmd`, `plugins`) are no longer reserved and can be
+    /// used as package names.
+    #[rstest]
+    #[case::cmd("cmd")]
+    #[case::plugins("plugins")]
     #[case::install("install")]
     #[case::update("update")]
     #[case::uninstall("uninstall")]
-    #[case::plugin("plugin")]
-    fn formerly_reserved_names_are_now_valid(#[case] name: &str) {
-        assert!(validate_manifest_name(name).is_ok());
-    }
-
-    #[test]
-    fn test_validate_manifest_name_cmd_is_reserved() {
-        // `cmd` is the new reserved name for the skill management namespace.
-        let err = validate_manifest_name("cmd").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
-    }
-
-    #[test]
-    fn test_validate_manifest_name_plugins_is_reserved() {
-        // `plugins` is the reserved name for the plugin management namespace.
-        let err = validate_manifest_name("plugins").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    fn former_namespace_names_are_valid(#[case] name: &str) {
+        assert!(
+            validate_manifest_name(name).is_ok(),
+            "{name} should be valid as a package name"
+        );
     }
 
     // --- packages_dir (via AppContext) ---

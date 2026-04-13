@@ -121,10 +121,10 @@ codex, ollama) as pipeline steps.
 
 ## Discovering skills
 
-  creft cmd list                  Show all skills, grouped by namespace
-  creft cmd list <namespace>      Drill into a namespace
+  creft list                      Show all skills, grouped by namespace
+  creft list <namespace>          Drill into a namespace
   creft <skill> --help            See what a skill does and what it accepts
-  creft cmd show <skill>          Read the full skill definition
+  creft show <skill>              Read the full skill definition
 
 ## Running skills
 
@@ -135,7 +135,7 @@ codex, ollama) as pipeline steps.
 
 ## Creating skills
 
-  creft cmd add <<'EOF'
+  creft add <<'EOF'
   ---
   name: deploy
   description: Deploys the app to staging or production.
@@ -152,20 +152,20 @@ codex, ollama) as pipeline steps.
   ```
   EOF
 
-Run `creft cmd add --help` for the complete format reference.
+Run `creft add --help` for the complete format reference.
 
 ## Managing skills
 
-  creft cmd show <name>           View full definition
-  creft cmd cat <name>            View code blocks only
-  creft cmd rm <name>             Remove a skill
-  creft cmd add --force <<'EOF'   Update an existing skill
+  creft show <name>               View full definition
+  creft show --blocks <name>      View code blocks only
+  creft remove <name>             Remove a skill
+  creft add --force <<'EOF'       Update an existing skill
 
 ## Plugins
 
-  creft plugins install <git-url>           Install a plugin
-  creft plugins activate <plugin>/<cmd>     Activate a command
-  creft plugins list                        List installed plugins
+  creft plugin install <git-url>            Install a plugin
+  creft plugin activate <plugin>/<cmd>      Activate a command
+  creft plugin list                         List installed plugins
 
 ## Skill storage
 
@@ -361,7 +361,7 @@ fn install_cursor(project_dir: &Path, global: bool) -> Result<(PathBuf, String),
     let content = format!(
         "\
 ---
-description: creft is installed in this project. Use it to discover and run reusable skills (creft cmd list, creft <skill>), create new skills (creft cmd add), and install plugins (creft plugins install <git-url>).
+description: creft is installed in this project. Use it to discover and run reusable skills (creft list, creft <skill>), create new skills (creft add), and install plugins (creft plugin install <git-url>).
 globs:
 alwaysApply: true
 ---
@@ -557,7 +557,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# creft"));
         assert!(content.contains(VERSION_MARKER));
-        assert!(content.contains("creft cmd list"));
+        assert!(content.contains("creft list"));
     }
 
     #[test]
@@ -685,7 +685,7 @@ mod tests {
             "old marker should not remain after upgrade"
         );
         assert!(
-            after_content.contains("creft cmd list"),
+            after_content.contains("creft list"),
             "updated content should use current command paths"
         );
     }

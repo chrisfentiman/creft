@@ -1,11 +1,11 @@
-//! Tests for `creft rm`.
+//! Tests for `creft remove`.
 
 mod helpers;
 
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
 
-/// `creft rm <pkg> <skill>` against a packages/ skill is rejected with an
+/// `creft remove <pkg> <skill>` against a packages/ skill is rejected with an
 /// actionable error directing the user to uninstall the whole package instead.
 #[test]
 fn rm_package_skill_is_rejected() {
@@ -25,7 +25,7 @@ fn rm_package_skill_is_rejected() {
     .unwrap();
 
     creft_with(&creft_home)
-        .args(["cmd", "rm", "rm-guard-pkg", "build"])
+        .args(["remove", "rm-guard-pkg", "build"])
         .assert()
         .failure()
         .code(1)

@@ -109,7 +109,7 @@ fn test_global_skill_cwd_is_invocation_dir() {
 
     // Add a global skill (CREFT_HOME mode) that prints its working directory.
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(
             "---\nname: print-cwd\ndescription: print working dir\n---\n\n```bash\npwd\n```\n",
         )
@@ -227,7 +227,7 @@ fn test_creft_project_root_absent_for_global_skill() {
 
     // Global skill prints CREFT_PROJECT_ROOT; if unset the shell produces an empty string.
     creft_with(&dir)
-        .args(["cmd", "add"])
+        .args(["add"])
         .write_stdin(
             "---\nname: show-root\ndescription: show project root env var\n---\n\n```bash\necho \"ROOT=$CREFT_PROJECT_ROOT\"\n```\n",
         )
