@@ -627,11 +627,7 @@ mod tests {
         // Pre-write a file that already contains the current version marker.
         let path = dir.path().join("GEMINI.md");
         let current_marker = VERSION_MARKER;
-        std::fs::write(
-            &path,
-            format!("# creft\nsome content\n{current_marker}\n"),
-        )
-        .unwrap();
+        std::fs::write(&path, format!("# creft\nsome content\n{current_marker}\n")).unwrap();
         let original_content = std::fs::read_to_string(&path).unwrap();
         let ctx = ctx_no_home(dir.path());
 

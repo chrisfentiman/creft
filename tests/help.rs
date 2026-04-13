@@ -174,7 +174,9 @@ fn test_long_help_flag_shows_long_about() {
         .assert()
         .success()
         // This string appears in ROOT_LONG_ABOUT only, not in the short ROOT_ABOUT.
-        .stdout(predicate::str::contains("creft cmd list                 list available skills"));
+        .stdout(predicate::str::contains(
+            "creft cmd list                 list available skills",
+        ));
 }
 
 // ── Terminology: "skill" not "command" for user-authored skills ────────────────
