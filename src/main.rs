@@ -21,6 +21,8 @@ use clap::Parser;
 use error::CreftError;
 
 fn main() {
+    style::init_color();
+
     let ctx = match model::AppContext::from_env() {
         Ok(ctx) => ctx,
         Err(e) => {

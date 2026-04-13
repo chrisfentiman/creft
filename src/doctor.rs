@@ -4,13 +4,14 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use yansi::Paint;
+
 use crate::error::CreftError;
 use crate::model::{AppContext, CodeBlock, SkillSource};
 use crate::registry;
 use crate::settings::Settings;
 use crate::shell;
 use crate::store;
-use crate::style;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -964,8 +965,7 @@ fn status_marker(status: CheckStatus) -> &'static str {
 
 /// Render global check results to stderr.
 pub(crate) fn render_global(results: &[CheckResult]) {
-    let ansi = style::use_ansi();
-    eprintln!("{}", style::bold("Environment Health Check", ansi));
+    eprintln!("{}", "Environment Health Check".bold());
     eprintln!();
     for r in results {
         eprintln!("  {} {} ({})", status_marker(r.status), r.label, r.detail);
@@ -976,9 +976,8 @@ pub(crate) fn render_global(results: &[CheckResult]) {
 
 /// Render a skill doctor report to stderr.
 pub(crate) fn render_skill(report: &DoctorReport) {
-    let ansi = style::use_ansi();
     let header = format!("Skill Health: {} ({})", report.skill_name, report.source);
-    eprintln!("{}", style::bold(&header, ansi));
+    eprintln!("{}", header.as_str().bold());
     eprintln!();
     render_skill_indented(report, 0);
 

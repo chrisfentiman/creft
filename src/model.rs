@@ -3,8 +3,9 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+use yansi::Paint;
+
 use crate::error::CreftError;
-use crate::style::bold;
 
 /// Matches `{{name}}` and `{{name|default}}` placeholders in skill templates.
 pub(crate) static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -466,18 +467,23 @@ impl ParsedCommand {
         usage
     }
 
-    /// Render the full help text for this skill, optionally with ANSI bold formatting.
-    pub fn help_text(&self, ansi: bool) -> String {
+    /// Render the full help text for this skill with ANSI bold formatting.
+    ///
+    /// Whether ANSI escapes are emitted is controlled by yansi's global condition,
+    /// set at startup via `style::init_color()`. No `ansi: bool` parameter is
+    /// needed — the global condition handles enable/disable transparently.
+    pub fn help_text(&self) -> String {
         // First line is the description only — user already typed the skill name.
         let mut out = format!("{}\n", self.def.description);
 
         out.push('\n');
         let usage = self.usage_line();
-        let (usage_label, usage_rest) = usage
-            .strip_prefix("Usage:")
-            .map(|rest| ("Usage:", rest))
-            .unwrap_or(("", usage.as_str()));
-        out.push_str(&format!("{}{}\n", bold(usage_label, ansi), usage_rest));
+        // Always starts with "Usage:" — bold the label, keep the rest plain.
+        if let Some(rest) = usage.strip_prefix("Usage:") {
+            out.push_str(&format!("{}{}\n", "Usage:".bold(), rest));
+        } else {
+            out.push_str(&format!("{}\n", usage));
+        }
 
         if let Some(docs) = &self.docs {
             out.push('\n');
@@ -486,7 +492,7 @@ impl ParsedCommand {
         }
 
         if !self.def.args.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Arguments:", ansi)));
+            out.push_str(&format!("\n{}\n", "Arguments:".bold()));
             let max_name = self
                 .def
                 .args
@@ -505,7 +511,7 @@ impl ParsedCommand {
                 let pad = " ".repeat(max_name - arg.name.len());
                 out.push_str(&format!(
                     "  {}{pad}  {}{}\n",
-                    bold(&arg.name, ansi),
+                    arg.name.as_str().bold(),
                     arg.description,
                     default_hint,
                 ));
@@ -513,7 +519,7 @@ impl ParsedCommand {
         }
 
         if !self.def.flags.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Options:", ansi)));
+            out.push_str(&format!("\n{}\n", "Options:".bold()));
             let max_flag = self
                 .def
                 .flags
@@ -550,7 +556,7 @@ impl ParsedCommand {
                 let pad = " ".repeat(max_flag - label.len());
                 out.push_str(&format!(
                     "  {}{pad}  {}{}\n",
-                    bold(&label, ansi),
+                    label.as_str().bold(),
                     flag.description,
                     default_hint,
                 ));
@@ -558,7 +564,7 @@ impl ParsedCommand {
         }
 
         if !self.def.env.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Environment:", ansi)));
+            out.push_str(&format!("\n{}\n", "Environment:".bold()));
             for var in &self.def.env {
                 let req = if var.required {
                     "(required)"
@@ -572,7 +578,7 @@ impl ParsedCommand {
         if !self.def.tags.is_empty() {
             out.push_str(&format!(
                 "\n{} {}\n",
-                bold("Tags:", ansi),
+                "Tags:".bold(),
                 self.def.tags.join(", ")
             ));
         }
@@ -668,7 +674,9 @@ mod tests {
             docs: Some("Fetches the body as raw markdown.".into()),
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
         // First line is description only — no "name — " prefix
         assert!(help.starts_with("Fetch issue body\n"));
         assert!(!help.contains("gh issue-body —"));
@@ -790,7 +798,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             !help.contains("<value>"),
             "bool flag should not have <value> hint"
@@ -824,7 +833,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("<value>"),
             "string flag should have <value> hint"
@@ -853,7 +863,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(help.contains("OPTIONAL_TOKEN"));
         assert!(help.contains("(optional)"));
         assert!(!help.contains("(required)"));
@@ -883,7 +894,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(help.contains("count"));
         // Default format uses square brackets to match clap convention
         assert!(help.contains("[default: 10]"));
@@ -913,7 +925,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("<REPO>"),
             "required arg should appear as <REPO> in usage line; got:\n{help}"
@@ -941,7 +954,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("[COUNT]"),
             "optional arg should appear as [COUNT] in usage line; got:\n{help}"
@@ -970,7 +984,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         // Flags produce [OPTIONS] in the usage line
         assert!(
             help.contains("[OPTIONS]"),
@@ -993,7 +1008,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("Usage: creft ping\n"),
             "minimal skill usage line should have no [OPTIONS] or arg placeholders; got:\n{help}"
@@ -1019,7 +1035,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         let first_line = help.lines().next().unwrap_or("");
         assert_eq!(
             first_line, "Does something useful",
@@ -1139,7 +1156,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_section_headers_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("\x1b[1mUsage:\x1b[0m"),
             "Usage: header should be bold; got:\n{help}"
@@ -1165,7 +1183,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_arg_names_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("\x1b[1mrepo\x1b[0m"),
             "arg name 'repo' should be bold; got:\n{help}"
@@ -1179,7 +1198,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_flag_labels_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         // Flag label "-v, --verbose" should be bold.
         assert!(
             help.contains("\x1b[1m-v, --verbose\x1b[0m"),
@@ -1190,7 +1210,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_description_not_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             !help.contains("\x1b[1mFetch issue body"),
             "description text must not be bold; got:\n{help}"
@@ -1204,7 +1225,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_default_hints_not_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("[default: 42]"),
             "default hint should appear in output; got:\n{help}"
@@ -1219,8 +1241,10 @@ name: MY_TOKEN
     fn test_help_text_plain_and_ansi_same_structure() {
         // Both plain and ANSI outputs should contain the same sections and content.
         let cmd = make_full_cmd();
-        let plain = cmd.help_text(false);
-        let ansi_out = cmd.help_text(true);
+        yansi::disable();
+        let plain = cmd.help_text();
+        yansi::enable();
+        let ansi_out = cmd.help_text();
 
         // Key identifiers present in both.
         for needle in &[

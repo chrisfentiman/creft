@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use std::io::{IsTerminal, Read};
 
+use yansi::Paint;
+
 use crate::error::CreftError;
 use crate::model::AppContext;
-use crate::{frontmatter, markdown, model, store, style, validate};
+use crate::{frontmatter, markdown, model, store, validate};
 
 /// Maximum description characters shown in list output.
 /// Matches the visual width used by cargo's command listing.
@@ -184,8 +186,7 @@ pub fn cmd_list(
             return Ok(());
         }
 
-        let ansi = style::use_ansi();
-        println!("{}", style::bold("Skills:", ansi));
+        println!("{}", "Skills:".bold());
         println!();
 
         let max_name = flat.iter().map(|(d, _)| d.name.len()).max().unwrap_or(0);
@@ -193,7 +194,7 @@ pub fn cmd_list(
         for (def, source) in &flat {
             let desc = format_skill_desc(def, source, LIST_DESC_MAX);
             let pad = " ".repeat(max_name - def.name.len());
-            println!("  {}{}  {}", style::bold(&def.name, ansi), pad, desc);
+            println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
         }
         return Ok(());
     }
@@ -205,20 +206,15 @@ pub fn cmd_list(
         return Ok(());
     }
 
-    let ansi = style::use_ansi();
-
     if prefix.is_empty() {
-        println!("{}", style::bold(crate::help::ROOT_ABOUT, ansi));
+        println!("{}", crate::help::ROOT_ABOUT.bold());
         println!();
-        println!(
-            "{}creft <skill> [ARGS] [OPTIONS]",
-            style::bold("Usage: ", ansi)
-        );
+        println!("{}creft <skill> [ARGS] [OPTIONS]", "Usage: ".bold());
         println!();
-        println!("{}", style::bold("Skills:", ansi));
+        println!("{}", "Skills:".bold());
     } else {
         let header = format!("Skills in '{}':", prefix.join(" "));
-        println!("{}", style::bold(&header, ansi));
+        println!("{}", header.as_str().bold());
     }
     println!();
 
@@ -283,7 +279,7 @@ pub fn cmd_list(
                     String::new()
                 };
                 let pad = " ".repeat(max_name - def.name.len());
-                println!("  {}{}  {desc}{suffix}", style::bold(&def.name, ansi), pad);
+                println!("  {}{}  {desc}{suffix}", def.name.as_str().bold(), pad);
             }
             model::NamespaceEntry::Namespace {
                 name,
@@ -299,7 +295,7 @@ pub fn cmd_list(
                 let pad = " ".repeat(max_name - name.len());
                 println!(
                     "  {}{}  {skill_count} {plural}{pkg_suffix}",
-                    style::bold(name, ansi),
+                    name.as_str().bold(),
                     pad,
                 );
             }

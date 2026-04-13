@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use clap::Parser;
+use yansi::Paint;
 
 use crate::cmd::skill::{LIST_DESC_MAX, format_skill_desc, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::settings::Settings;
-use crate::{cli, model, runner, shell, store, style};
+use crate::{cli, model, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -32,8 +33,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         match store::resolve_command(ctx, &filtered) {
             Ok((name, _, source)) => {
                 let cmd = store::load_from(ctx, &name, &source)?;
-                let ansi = style::use_ansi();
-                print!("{}", cmd.help_text(ansi));
+                print!("{}", cmd.help_text());
                 // If this command also acts as a namespace prefix, list its
                 // direct subcommands so users can discover them from --help.
                 if store::has_subcommands(ctx, &name)? {
@@ -44,7 +44,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                         .collect();
                     if !subcommands.is_empty() {
                         println!();
-                        println!("{}", style::bold("Subcommands:", ansi));
+                        println!("{}", "Subcommands:".bold());
                         let max_name = subcommands
                             .iter()
                             .map(|(def, _)| def.name.len())
@@ -53,7 +53,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                         for (def, _source) in &subcommands {
                             let desc = truncate_desc(def.description.as_str(), LIST_DESC_MAX);
                             let pad = " ".repeat(max_name - def.name.len());
-                            println!("  {}{}  {}", style::bold(&def.name, ansi), pad, desc);
+                            println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
                         }
                         println!();
                         println!("Run 'creft <subcommand> --help' for more information.");
@@ -150,7 +150,6 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
 /// Called when `creft <namespace> --help` is used and the name resolves to a
 /// namespace prefix rather than an individual skill.
 pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), CreftError> {
-    let ansi = style::use_ansi();
     let all_skills = store::list_namespace_skills(ctx, prefix)?;
 
     // Suppress hidden skills unless the user explicitly named a hidden prefix.
@@ -169,7 +168,7 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
     let prefix_str = prefix.join(" ");
     println!(
         "{} \u{2014} {} {}",
-        style::bold(&prefix_str, ansi),
+        prefix_str.as_str().bold(),
         skill_count,
         plural
     );
@@ -191,7 +190,7 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
             model::NamespaceEntry::Skill(def, source) => {
                 let desc = format_skill_desc(def, source, LIST_DESC_MAX);
                 let pad = " ".repeat(max_name - def.name.len());
-                println!("  {}{}  {}", style::bold(&def.name, ansi), pad, desc);
+                println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
             }
             model::NamespaceEntry::Namespace {
                 name,
@@ -203,7 +202,7 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
                 let pad = " ".repeat(max_name - name.len());
                 println!(
                     "  {}{}  {} {}{}",
-                    style::bold(name, ansi),
+                    name.as_str().bold(),
                     pad,
                     count,
                     p,
