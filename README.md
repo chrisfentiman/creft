@@ -1,8 +1,10 @@
 # creft
 
-The best interface for a coding agent is a CLI. The problem is you can't build a CLI for every little workflow you want to automate.
+Turning agent skills into executable CLI commands.
 
-creft fixes that. A markdown file becomes a CLI:
+The problem is you can't build a CLI for every little workflow you want
+to automate — and skills burn tokens for what's mostly ceremony. With
+creft, you write a markdown file and it runs:
 
 ````sh
 creft cmd add <<'EOF'
