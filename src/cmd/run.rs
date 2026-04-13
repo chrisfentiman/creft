@@ -26,7 +26,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
 
     if has_help {
         if filtered.is_empty() {
-            return super::skill::cmd_list(ctx, None, false, vec![]);
+            return super::skill::cmd_list(ctx, None, false, false, vec![]);
         }
         match store::resolve_command(ctx, &filtered) {
             Ok((name, _, source)) => {

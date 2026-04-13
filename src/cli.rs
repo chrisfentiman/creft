@@ -34,6 +34,7 @@ pub(crate) enum Command {
     List {
         tag: Option<String>,
         all: bool,
+        names: bool,
         namespace: Vec<String>,
     },
     Show {
@@ -197,12 +198,14 @@ fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
 
     let mut tag = None;
     let mut all = false;
+    let mut names = false;
     let mut namespace = Vec::new();
 
     while let Some(arg) = parser.next()? {
         match arg {
             Long("tag") => tag = Some(parser.value()?.string()?),
             Long("all") => all = true,
+            Long("names") | Short('n') => names = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::List)),
             Value(v) => namespace.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
@@ -212,6 +215,7 @@ fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     Ok(Parsed::Command(Command::List {
         tag,
         all,
+        names,
         namespace,
     }))
 }
@@ -602,4 +606,70 @@ fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         CliError::MissingArg("<shell>\n\nUsage: creft completions <shell>".to_string())
     })?;
     Ok(Parsed::Command(Command::Completions { shell }))
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Option<Parsed>, CliError> {
+        let mut parser = lexopt::Parser::from_args(args.iter().copied());
+        parse(&mut parser)
+    }
+
+    #[test]
+    fn list_names_long_flag_sets_names_true() {
+        let result = parse_args(&["list", "--names"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(names, "--names flag must set names=true");
+    }
+
+    #[test]
+    fn list_names_short_flag_sets_names_true() {
+        let result = parse_args(&["list", "-n"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(names, "-n flag must set names=true");
+    }
+
+    #[test]
+    fn list_without_names_flag_defaults_false() {
+        let result = parse_args(&["list"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(!names, "names must default to false when flag is absent");
+    }
+
+    #[test]
+    fn completions_missing_shell_returns_missing_arg_error() {
+        let result = parse_args(&["completions"]);
+        assert!(
+            matches!(result, Err(CliError::MissingArg(_))),
+            "completions with no shell must return MissingArg; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn completions_with_shell_parses_correctly() {
+        let result = parse_args(&["completions", "bash"]).unwrap().unwrap();
+        let Parsed::Command(Command::Completions { shell }) = result else {
+            panic!("expected Command::Completions");
+        };
+        assert_eq!(shell, "bash");
+    }
+
+    #[test]
+    fn completions_help_returns_help_variant() {
+        let result = parse_args(&["completions", "--help"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Completions)),
+            "completions --help must return Parsed::Help(Completions); got: {result:?}",
+        );
+    }
 }

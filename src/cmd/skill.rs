@@ -109,9 +109,19 @@ pub fn cmd_list(
     ctx: &AppContext,
     tag: Option<String>,
     show_all: bool,
+    names: bool,
     namespace: Vec<String>,
 ) -> Result<(), CreftError> {
     let all = store::list_all_with_source(ctx)?;
+
+    // --names: machine-readable output for shell completion scripts.
+    // One skill name per line, no ANSI, no headers, no descriptions.
+    if names {
+        for (def, _) in &all {
+            println!("{}", def.name);
+        }
+        return Ok(());
+    }
     let prefix: Vec<&str> = namespace.iter().map(|s| s.as_str()).collect();
 
     // Check the unfiltered list so a tag filter that empties a valid namespace doesn't

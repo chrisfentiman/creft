@@ -1,6 +1,7 @@
 mod catalog;
 mod cli;
 mod cmd;
+mod completions;
 mod doctor;
 mod error;
 mod frontmatter;
@@ -56,7 +57,7 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
             print!("{}", help::render(which));
             Ok(())
         }
-        Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, vec![]),
+        Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, false, vec![]),
         Some(cli::Parsed::Version) => {
             println!("{}", help::render_version());
             Ok(())
@@ -93,8 +94,9 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         cli::Command::List {
             tag,
             all,
+            names,
             namespace,
-        } => cmd::skill::cmd_list(ctx, tag, all, namespace),
+        } => cmd::skill::cmd_list(ctx, tag, all, names, namespace),
 
         cli::Command::Show { name, blocks } => {
             let name = name.join(" ");
@@ -136,8 +138,9 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         cli::Command::Doctor { name } => cmd::doctor::cmd_doctor(ctx, name),
 
         cli::Command::Completions { shell } => {
-            eprintln!("error: shell completions not yet implemented (shell: {shell})");
-            std::process::exit(1);
+            let script = completions::generate(&shell)?;
+            print!("{}", script);
+            Ok(())
         }
     }
 }
@@ -158,7 +161,7 @@ fn handle_help(ctx: &model::AppContext, rest: &[String]) -> Result<(), CreftErro
             return cmd::run::cmd_namespace_help(ctx, &prefix);
         }
     }
-    cmd::skill::cmd_list(ctx, None, false, vec![])
+    cmd::skill::cmd_list(ctx, None, false, false, vec![])
 }
 
 #[cfg(test)]
