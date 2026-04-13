@@ -170,59 +170,35 @@ complete -c creft -n '__fish_seen_subcommand_from completions' -a 'fish' -d 'Fis
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
-    fn bash_script_contains_complete_f_and_creft() {
-        let script = generate("bash").unwrap();
+    /// Every generated script must call `creft list --names` so that completion picks
+    /// up the current skill registry dynamically at tab-completion time.
+    #[rstest]
+    #[case::bash("bash", "creft list --names")]
+    #[case::zsh("zsh", "creft list --names")]
+    #[case::fish("fish", "creft list --names")]
+    fn generated_script_calls_list_names(#[case] shell: &str, #[case] expected: &str) {
+        let script = generate(shell).unwrap();
         assert!(
-            script.contains("complete -F _creft creft"),
-            "bash script must contain 'complete -F _creft creft'; got:\n{script}",
+            script.contains(expected),
+            "{shell} script must contain '{expected}'; got:\n{script}",
         );
     }
 
-    #[test]
-    fn bash_script_calls_list_names() {
-        let script = generate("bash").unwrap();
+    /// Each shell's script must contain its shell-specific completion marker so that
+    /// the shell's completion machinery picks up the function definition.
+    #[rstest]
+    #[case::bash("bash", "complete -F _creft creft")]
+    #[case::zsh("zsh", "#compdef creft")]
+    #[case::fish("fish", "complete -c creft")]
+    fn generated_script_contains_shell_marker(#[case] shell: &str, #[case] marker: &str) {
+        let script = generate(shell).unwrap();
         assert!(
-            script.contains("creft list --names"),
-            "bash script must call 'creft list --names' for dynamic skill completion; got:\n{script}",
-        );
-    }
-
-    #[test]
-    fn zsh_script_contains_compdef() {
-        let script = generate("zsh").unwrap();
-        assert!(
-            script.contains("#compdef creft"),
-            "zsh script must start with '#compdef creft'; got:\n{script}",
-        );
-    }
-
-    #[test]
-    fn zsh_script_calls_list_names() {
-        let script = generate("zsh").unwrap();
-        assert!(
-            script.contains("creft list --names"),
-            "zsh script must call 'creft list --names' for dynamic skill completion; got:\n{script}",
-        );
-    }
-
-    #[test]
-    fn fish_script_contains_complete_c_creft() {
-        let script = generate("fish").unwrap();
-        assert!(
-            script.contains("complete -c creft"),
-            "fish script must contain 'complete -c creft'; got:\n{script}",
-        );
-    }
-
-    #[test]
-    fn fish_script_calls_list_names() {
-        let script = generate("fish").unwrap();
-        assert!(
-            script.contains("creft list --names"),
-            "fish script must call 'creft list --names' for dynamic skill completion; got:\n{script}",
+            script.contains(marker),
+            "{shell} script must contain '{marker}'; got:\n{script}",
         );
     }
 

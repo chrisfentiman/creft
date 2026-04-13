@@ -1459,3 +1459,83 @@ fn test_list_empty_no_header() {
         "empty list should not print Skills: header; got: {stdout:?}"
     );
 }
+
+// ── list --names tests ────────────────────────────────────────────────────────
+
+/// `creft list --names` with skills present outputs exactly one name per line.
+///
+/// The output must contain no ANSI escape codes, no headers, and no descriptions —
+/// only bare skill names separated by newlines. This contract is relied on by the
+/// shell completion scripts that call `creft list --names 2>/dev/null` to populate
+/// the dynamic completion list.
+#[test]
+fn list_names_outputs_one_name_per_line() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: alpha\ndescription: first skill\n---\n\n```bash\necho alpha\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: beta\ndescription: second skill\n---\n\n```bash\necho beta\n```\n")
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["list", "--names"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    // Each line must be exactly a bare skill name — no ANSI, no descriptions.
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&"alpha"),
+        "output must contain 'alpha' as a bare line; got:\n{stdout}",
+    );
+    assert!(
+        lines.contains(&"beta"),
+        "output must contain 'beta' as a bare line; got:\n{stdout}",
+    );
+
+    // No ANSI escape sequences.
+    assert!(
+        !stdout.contains('\x1b'),
+        "output must not contain ANSI escape codes; got:\n{stdout}",
+    );
+
+    // No headers or descriptions.
+    assert!(
+        !stdout.contains("Commands:") && !stdout.contains("Skills:"),
+        "output must not contain section headers; got:\n{stdout}",
+    );
+    assert!(
+        !stdout.contains("first skill") && !stdout.contains("second skill"),
+        "output must not contain skill descriptions; got:\n{stdout}",
+    );
+}
+
+/// `creft list --names` with an empty skill store produces empty stdout and exits 0.
+///
+/// Completion scripts call `creft list --names 2>/dev/null` and feed the output
+/// directly into the completion word list. Empty output — not an error, not a
+/// message — is the correct response when no skills are registered.
+#[test]
+fn list_names_empty_store_produces_empty_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["list", "--names"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+}
