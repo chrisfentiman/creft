@@ -483,12 +483,12 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
     match &source {
         model::SkillSource::Package(_, _) => {
             return Err(CreftError::Setup(
-                "cannot remove individual skills from an installed package -- use 'creft plugins uninstall <package>' instead".into(),
+                "cannot remove individual skills from an installed package -- use 'creft plugin uninstall <package>' instead".into(),
             ));
         }
         model::SkillSource::Plugin(_) => {
             return Err(CreftError::Setup(
-                "cannot remove individual skills from a plugin -- use 'creft plugins deactivate <plugin>' or 'creft plugins uninstall <plugin>' instead".into(),
+                "cannot remove individual skills from a plugin -- use 'creft plugin deactivate <plugin>' or 'creft plugin uninstall <plugin>' instead".into(),
             ));
         }
         model::SkillSource::Owned(_) => {}
