@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use clap::Parser;
 use yansi::Paint;
 
 use crate::cmd::skill::{LIST_DESC_MAX, format_skill_desc, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::settings::Settings;
-use crate::{cli, model, runner, shell, store};
+use crate::{model, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -27,8 +26,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
 
     if has_help {
         if filtered.is_empty() {
-            let _ = cli::Cli::try_parse_from(["creft", "--help"]);
-            return Ok(());
+            return super::skill::cmd_list(ctx, None, false, vec![]);
         }
         match store::resolve_command(ctx, &filtered) {
             Ok((name, _, source)) => {

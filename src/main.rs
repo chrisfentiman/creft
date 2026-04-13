@@ -17,7 +17,6 @@ mod store;
 mod style;
 mod validate;
 
-use clap::Parser;
 use error::CreftError;
 
 fn main() {
@@ -42,126 +41,128 @@ fn main() {
 }
 
 fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError> {
-    if args.is_empty() {
-        // parse_from prints short help and exits — same as `creft -h`, matching cargo convention.
-        cli::Cli::parse_from(["creft", "-h"]);
-        return Ok(());
+    // `creft help <args...>`: user skills take priority over built-in subcommand
+    // names. Resolve as skill first; fall back to namespace help; then show root.
+    if args.first().map(String::as_str) == Some("help") {
+        return handle_help(ctx, &args[1..]);
     }
 
-    let first = &args[0];
+    // Build a lexopt parser from the raw args (no binary name prefix).
+    let mut parser = lexopt::Parser::from_args(args.iter().map(String::as_str));
 
-    // `creft help <args...>`: user skills take priority over built-in subcommand names.
-    // Resolve as skill first; fall back to namespace help; then let clap handle builtins.
-    if first == "help" {
-        let rest: Vec<String> = args[1..].to_vec();
-        if !rest.is_empty() {
-            if store::resolve_command(ctx, &rest).is_ok() {
-                let mut rewritten = rest;
-                rewritten.push("--help".to_string());
-                return cmd::run::run_user_command(ctx, &rewritten);
-            }
-            let prefix: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-            if store::namespace_exists(ctx, &prefix).unwrap_or(false) {
-                return cmd::run::cmd_namespace_help(ctx, &prefix);
-            }
+    match cli::parse(&mut parser)? {
+        Some(cli::Parsed::Command(cmd)) => execute(ctx, cmd),
+        Some(cli::Parsed::Help(which)) => {
+            print!("{}", help::render(which));
+            Ok(())
         }
-        return run_builtin(ctx, None);
+        Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, vec![]),
+        Some(cli::Parsed::Version) => {
+            println!("{}", help::render_version());
+            Ok(())
+        }
+        None => {
+            // Not a built-in — try as a user skill.
+            cmd::run::run_user_command(ctx, &args)
+        }
     }
-
-    if store::is_reserved(first)
-        || first == "--help"
-        || first == "-h"
-        || first == "--version"
-        || first == "-V"
-    {
-        return run_builtin(ctx, None);
-    }
-
-    cmd::run::run_user_command(ctx, &args)
 }
 
-fn run_builtin(ctx: &model::AppContext, args: Option<Vec<String>>) -> Result<(), CreftError> {
-    let cli = match args {
-        Some(a) => cli::Cli::parse_from(a),
-        None => cli::Cli::parse(),
-    };
+/// Execute a parsed built-in command.
+fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError> {
+    match cmd {
+        cli::Command::Add {
+            name,
+            description,
+            args: arg_defs,
+            tags,
+            force,
+            no_validate,
+            global,
+        } => cmd::skill::cmd_add(
+            ctx,
+            name,
+            description,
+            arg_defs,
+            tags,
+            force,
+            no_validate,
+            global,
+        ),
 
-    match cli.command {
-        cli::BuiltinCommand::Cmd { action } => match action {
-            None => cmd::skill::cmd_list(ctx, None, false, vec![]),
-            Some(cli::CmdAction::Add {
-                name,
-                description,
-                args: arg_defs,
-                tags,
-                force,
-                no_validate,
-                global,
-            }) => cmd::skill::cmd_add(
-                ctx,
-                name,
-                description,
-                arg_defs,
-                tags,
-                force,
-                no_validate,
-                global,
-            ),
-            Some(cli::CmdAction::List {
-                tag,
-                all,
-                namespace,
-            }) => cmd::skill::cmd_list(ctx, tag, all, namespace),
-            Some(cli::CmdAction::Show { name }) => {
-                let name = name.join(" ");
+        cli::Command::List {
+            tag,
+            all,
+            namespace,
+        } => cmd::skill::cmd_list(ctx, tag, all, namespace),
+
+        cli::Command::Show { name, blocks } => {
+            let name = name.join(" ");
+            if blocks {
+                cmd::skill::cmd_cat(ctx, &name)
+            } else {
                 cmd::skill::cmd_show(ctx, &name)
             }
-            Some(cli::CmdAction::Cat { name }) => {
-                let name = name.join(" ");
-                cmd::skill::cmd_cat(ctx, &name)
-            }
-            Some(cli::CmdAction::Rm { name, global }) => {
-                let name = name.join(" ");
-                cmd::skill::cmd_rm(ctx, &name, global)
-            }
-        },
+        }
 
-        cli::BuiltinCommand::Plugins { action } => match action {
-            None => cmd::plugin::cmd_plugin_list(ctx, None),
-            Some(cli::PluginAction::Install { source, plugin }) => {
+        cli::Command::Remove { name, global } => {
+            let name = name.join(" ");
+            cmd::skill::cmd_rm(ctx, &name, global)
+        }
+
+        cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
+            cli::PluginCommand::Install { source, plugin } => {
                 cmd::plugin::cmd_plugin_install(ctx, &source, plugin.as_deref())
             }
-            Some(cli::PluginAction::Update { name }) => cmd::plugin::cmd_plugin_update(ctx, name),
-            Some(cli::PluginAction::Uninstall { name }) => {
-                cmd::plugin::cmd_plugin_uninstall(ctx, &name)
-            }
-            Some(cli::PluginAction::Activate { target, global }) => {
+            cli::PluginCommand::Update { name } => cmd::plugin::cmd_plugin_update(ctx, name),
+            cli::PluginCommand::Uninstall { name } => cmd::plugin::cmd_plugin_uninstall(ctx, &name),
+            cli::PluginCommand::Activate { target, global } => {
                 cmd::plugin::cmd_plugin_activate(ctx, &target, global)
             }
-            Some(cli::PluginAction::Deactivate { target, global }) => {
+            cli::PluginCommand::Deactivate { target, global } => {
                 cmd::plugin::cmd_plugin_deactivate(ctx, &target, global)
             }
-            Some(cli::PluginAction::List { name }) => {
-                cmd::plugin::cmd_plugin_list(ctx, name.as_deref())
-            }
-            Some(cli::PluginAction::Search { query }) => {
-                cmd::plugin::cmd_plugin_search(ctx, &query)
-            }
+            cli::PluginCommand::List { name } => cmd::plugin::cmd_plugin_list(ctx, name.as_deref()),
+            cli::PluginCommand::Search { query } => cmd::plugin::cmd_plugin_search(ctx, &query),
         },
 
-        cli::BuiltinCommand::Settings { action } => match action {
-            None | Some(cli::SettingsAction::Show) => cmd::settings::cmd_settings_show(ctx),
-            Some(cli::SettingsAction::Set { key, value }) => {
+        cli::Command::Settings(settings_cmd) => match settings_cmd {
+            cli::SettingsCommand::Show => cmd::settings::cmd_settings_show(ctx),
+            cli::SettingsCommand::Set { key, value } => {
                 cmd::settings::cmd_settings_set(ctx, &key, &value)
             }
         },
 
-        cli::BuiltinCommand::Up { system, global } => cmd::setup::cmd_up(ctx, system, global),
+        cli::Command::Up { system, global } => cmd::setup::cmd_up(ctx, system, global),
 
-        cli::BuiltinCommand::Init => cmd::init::cmd_init(ctx),
+        cli::Command::Init => cmd::init::cmd_init(ctx),
 
-        cli::BuiltinCommand::Doctor { name } => cmd::doctor::cmd_doctor(ctx, name),
+        cli::Command::Doctor { name } => cmd::doctor::cmd_doctor(ctx, name),
+
+        cli::Command::Completions { shell } => {
+            eprintln!("error: shell completions not yet implemented (shell: {shell})");
+            std::process::exit(1);
+        }
     }
+}
+
+/// Handle `creft help [<name>...]`.
+///
+/// User skills take priority over built-in subcommand names: resolve as a skill
+/// first, fall back to namespace help, then fall back to the root listing.
+fn handle_help(ctx: &model::AppContext, rest: &[String]) -> Result<(), CreftError> {
+    if !rest.is_empty() {
+        if store::resolve_command(ctx, rest).is_ok() {
+            let mut rewritten = rest.to_vec();
+            rewritten.push("--help".to_string());
+            return cmd::run::run_user_command(ctx, &rewritten);
+        }
+        let prefix: Vec<&str> = rest.iter().map(String::as_str).collect();
+        if store::namespace_exists(ctx, &prefix).unwrap_or(false) {
+            return cmd::run::cmd_namespace_help(ctx, &prefix);
+        }
+    }
+    cmd::skill::cmd_list(ctx, None, false, vec![])
 }
 
 #[cfg(test)]

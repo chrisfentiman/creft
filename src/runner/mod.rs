@@ -139,55 +139,104 @@ pub(crate) const EARLY_EXIT: i32 = 99;
 /// Bound pairs (name → value) and any passthrough args.
 pub type BindResult = (Vec<(String, String)>, Vec<String>);
 
-/// Build a clap Command dynamically from a parsed command's definition.
-fn build_clap_command(cmd: &ParsedCommand) -> clap::Command {
-    let mut clap_cmd = clap::Command::new(cmd.def.name.clone())
-        .no_binary_name(true)
-        .disable_help_flag(true)
-        .disable_version_flag(true);
-
-    for arg_def in &cmd.def.args {
-        let mut clap_arg = clap::Arg::new(arg_def.name.clone()).action(clap::ArgAction::Set);
-        // An arg is required by clap only when the caller must provide it AND
-        // there is no frontmatter default to fall back to.
-        if arg_def.required && arg_def.default.is_none() {
-            clap_arg = clap_arg.required(true);
-        }
-        clap_cmd = clap_cmd.arg(clap_arg);
-    }
-
-    for flag_def in &cmd.def.flags {
-        let mut clap_arg = clap::Arg::new(flag_def.name.clone()).long(flag_def.name.clone());
-        if let Some(short) = &flag_def.short
-            && let Some(ch) = short.chars().next()
-        {
-            clap_arg = clap_arg.short(ch);
-        }
-        if flag_def.r#type == "bool" {
-            clap_arg = clap_arg.action(clap::ArgAction::SetTrue);
-        } else {
-            clap_arg = clap_arg.action(clap::ArgAction::Set);
-        }
-        clap_cmd = clap_cmd.arg(clap_arg);
-    }
-
-    clap_cmd
-}
-
-/// Parse raw CLI args using clap's builder API, validate, apply defaults.
+/// Parse raw CLI args using lexopt, validate values, and apply frontmatter defaults.
 ///
-/// Returns a vec of `(name, value)` pairs for template substitution.
-/// Unknown flags cause a parse error (no silent passthrough).
+/// Returns a vec of `(name, value)` pairs for template substitution plus any
+/// passthrough args (currently always empty — all args must match the definition).
+/// Unknown flags produce a parse error; there is no silent passthrough.
 pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindResult, CreftError> {
-    let clap_cmd = build_clap_command(cmd);
-    let matches = clap_cmd
-        .try_get_matches_from(raw_args)
-        .map_err(|e| CreftError::MissingArg(e.to_string()))?;
+    use lexopt::prelude::*;
+
+    // Raw parsed values collected during the lexopt loop.
+    // Flags are keyed by their long name.
+    let mut flag_values: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Tracks whether a bool flag was set (present = true).
+    let mut flag_bools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Positional values in arrival order.
+    let mut positional: Vec<String> = Vec::new();
+
+    // Build a lookup from short char → flag name so we can handle -v, -q, etc.
+    let short_to_flag: std::collections::HashMap<char, &str> = cmd
+        .def
+        .flags
+        .iter()
+        .filter_map(|f| {
+            f.short
+                .as_deref()
+                .and_then(|s| s.chars().next())
+                .map(|ch| (ch, f.name.as_str()))
+        })
+        .collect();
+
+    let mut parser = lexopt::Parser::from_args(raw_args.iter().map(String::as_str));
+
+    while let Some(arg) = parser
+        .next()
+        .map_err(|e| CreftError::MissingArg(e.to_string()))?
+    {
+        match arg {
+            Long(name) => {
+                // Convert to owned so we can call parser.value() without
+                // conflicting borrows from the Long(&str) lifetime.
+                let name = name.to_owned();
+                if let Some(flag_def) = cmd.def.flags.iter().find(|f| f.name == name) {
+                    if flag_def.r#type == "bool" {
+                        flag_bools.insert(flag_def.name.clone());
+                    } else {
+                        let err_name = name.clone();
+                        let val = parser
+                            .value()
+                            .map_err(|e| CreftError::MissingArg(e.to_string()))?
+                            .into_string()
+                            .map_err(|_| {
+                                CreftError::MissingArg(format!(
+                                    "--{err_name}: value contains invalid UTF-8"
+                                ))
+                            })?;
+                        flag_values.insert(flag_def.name.clone(), val);
+                    }
+                } else {
+                    return Err(CreftError::MissingArg(format!(
+                        "unexpected option --{name}"
+                    )));
+                }
+            }
+            Short(ch) => {
+                if let Some(&flag_name) = short_to_flag.get(&ch) {
+                    let flag_def = cmd.def.flags.iter().find(|f| f.name == flag_name).unwrap();
+                    if flag_def.r#type == "bool" {
+                        flag_bools.insert(flag_def.name.clone());
+                    } else {
+                        let val = parser
+                            .value()
+                            .map_err(|e| CreftError::MissingArg(e.to_string()))?
+                            .into_string()
+                            .map_err(|_| {
+                                CreftError::MissingArg(format!(
+                                    "-{ch}: value contains invalid UTF-8"
+                                ))
+                            })?;
+                        flag_values.insert(flag_def.name.clone(), val);
+                    }
+                } else {
+                    return Err(CreftError::MissingArg(format!("unexpected option -{ch}")));
+                }
+            }
+            Value(v) => {
+                let s = v.into_string().map_err(|_| {
+                    CreftError::MissingArg("positional argument contains invalid UTF-8".to_string())
+                })?;
+                positional.push(s);
+            }
+        }
+    }
 
     let mut pairs: Vec<(String, String)> = Vec::new();
 
-    for arg_def in &cmd.def.args {
-        let val = if let Some(v) = matches.get_one::<String>(&arg_def.name) {
+    // Bind positional args in declaration order.
+    for (i, arg_def) in cmd.def.args.iter().enumerate() {
+        let val = if let Some(v) = positional.get(i) {
             v.clone()
         } else if let Some(d) = &arg_def.default {
             d.clone()
@@ -200,7 +249,7 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             return Err(CreftError::MissingArg(arg_def.name.clone()));
         };
 
-        // Regex validation — skip when optional arg was not provided (empty default)
+        // Regex validation — skip when optional arg was not provided (value is empty).
         if let Some(pattern) = &arg_def.validation
             && (!val.is_empty() || arg_def.required)
         {
@@ -219,10 +268,11 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
         pairs.push((arg_def.name.clone(), val));
     }
 
+    // Bind flags in declaration order.
     for flag_def in &cmd.def.flags {
         let val = if flag_def.r#type == "bool" {
-            matches.get_flag(&flag_def.name).to_string()
-        } else if let Some(v) = matches.get_one::<String>(&flag_def.name) {
+            flag_bools.contains(&flag_def.name).to_string()
+        } else if let Some(v) = flag_values.get(&flag_def.name) {
             v.clone()
         } else if let Some(d) = &flag_def.default {
             d.clone()
@@ -232,7 +282,7 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             String::new()
         };
 
-        // Regex validation for string flags — skip when empty default (not provided)
+        // Regex validation for string flags — skip when empty (not provided).
         if flag_def.r#type != "bool"
             && let Some(pattern) = &flag_def.validation
             && !val.is_empty()

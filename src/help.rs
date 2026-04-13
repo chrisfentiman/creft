@@ -1,13 +1,6 @@
 /// One-line tagline shown in the root help header.
 pub const ROOT_ABOUT: &str = "Executable skills for AI agents";
 
-// Compatibility aliases kept for the clap-based cli.rs (removed in Stage 3).
-pub const ROOT_LONG_ABOUT: &str = ROOT_ABOUT;
-pub const CMD_LONG_ABOUT: &str = "Manage local and global skills";
-pub const CAT_LONG_ABOUT: &str = "Print just the executable code blocks";
-pub const RM_LONG_ABOUT: &str = REMOVE_LONG_ABOUT;
-pub const PLUGINS_LONG_ABOUT: &str = PLUGIN_LONG_ABOUT;
-
 /// Extended description shown by `creft add --help`, covering skill format, frontmatter fields, and validation.
 pub const ADD_LONG_ABOUT: &str = "\
 Saves a new skill to the registry
@@ -369,8 +362,6 @@ Shell preference resolution order:
 Bare 'creft settings' with no subcommand runs 'creft settings show'.";
 
 /// Extended description shown by `creft completions --help`.
-// Used by the completions command renderer added in Stage 3.
-#[allow(dead_code)]
 pub const COMPLETIONS_LONG_ABOUT: &str = "\
 Generates shell completion scripts
 
@@ -451,8 +442,6 @@ pub(crate) fn builtins() -> &'static [BuiltinEntry] {
 /// Identifies a built-in command for help rendering.
 ///
 /// Each variant maps to a detailed help page shown by `<command> --help`.
-// Wired to the dispatch table in Stage 3; allowed here while cli.rs still uses clap.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinHelp {
     Add,
@@ -480,8 +469,6 @@ pub(crate) enum BuiltinHelp {
 ///
 /// Returns a fully formatted string. ANSI styling is controlled by
 /// yansi's global condition (set at startup via `style::init_color()`).
-// Called from the dispatch table added in Stage 3.
-#[allow(dead_code)]
 pub(crate) fn render(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add(),
@@ -507,8 +494,6 @@ pub(crate) fn render(which: BuiltinHelp) -> String {
 }
 
 /// Render the version string.
-// Called from the dispatch table added in Stage 3.
-#[allow(dead_code)]
 pub(crate) fn render_version() -> String {
     format!("creft {}", env!("CARGO_PKG_VERSION"))
 }
@@ -520,8 +505,6 @@ pub(crate) fn render_version() -> String {
 // cli.rs (Stage 3 target) is still in place. The allow attribute is removed once
 // Stage 3 connects the renderer.
 mod renderer {
-    #![allow(dead_code)]
-
     use yansi::Paint;
 
     use super::{

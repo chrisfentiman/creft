@@ -37,7 +37,7 @@ fn test_root_long_help_contains_commands_section() {
         .stdout(predicate::str::contains("Commands:"));
 }
 
-/// `creft --help` contains all subcommand names.
+/// `creft --help` contains all built-in command names.
 #[test]
 fn test_root_long_help_contains_all_subcommands() {
     let dir = creft_env();
@@ -50,7 +50,18 @@ fn test_root_long_help_contains_all_subcommands() {
         .clone();
     let stdout = String::from_utf8(output).unwrap();
 
-    let subcommands = ["cmd", "plugins", "settings", "up", "init", "doctor"];
+    let subcommands = [
+        "add",
+        "completions",
+        "doctor",
+        "init",
+        "list",
+        "plugin",
+        "remove",
+        "settings",
+        "show",
+        "up",
+    ];
     for cmd in &subcommands {
         assert!(
             stdout.contains(cmd),
@@ -415,7 +426,8 @@ fn test_help_subcommand_no_args() {
     );
 }
 
-/// `creft help nonexistent` produces an error (clap's "unrecognized subcommand" behavior).
+/// `creft help nonexistent` falls back to the root listing when the name is neither
+/// a known skill nor a namespace.
 #[test]
 fn test_help_subcommand_nonexistent_skill() {
     let dir = creft_env();
@@ -423,7 +435,8 @@ fn test_help_subcommand_nonexistent_skill() {
     creft_with(&dir)
         .args(["help", "nonexistent"])
         .assert()
-        .failure();
+        .success()
+        .stdout(predicates::str::contains("Commands:"));
 }
 
 /// `creft help <ns> <skill>` works for multi-word user skills.
