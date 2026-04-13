@@ -191,7 +191,7 @@ pub fn cmd_list(
 
     if prefix.is_empty() {
         // Root listing: Commands: section + Skills: section with truncation.
-        print_root_listing(&entries, /* display_limit */ compute_display_limit());
+        print!("{}", render_root_listing(&entries, compute_display_limit()));
     } else {
         // Namespace drill-in: skills in the requested namespace only, no builtins.
         if entries.is_empty() {
@@ -201,7 +201,7 @@ pub fn cmd_list(
         let header = format!("Skills in '{}':", prefix.join(" "));
         println!("{}", header.as_str().bold());
         println!();
-        print_skill_entries(&entries, &prefix, None);
+        print!("{}", render_skill_entries(&entries, &prefix));
     }
 
     Ok(())
@@ -218,50 +218,74 @@ fn compute_display_limit() -> Option<usize> {
     Some(limit)
 }
 
-/// Print the root listing: tagline, usage, Commands: section, then Skills: section.
-fn print_root_listing(entries: &[model::NamespaceEntry], display_limit: Option<usize>) {
-    println!("{}", help::ROOT_ABOUT.bold());
-    println!();
-    println!("{}creft <command> [ARGS] [OPTIONS]", "Usage: ".bold());
-    println!();
+/// Render the root listing as a `String`: tagline, usage, Commands: section, then Skills: section.
+///
+/// Accepting `display_limit` as a parameter makes this function unit-testable with synthetic data
+/// without spawning a subprocess or touching the terminal.
+pub(crate) fn render_root_listing(
+    entries: &[model::NamespaceEntry],
+    display_limit: Option<usize>,
+) -> String {
+    let mut out = String::new();
+    use std::fmt::Write;
+
+    writeln!(out, "{}", help::ROOT_ABOUT.bold()).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "{}creft <command> [ARGS] [OPTIONS]", "Usage: ".bold()).unwrap();
+    writeln!(out).unwrap();
 
     // Commands: section — fixed list of builtins, always shown in full.
-    println!("{}", "Commands:".bold());
+    writeln!(out, "{}", "Commands:".bold()).unwrap();
     let builtins = help::builtins();
     let max_builtin_name = builtins.iter().map(|e| e.name.len()).max().unwrap_or(0);
     for entry in builtins {
         let pad = " ".repeat(max_builtin_name - entry.name.len());
-        println!("  {}{}  {}", entry.name.bold(), pad, entry.description);
+        writeln!(out, "  {}{}  {}", entry.name.bold(), pad, entry.description).unwrap();
     }
 
     if entries.is_empty() {
         // No skills installed — omit the Skills: section entirely.
-        println!();
-        print_global_flags(max_builtin_name);
-        println!();
-        println!("See 'creft <command> --help' for details.");
-        return;
+        writeln!(out).unwrap();
+        out.push_str(&render_global_flags(max_builtin_name));
+        writeln!(out).unwrap();
+        writeln!(out, "See 'creft <command> --help' for details.").unwrap();
+        return out;
     }
 
     // Skills: section.
-    println!();
-    println!("{}", "Skills:".bold());
-    println!();
+    writeln!(out).unwrap();
+    writeln!(out, "{}", "Skills:".bold()).unwrap();
+    writeln!(out).unwrap();
 
     let empty_prefix: &[&str] = &[];
     let total = count_visible_entries(entries);
     let limit = display_limit.unwrap_or(usize::MAX);
 
-    print_skill_entries_limited(entries, empty_prefix, limit);
+    let (skills_output, max_skill_name) =
+        render_skill_entries_limited(entries, empty_prefix, limit);
+    out.push_str(&skills_output);
 
     if total > limit {
-        println!("  (showing {limit} of {total} — use 'creft list --all' to see all)");
+        writeln!(
+            out,
+            "  (showing {limit} of {total} — use 'creft list --all' to see all)"
+        )
+        .unwrap();
     }
 
-    println!();
-    print_global_flags(max_builtin_name);
-    println!();
-    println!("See 'creft <command> --help' for details.");
+    writeln!(out).unwrap();
+    // Global flags align with the Skills: section; fall back to Commands: width if
+    // no skills were rendered (defensive — the empty branch above handles the real
+    // no-skills case).
+    let flags_col = if max_skill_name > 0 {
+        max_skill_name
+    } else {
+        max_builtin_name
+    };
+    out.push_str(&render_global_flags(flags_col));
+    writeln!(out).unwrap();
+    writeln!(out, "See 'creft <command> --help' for details.").unwrap();
+    out
 }
 
 /// Count the number of visible (non-suppressed) entries in a namespace group.
@@ -290,36 +314,52 @@ fn count_visible_entries(entries: &[model::NamespaceEntry]) -> usize {
         .count()
 }
 
-/// Print the global flags below the Skills section.
-fn print_global_flags(col_width: usize) {
+/// Render the global flags section as a `String`.
+///
+/// `col_width` is the column width of the section immediately above (either
+/// Skills: or Commands: when no skills are installed), so that the flag labels
+/// align with that section's name column.
+fn render_global_flags(col_width: usize) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
     let pad = " ".repeat(col_width.saturating_sub("--dry-run".len()));
-    println!(
+    writeln!(
+        out,
         "  --dry-run{}       Show rendered blocks, do not execute",
         pad
-    );
+    )
+    .unwrap();
     let pad2 = " ".repeat(col_width.saturating_sub("--verbose, -v".len()));
-    println!(
+    writeln!(
+        out,
         "  --verbose, -v{}   Show rendered blocks on stderr, then execute",
         pad2
-    );
+    )
+    .unwrap();
+    out
 }
 
-/// Print skill entries for a namespace drill-in (no truncation applied here;
-/// caller passes `None` to disable truncation).
-fn print_skill_entries(
-    entries: &[model::NamespaceEntry],
-    prefix: &[&str],
-    _display_limit: Option<usize>,
-) {
-    print_skill_entries_limited(entries, prefix, usize::MAX);
+/// Render skill entries for a namespace drill-in as a `String`.
+///
+/// No truncation is applied (equivalent to passing `usize::MAX` as the limit).
+fn render_skill_entries(entries: &[model::NamespaceEntry], prefix: &[&str]) -> String {
+    render_skill_entries_limited(entries, prefix, usize::MAX).0
 }
 
-/// Print skill entries up to `limit`, applying column alignment.
+/// Render skill entries up to `limit` as a `(String, max_name_width)` pair.
+///
+/// Returns both the rendered output and the column width used for name alignment,
+/// so the caller can align subsequent sections (e.g., global flags) consistently.
 ///
 /// When a leaf skill and a namespace share the same relative name the namespace
 /// entry is suppressed and the leaf is annotated with `[N subskills]`.
-fn print_skill_entries_limited(entries: &[model::NamespaceEntry], prefix: &[&str], limit: usize) {
+fn render_skill_entries_limited(
+    entries: &[model::NamespaceEntry],
+    prefix: &[&str],
+    limit: usize,
+) -> (String, usize) {
     use std::collections::{HashMap, HashSet};
+    use std::fmt::Write;
 
     // When a leaf skill and a namespace share the same relative name, suppress
     // the namespace entry and annotate the leaf with "[N subskills]" instead.
@@ -366,6 +406,7 @@ fn print_skill_entries_limited(entries: &[model::NamespaceEntry], prefix: &[&str
         .max()
         .unwrap_or(0);
 
+    let mut out = String::new();
     let mut printed = 0;
     for entry in entries {
         if printed >= limit {
@@ -386,7 +427,7 @@ fn print_skill_entries_limited(entries: &[model::NamespaceEntry], prefix: &[&str
                     String::new()
                 };
                 let pad = " ".repeat(max_name - def.name.len());
-                println!("  {}{}  {desc}{suffix}", def.name.as_str().bold(), pad);
+                writeln!(out, "  {}{}  {desc}{suffix}", def.name.as_str().bold(), pad).unwrap();
                 printed += 1;
             }
             model::NamespaceEntry::Namespace {
@@ -401,15 +442,18 @@ fn print_skill_entries_limited(entries: &[model::NamespaceEntry], prefix: &[&str
                 let plural = if *skill_count == 1 { "skill" } else { "skills" };
                 let pkg_suffix = if package.is_some() { "  [package]" } else { "" };
                 let pad = " ".repeat(max_name - name.len());
-                println!(
+                writeln!(
+                    out,
                     "  {}{}  {skill_count} {plural}{pkg_suffix}",
                     name.as_str().bold(),
                     pad,
-                );
+                )
+                .unwrap();
                 printed += 1;
             }
         }
     }
+    (out, max_name)
 }
 
 pub fn cmd_show(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
@@ -491,5 +535,94 @@ pub fn format_skill_desc(
         model::SkillSource::Owned(_) => desc.into_owned(),
         model::SkillSource::Package(pkg, _) => format!("{desc}  (pkg: {pkg})"),
         model::SkillSource::Plugin(name) => format!("{desc}  (plugin: {name})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    /// Construct a slice of `n` synthetic `NamespaceEntry::Namespace` items.
+    ///
+    /// Names are `"skill-0"`, `"skill-1"`, … so each entry is distinct and
+    /// has a deterministic length for column-width assertions.
+    fn synthetic_namespace_entries(n: usize) -> Vec<model::NamespaceEntry> {
+        (0..n)
+            .map(|i| model::NamespaceEntry::Namespace {
+                name: format!("skill-{i}"),
+                skill_count: 1,
+                package: None,
+            })
+            .collect()
+    }
+
+    /// 100 entries with a display limit of 20 produces the truncation footer.
+    ///
+    /// The footer text is the user-visible message that tells them how to see the
+    /// rest: `(showing 20 of 100 — use 'creft list --all' to see all)`.
+    #[test]
+    fn truncation_footer_shown_when_entries_exceed_limit() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(100);
+        let output = render_root_listing(&entries, Some(20));
+        yansi::enable();
+
+        assert!(
+            output.contains("(showing 20 of 100 — use 'creft list --all' to see all)"),
+            "output must contain truncation footer when 100 entries exceed limit of 20;\
+             \ngot:\n{output}",
+        );
+    }
+
+    /// 15 entries with a display limit of 20 produces no truncation footer.
+    ///
+    /// When all entries fit within the limit there is nothing to truncate,
+    /// so the footer must not appear.
+    #[test]
+    fn truncation_footer_absent_when_entries_fit_within_limit() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(15);
+        let output = render_root_listing(&entries, Some(20));
+        yansi::enable();
+
+        assert!(
+            !output.contains("(showing"),
+            "output must not contain truncation footer when 15 entries fit within limit of 20;\
+             \ngot:\n{output}",
+        );
+    }
+
+    /// `display_limit = None` (non-TTY path) produces no truncation regardless of
+    /// how many entries there are.
+    ///
+    /// Non-TTY output is piped or redirected; all entries are always shown.
+    #[test]
+    fn no_truncation_when_display_limit_is_none() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(200);
+        let output = render_root_listing(&entries, None);
+        yansi::enable();
+
+        assert!(
+            !output.contains("(showing"),
+            "output must not contain truncation footer when display_limit is None;\
+             \ngot:\n{output}",
+        );
+        // All 200 entries must appear.
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, model::NamespaceEntry::Namespace { .. }))
+                .count(),
+            200,
+            "synthetic_namespace_entries must have produced 200 entries",
+        );
+        assert!(
+            output.contains("skill-199"),
+            "all entries must be rendered when no limit is applied;\
+             \ngot:\n{output}",
+        );
     }
 }
