@@ -9,37 +9,25 @@ creft, you write a markdown file and it runs:
 ````sh
 creft cmd add <<'EOF'
 ---
-name: analyze-repo
-description: Analyze a GitHub repo's recent activity
+name: hello
+description: Greet someone
 args:
-  - name: repo
-env:
-  - name: GITHUB_TOKEN
+  - name: who
 ---
 ```bash
-curl -s -H "Authorization: token $GITHUB_TOKEN" \
-  "https://api.github.com/repos/{{repo}}/commits?per_page=20"
-```
-```python
-import sys, json
-commits = json.load(sys.stdin)
-for c in commits:
-    print(f"{c['sha'][:7]} {c['commit']['message'].splitlines()[0]}")
-```
-```llm
----
-What patterns do you see in this commit history? Any concerns?
+echo "Hello, {{who}}!"
 ```
 EOF
 ````
 
 ```
-$ creft analyze-repo rust-lang/rust
+$ creft hello World
+Hello, World!
 ```
 
-Bash fetches the data. Python processes it. The LLM reasons about it. One file, one command, all piped together.
+That's it. A markdown file became a CLI command.
 
-The agent can create these `creft cmd add`. It can discover them with `creft cmd list`. It can run them with `creft <name>`. It can install collections of them with `creft plugins install`.
+An agent can create these with `creft cmd add`. It can discover them with `creft cmd list`. It can run them with `creft <name>`. It can install collections of them with `creft plugins install`.
 
 No shared context needed between sessions — the skill is the context.
 
