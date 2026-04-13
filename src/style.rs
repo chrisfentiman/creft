@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use yansi::Condition;
 
 /// Initialize yansi's global color condition.
@@ -9,6 +11,43 @@ use yansi::Condition;
 /// - stdout/stderr TTY detection (non-TTY disables color)
 pub(crate) fn init_color() {
     yansi::whenever(Condition::cached(color_enabled()));
+}
+
+/// Returns the terminal height in rows when stdout is a TTY, or `None` otherwise.
+///
+/// Returns `None` when:
+/// - stdout is not a TTY (piped output)
+/// - the `ioctl` call fails (e.g., inside a test harness or container)
+///
+/// Callers treat `None` as "no truncation."
+#[cfg(unix)]
+pub(crate) fn terminal_rows() -> Option<u16> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    // SAFETY: TIOCGWINSZ is a read-only ioctl that fills a winsize struct.
+    // stdout fd (1) is valid because we checked is_terminal() above.
+    // The winsize struct is zero-initialized before the call, so all fields
+    // are valid regardless of whether the ioctl populates them.
+    unsafe {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
+            Some(ws.ws_row)
+        } else {
+            None
+        }
+    }
+}
+
+/// Returns `None` on non-Unix platforms (no terminal height detection).
+#[cfg(not(unix))]
+pub(crate) fn terminal_rows() -> Option<u16> {
+    None
 }
 
 /// Computes whether color output should be enabled.

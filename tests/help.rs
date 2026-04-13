@@ -20,23 +20,21 @@ fn test_root_long_help_contains_tagline() {
         .stdout(predicate::str::contains("Executable skills for AI agents"));
 }
 
-/// `creft --help` shows the quick-start examples from ROOT_LONG_ABOUT.
+/// `creft --help` contains the Commands: section.
+///
+/// Stage 3 will wire the full two-section listing renderer to --help. For now
+/// the clap-based dispatch shows the tagline and command names. The old
+/// ROOT_LONG_ABOUT quick-start examples are removed — the two-section listing
+/// itself serves as discovery.
 #[test]
-fn test_root_long_help_contains_examples() {
+fn test_root_long_help_contains_commands_section() {
     let dir = creft_env();
-    let output = creft_with(&dir)
+
+    creft_with(&dir)
         .args(["--help"])
         .assert()
         .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).unwrap();
-
-    assert!(
-        stdout.contains("creft cmd add") || stdout.contains("creft cmd list"),
-        "root --help should contain quick-start examples; got: {stdout:?}"
-    );
+        .stdout(predicate::str::contains("Commands:"));
 }
 
 /// `creft --help` contains all subcommand names.
@@ -164,19 +162,19 @@ fn test_no_args_same_as_short_flag() {
     );
 }
 
-/// `creft --help` still shows the long help content (ROOT_LONG_ABOUT).
+/// `creft --help` contains the Commands: section listing built-in subcommands.
+///
+/// The detailed two-section listing (Commands: + Skills:) is wired in Stage 3.
+/// For now the clap-based dispatch renders the tagline and subcommand names.
 #[test]
-fn test_long_help_flag_shows_long_about() {
+fn test_long_help_flag_shows_commands_section() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["--help"])
         .assert()
         .success()
-        // This string appears in ROOT_LONG_ABOUT only, not in the short ROOT_ABOUT.
-        .stdout(predicate::str::contains(
-            "creft cmd list                 list available skills",
-        ));
+        .stdout(predicate::str::contains("Commands:"));
 }
 
 // ── Terminology: "skill" not "command" for user-authored skills ────────────────

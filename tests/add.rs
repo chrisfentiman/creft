@@ -355,12 +355,14 @@ fn test_rm_command() {
         .assert()
         .success();
 
-    // After removal the list is empty.
+    // After removal the list has no skills — Commands: section still appears,
+    // but the Skills: section is omitted and nothing appears on stderr.
     creft_with(&dir)
         .args(["cmd", "list"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("no commands found"));
+        .stdout(predicate::str::contains("Commands:"))
+        .stderr(predicate::str::is_empty());
 }
 
 /// `creft rm nonexistent` exits with code 2 (CommandNotFound).

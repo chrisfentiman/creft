@@ -1,56 +1,14 @@
 /// One-line tagline shown in the root help header.
 pub const ROOT_ABOUT: &str = "Executable skills for AI agents";
 
-/// Extended description shown by `creft --help`, including usage examples and storage overview.
-pub const ROOT_LONG_ABOUT: &str = "\
-creft — Executable skills for AI agents
+// Compatibility aliases kept for the clap-based cli.rs (removed in Stage 3).
+pub const ROOT_LONG_ABOUT: &str = ROOT_ABOUT;
+pub const CMD_LONG_ABOUT: &str = "Manage local and global skills";
+pub const CAT_LONG_ABOUT: &str = "Print just the executable code blocks";
+pub const RM_LONG_ABOUT: &str = REMOVE_LONG_ABOUT;
+pub const PLUGINS_LONG_ABOUT: &str = PLUGIN_LONG_ABOUT;
 
-Save agent workflows as markdown. Run them as CLI commands.
-
-Run:
-  creft <name> [args] [--flags]
-
-Discover:
-  creft cmd list                 list available skills
-  creft <name> --help            show a skill's args and description
-
-Create:
-  creft cmd add <<'EOF'          save a skill from stdin
-  creft cmd add --help           full format reference
-
-Setup:
-  creft plugins                  manage skill collections
-  creft up                       install for your coding AI
-  creft init                     create local .creft/ for this project
-  creft doctor                   check environment and skill health
-
-Global Flags:
-  --dry-run       show rendered blocks, do not execute
-  --verbose, -v   show rendered blocks on stderr, then execute";
-
-/// Extended description shown by `creft cmd --help`, listing skill management subcommands.
-pub const CMD_LONG_ABOUT: &str = "\
-Manages local and global skills
-
-Subcommands:
-  add     Save a new skill from stdin
-  list    List available skills
-  show    Show a skill's full definition
-  cat     Print a skill's code blocks
-  rm      Delete a skill
-
-Examples:
-  creft cmd add <<'EOF'              Save a skill from stdin
-  creft cmd list                     List all skills
-  creft cmd list gh                  List skills in the 'gh' namespace
-  creft cmd show hello               Show a skill's definition
-  creft cmd cat hello                Print a skill's code blocks
-  creft cmd rm hello                 Delete a skill
-
-Bare 'creft cmd' with no subcommand runs 'creft cmd list'.
-'creft command' is an alias for 'creft cmd'.";
-
-/// Extended description shown by `creft cmd add --help`, covering skill format, frontmatter fields, and validation.
+/// Extended description shown by `creft add --help`, covering skill format, frontmatter fields, and validation.
 pub const ADD_LONG_ABOUT: &str = "\
 Saves a new skill to the registry
 
@@ -58,9 +16,9 @@ Use this when you have a shell recipe, API call, or multi-step workflow
 you want to reuse. Pipe the skill definition as markdown to stdin.
 
 Examples:
-  creft cmd add <<'EOF'                          Save from stdin (recommended)
-  creft cmd add --force <<'EOF'                  Overwrite existing skill
-  creft cmd add --no-validate <<'EOF'            Skip validation only
+  creft add <<'EOF'                          Save from stdin (recommended)
+  creft add --force <<'EOF'                  Overwrite existing skill
+  creft add --no-validate <<'EOF'            Skip validation only
 
 Skill Definition Format:
   Start with YAML frontmatter between --- delimiters, then add one or more
@@ -115,7 +73,7 @@ Frontmatter Fields:
   args          Positional arguments. Each has: name, description, default, required, validation
   flags         Named --flags. Each has: name, short, type (bool/string), default, description, validation
   env           Environment variables. Each has: name, required (default true)
-  tags          List of tags for filtering with 'creft cmd list --tag'
+  tags          List of tags for filtering with 'creft list --tag'
 
   Arg/flag validation values are regex strings matched against the input.
 
@@ -129,7 +87,7 @@ Code Blocks:
   Exit codes:
     0     Success, continue to the next block
     1-98  Error, stop the pipeline and propagate the exit code
-    99    Early successful return — stop the pipeline, creft exits 0
+    99    Early successful return -- stop the pipeline, creft exits 0
     100+  Error, stop the pipeline and propagate the exit code
 
   Interpreters: bash, python, node, zsh, ruby, docs (not executed -- shown in --help)
@@ -150,7 +108,7 @@ Code Blocks:
     The provider handles authentication (API keys, config files).
     Template placeholders ({{name}}) work in the prompt body.
     LLM blocks buffer all upstream input before sending to the provider
-    (sponge pattern — all stdin is collected before the prompt is sent).
+    (sponge pattern -- all stdin is collected before the prompt is sent).
     Use {{prev}} in the prompt to reference the buffered input.
     On non-Unix systems, multi-block skills with LLM blocks are not supported.
 
@@ -162,7 +120,7 @@ Code Blocks:
 Template Placeholders:
   {{name}}            Positional arg or flag value
   {{name|default}}    Value with fallback
-  {{prev}}            Buffered output from previous block (LLM blocks only —
+  {{prev}}            Buffered output from previous block (LLM blocks only --
                       other blocks receive previous output via stdin)
 
 Storage:
@@ -175,7 +133,7 @@ Validation:
   and sub-skill references. Use --force to skip all checks,
   or --no-validate to skip validation only (keeps overwrite check).";
 
-/// Extended description shown by `creft cmd list --help`, covering namespace grouping and filtering options.
+/// Extended description shown by `creft list --help`, covering namespace grouping and filtering options.
 pub const LIST_LONG_ABOUT: &str = "\
 Shows available skills, grouped by namespace
 
@@ -183,46 +141,39 @@ Namespaces are collapsed by default -- each shows the number of skills
 inside. Drill into a namespace to see its skills.
 
 Examples:
-  creft cmd list              All skills, grouped by namespace
-  creft cmd list tavily       Skills in the 'tavily' namespace
-  creft cmd list aws s3       Skills in the 'aws s3' sub-namespace
-  creft cmd list --tag api    Only skills tagged 'api' (grouped)
-  creft cmd list --all        Flat list without grouping
+  creft list              All skills, grouped by namespace
+  creft list tavily       Skills in the 'tavily' namespace
+  creft list aws s3       Skills in the 'aws s3' sub-namespace
+  creft list --tag api    Only skills tagged 'api' (grouped)
+  creft list --all        Flat list without grouping
 
-Use 'creft <skill> --help' as a shortcut for 'creft cmd list <skill>'.";
+Use 'creft <skill> --help' as a shortcut for 'creft list <skill>'.";
 
-/// Extended description shown by `creft cmd show --help`, explaining full markdown output mode.
+/// Extended description shown by `creft show --help`, explaining full markdown output mode.
 pub const SHOW_LONG_ABOUT: &str = "\
 Prints a skill's full markdown definition
 
 Shows frontmatter, docs, and code blocks. Use this to understand what a
 skill does before running it, or to review an existing skill's implementation.
 
-Examples:
-  creft cmd show hello
-  creft cmd show gh issue-body";
-
-/// Extended description shown by `creft cmd cat --help`, explaining code-only output mode.
-pub const CAT_LONG_ABOUT: &str = "\
-Prints just the executable code blocks
-
-Strips frontmatter and docs, showing only the runnable scripts. Use this
-to pipe skill code to another tool, inspect the raw script, or copy it.
+Options:
+  --blocks    Print only the executable code blocks (strips frontmatter and docs)
 
 Examples:
-  creft cmd cat hello
-  creft cmd cat gh issue-body";
+  creft show hello
+  creft show gh issue-body
+  creft show hello --blocks";
 
-/// Extended description shown by `creft cmd rm --help`, including namespace cleanup behavior.
-pub const RM_LONG_ABOUT: &str = "\
+/// Extended description shown by `creft remove --help`, including namespace cleanup behavior.
+pub const REMOVE_LONG_ABOUT: &str = "\
 Deletes a skill from the registry
 
 Removes the skill file. Empty namespace directories are cleaned up
 automatically.
 
 Examples:
-  creft cmd rm hello
-  creft cmd rm gh issue-body";
+  creft remove hello
+  creft remove gh issue-body";
 
 /// Extended description shown by `creft up --help`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
@@ -230,8 +181,6 @@ Installs creft instructions for your coding AI
 
 Detects which AI coding systems are present and installs the appropriate
 instruction file so the LLM knows how to discover and use creft skills.
-The installed instructions reflect the v0.3.0 CLI structure (creft cmd,
-creft plugins).
 
 Examples:
   creft up                  Auto-detect and install for all found systems
@@ -291,13 +240,13 @@ with the same name.
 Examples:
   cd my-project
   creft init              Create .creft/commands/
-  creft cmd add --name hello  New skills now save locally
+  creft add --name hello  New skills now save locally
 
 Safe to run multiple times -- if .creft/ already exists, prints a message
 and exits successfully.";
 
-/// Extended description shown by `creft plugins --help`, listing plugin management subcommands.
-pub const PLUGINS_LONG_ABOUT: &str = "\
+/// Extended description shown by `creft plugin --help`, listing plugin management subcommands.
+pub const PLUGIN_LONG_ABOUT: &str = "\
 Manages creft plugins
 
 Plugins extend creft with new commands from a git repository.
@@ -313,49 +262,49 @@ Subcommands:
   search      Search for commands across installed plugins
 
 Examples:
-  creft plugins install https://github.com/user/my-plugin
-  creft plugins update
-  creft plugins uninstall my-plugin
+  creft plugin install https://github.com/user/my-plugin
+  creft plugin update
+  creft plugin uninstall my-plugin
 
-Bare 'creft plugins' with no subcommand runs 'creft plugins list'.";
+Bare 'creft plugin' with no subcommand runs 'creft plugin list'.";
 
-/// Extended description shown by `creft plugins install --help`.
+/// Extended description shown by `creft plugin install --help`.
 pub const PLUGIN_INSTALL_LONG_ABOUT: &str = "\
 Installs a plugin from a git repository into the global plugin cache
 
 Plugin installs are always global (~/.creft/plugins/). Activate commands
-in a project scope with 'creft plugins activate'.
+in a project scope with 'creft plugin activate'.
 
 A plugin is a git repo with a .creft/catalog.json manifest.
 Any .md file with valid creft frontmatter
 becomes an available command, namespaced under the plugin name.
 
 Examples:
-  creft plugins install https://github.com/user/my-plugin
-  creft plugins install git@github.com:user/my-plugin.git
-  creft plugins install /path/to/local/plugin-repo
-  creft plugins install https://github.com/org/multi-plugin --plugin fetch";
+  creft plugin install https://github.com/user/my-plugin
+  creft plugin install git@github.com:user/my-plugin.git
+  creft plugin install /path/to/local/plugin-repo
+  creft plugin install https://github.com/org/multi-plugin --plugin fetch";
 
-/// Extended description shown by `creft plugins update --help`.
+/// Extended description shown by `creft plugin update --help`.
 pub const PLUGIN_UPDATE_LONG_ABOUT: &str = "\
 Updates installed plugins
 
 Runs git pull on the plugin's cloned repository.
 
 Examples:
-  creft plugins update my-plugin    Update a specific plugin
-  creft plugins update              Update all installed plugins";
+  creft plugin update my-plugin    Update a specific plugin
+  creft plugin update              Update all installed plugins";
 
-/// Extended description shown by `creft plugins uninstall --help`.
+/// Extended description shown by `creft plugin uninstall --help`.
 pub const PLUGIN_UNINSTALL_LONG_ABOUT: &str = "\
 Removes an installed plugin from the global cache
 
 Deletes the plugin directory and all its commands.
 
 Examples:
-  creft plugins uninstall my-plugin";
+  creft plugin uninstall my-plugin";
 
-/// Extended description shown by `creft plugins activate --help`.
+/// Extended description shown by `creft plugin activate --help`.
 pub const PLUGIN_ACTIVATE_LONG_ABOUT: &str = "\
 Makes commands from an installed plugin available in a scope
 
@@ -363,36 +312,36 @@ Writes activation state to .creft/plugins/settings.json (local scope,
 default) or ~/.creft/plugins/settings.json (global scope, --global).
 
 Examples:
-  creft plugins activate my-plugin            Activate all commands
-  creft plugins activate my-plugin/fetch      Activate a single command
-  creft plugins activate my-plugin --global   Activate globally";
+  creft plugin activate my-plugin            Activate all commands
+  creft plugin activate my-plugin/fetch      Activate a single command
+  creft plugin activate my-plugin --global   Activate globally";
 
-/// Extended description shown by `creft plugins deactivate --help`.
+/// Extended description shown by `creft plugin deactivate --help`.
 pub const PLUGIN_DEACTIVATE_LONG_ABOUT: &str = "\
 Removes plugin commands from a scope
 
 Examples:
-  creft plugins deactivate my-plugin           Deactivate all commands
-  creft plugins deactivate my-plugin/fetch     Deactivate a single command
-  creft plugins deactivate my-plugin --global  Deactivate from global scope";
+  creft plugin deactivate my-plugin           Deactivate all commands
+  creft plugin deactivate my-plugin/fetch     Deactivate a single command
+  creft plugin deactivate my-plugin --global  Deactivate from global scope";
 
-/// Extended description shown by `creft plugins list --help`.
+/// Extended description shown by `creft plugin list --help`.
 pub const PLUGIN_LIST_LONG_ABOUT: &str = "\
 Lists installed plugins, or commands in a specific plugin
 
 Examples:
-  creft plugins list               Show all installed plugins
-  creft plugins list my-plugin     Show commands in my-plugin";
+  creft plugin list               Show all installed plugins
+  creft plugin list my-plugin     Show commands in my-plugin";
 
-/// Extended description shown by `creft plugins search --help`.
+/// Extended description shown by `creft plugin search --help`.
 pub const PLUGIN_SEARCH_LONG_ABOUT: &str = "\
 Searches for commands across installed plugins
 
 Matches against command name, description, and tags.
 
 Examples:
-  creft plugins search deploy
-  creft plugins search kubernetes deploy";
+  creft plugin search deploy
+  creft plugin search kubernetes deploy";
 
 /// Extended description shown by `creft settings --help`, listing configuration management subcommands.
 pub const SETTINGS_LONG_ABOUT: &str = "\
@@ -418,3 +367,567 @@ Shell preference resolution order:
   4. block language tag (no substitution)
 
 Bare 'creft settings' with no subcommand runs 'creft settings show'.";
+
+/// Extended description shown by `creft completions --help`.
+// Used by the completions command renderer added in Stage 3.
+#[allow(dead_code)]
+pub const COMPLETIONS_LONG_ABOUT: &str = "\
+Generates shell completion scripts
+
+Prints a completion script for the requested shell to stdout. Source the
+output in your shell startup file to enable tab completion for creft commands.
+
+Supported shells: bash, zsh, fish
+
+Examples:
+  creft completions bash >> ~/.bashrc
+  creft completions zsh > ~/.zfunc/_creft
+  creft completions fish > ~/.config/fish/completions/creft.fish";
+
+// ── Builtin entry list ──────────────────────────────────────────────────────
+
+/// A built-in command's listing metadata, used by the root listing.
+pub(crate) struct BuiltinEntry {
+    /// Command name as it appears in the listing (e.g., `"add"`, `"plugin"`).
+    pub name: &'static str,
+    /// Short description for the column-aligned listing.
+    pub description: &'static str,
+}
+
+const BUILTIN_ENTRIES: &[BuiltinEntry] = &[
+    BuiltinEntry {
+        name: "add",
+        description: "Save a skill from stdin",
+    },
+    BuiltinEntry {
+        name: "completions",
+        description: "Generate shell completions",
+    },
+    BuiltinEntry {
+        name: "doctor",
+        description: "Check environment and skill health",
+    },
+    BuiltinEntry {
+        name: "init",
+        description: "Initialize local skill storage",
+    },
+    BuiltinEntry {
+        name: "list",
+        description: "List available skills",
+    },
+    BuiltinEntry {
+        name: "plugin",
+        description: "Manage skill collections",
+    },
+    BuiltinEntry {
+        name: "remove",
+        description: "Delete a skill",
+    },
+    BuiltinEntry {
+        name: "settings",
+        description: "Manage settings",
+    },
+    BuiltinEntry {
+        name: "show",
+        description: "Show a skill's full definition",
+    },
+    BuiltinEntry {
+        name: "up",
+        description: "Install creft for your coding AI",
+    },
+];
+
+/// Returns the list of top-level built-in commands for the root listing.
+///
+/// Entries are alphabetically sorted by name. Only top-level commands appear —
+/// subcommands (`plugin install`, `settings set`) are shown in their parent's
+/// `--help` page, not here.
+pub(crate) fn builtins() -> &'static [BuiltinEntry] {
+    BUILTIN_ENTRIES
+}
+
+// ── Help renderer ────────────────────────────────────────────────────────────
+
+/// Identifies a built-in command for help rendering.
+///
+/// Each variant maps to a detailed help page shown by `<command> --help`.
+// Wired to the dispatch table in Stage 3; allowed here while cli.rs still uses clap.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinHelp {
+    Add,
+    List,
+    Show,
+    Remove,
+    Plugin,
+    PluginInstall,
+    PluginUpdate,
+    PluginUninstall,
+    PluginActivate,
+    PluginDeactivate,
+    PluginList,
+    PluginSearch,
+    Settings,
+    SettingsShow,
+    SettingsSet,
+    Up,
+    Init,
+    Doctor,
+    Completions,
+}
+
+/// Render detailed help output for a built-in command's `--help` page.
+///
+/// Returns a fully formatted string. ANSI styling is controlled by
+/// yansi's global condition (set at startup via `style::init_color()`).
+// Called from the dispatch table added in Stage 3.
+#[allow(dead_code)]
+pub(crate) fn render(which: BuiltinHelp) -> String {
+    match which {
+        BuiltinHelp::Add => renderer::render_add(),
+        BuiltinHelp::List => renderer::render_list(),
+        BuiltinHelp::Show => renderer::render_show(),
+        BuiltinHelp::Remove => renderer::render_remove(),
+        BuiltinHelp::Plugin => renderer::render_plugin(),
+        BuiltinHelp::PluginInstall => renderer::render_plugin_install(),
+        BuiltinHelp::PluginUpdate => renderer::render_plugin_update(),
+        BuiltinHelp::PluginUninstall => renderer::render_plugin_uninstall(),
+        BuiltinHelp::PluginActivate => renderer::render_plugin_activate(),
+        BuiltinHelp::PluginDeactivate => renderer::render_plugin_deactivate(),
+        BuiltinHelp::PluginList => renderer::render_plugin_list(),
+        BuiltinHelp::PluginSearch => renderer::render_plugin_search(),
+        BuiltinHelp::Settings => renderer::render_settings(),
+        BuiltinHelp::SettingsShow => renderer::render_settings_show(),
+        BuiltinHelp::SettingsSet => renderer::render_settings_set(),
+        BuiltinHelp::Up => renderer::render_up(),
+        BuiltinHelp::Init => renderer::render_init(),
+        BuiltinHelp::Doctor => renderer::render_doctor(),
+        BuiltinHelp::Completions => renderer::render_completions(),
+    }
+}
+
+/// Render the version string.
+// Called from the dispatch table added in Stage 3.
+#[allow(dead_code)]
+pub(crate) fn render_version() -> String {
+    format!("creft {}", env!("CARGO_PKG_VERSION"))
+}
+
+// ── Private per-command formatters ───────────────────────────────────────────
+//
+// These helpers are called exclusively from `render()`, which is wired to the
+// dispatch table in Stage 3. The dead_code lint fires now because the clap-based
+// cli.rs (Stage 3 target) is still in place. The allow attribute is removed once
+// Stage 3 connects the renderer.
+mod renderer {
+    #![allow(dead_code)]
+
+    use yansi::Paint;
+
+    use super::{
+        ADD_LONG_ABOUT, COMPLETIONS_LONG_ABOUT, DOCTOR_LONG_ABOUT, INIT_LONG_ABOUT,
+        LIST_LONG_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT,
+        PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_LIST_LONG_ABOUT, PLUGIN_LONG_ABOUT,
+        PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
+        REMOVE_LONG_ABOUT, SETTINGS_LONG_ABOUT, SHOW_LONG_ABOUT, UP_LONG_ABOUT,
+    };
+
+    /// Format a help page with a short description, usage line, and long about.
+    pub fn page(short_desc: &str, usage: &str, long_about: &str) -> String {
+        format!(
+            "{short_desc}\n\n{}{usage}\n\n{long_about}\n",
+            "Usage: ".bold(),
+        )
+    }
+
+    /// Format a help page that includes a column-aligned Options section.
+    pub fn page_with_options(
+        short_desc: &str,
+        usage: &str,
+        long_about: &str,
+        options: &[(&str, &str)],
+    ) -> String {
+        let mut out = page(short_desc, usage, long_about);
+        if !options.is_empty() {
+            out.push_str(&format!("\n{}\n", "Options:".bold()));
+            let max_label = options
+                .iter()
+                .map(|(label, _)| label.len())
+                .max()
+                .unwrap_or(0);
+            for (label, desc) in options {
+                let pad = " ".repeat(max_label - label.len());
+                out.push_str(&format!("  {}{pad}  {desc}\n", label.bold()));
+            }
+        }
+        out
+    }
+
+    pub fn render_add() -> String {
+        page_with_options(
+            "Save a skill from stdin",
+            "creft add [OPTIONS]",
+            ADD_LONG_ABOUT,
+            &[
+                ("--name <name>", "Override the skill name from frontmatter"),
+                ("--description <desc>", "Override the skill description"),
+                (
+                    "--arg <name:desc>",
+                    "Add or override an argument definition",
+                ),
+                ("--tag <tag>", "Add a tag to the skill"),
+                ("--force", "Overwrite an existing skill without prompting"),
+                ("--no-validate", "Skip validation checks"),
+                ("--global, -g", "Save to global ~/.creft/ storage"),
+            ],
+        )
+    }
+
+    pub fn render_list() -> String {
+        page_with_options(
+            "List available skills",
+            "creft list [NAMESPACE...] [OPTIONS]",
+            LIST_LONG_ABOUT,
+            &[
+                ("--tag <tag>", "Filter by tag"),
+                ("--all", "Flat list without namespace grouping"),
+            ],
+        )
+    }
+
+    pub fn render_show() -> String {
+        page_with_options(
+            "Show a skill's full definition",
+            "creft show <skill> [OPTIONS]",
+            SHOW_LONG_ABOUT,
+            &[("--blocks", "Print only the executable code blocks")],
+        )
+    }
+
+    pub fn render_remove() -> String {
+        page_with_options(
+            "Delete a skill",
+            "creft remove <skill> [OPTIONS]",
+            REMOVE_LONG_ABOUT,
+            &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_plugin() -> String {
+        page(
+            "Manage skill collections",
+            "creft plugin <subcommand> [OPTIONS]",
+            PLUGIN_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_install() -> String {
+        page_with_options(
+            "Install a plugin from a git repository",
+            "creft plugin install <source> [OPTIONS]",
+            PLUGIN_INSTALL_LONG_ABOUT,
+            &[(
+                "--plugin <name>",
+                "Install only a specific plugin from a multi-plugin repo",
+            )],
+        )
+    }
+
+    pub fn render_plugin_update() -> String {
+        page(
+            "Update installed plugins",
+            "creft plugin update [name]",
+            PLUGIN_UPDATE_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_uninstall() -> String {
+        page(
+            "Remove an installed plugin",
+            "creft plugin uninstall <name>",
+            PLUGIN_UNINSTALL_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_activate() -> String {
+        page_with_options(
+            "Make commands from an installed plugin available in a scope",
+            "creft plugin activate <target> [OPTIONS]",
+            PLUGIN_ACTIVATE_LONG_ABOUT,
+            &[(
+                "--global, -g",
+                "Activate globally (~/.creft/plugins/settings.json)",
+            )],
+        )
+    }
+
+    pub fn render_plugin_deactivate() -> String {
+        page_with_options(
+            "Remove plugin commands from a scope",
+            "creft plugin deactivate <target> [OPTIONS]",
+            PLUGIN_DEACTIVATE_LONG_ABOUT,
+            &[("--global, -g", "Deactivate from global scope")],
+        )
+    }
+
+    pub fn render_plugin_list() -> String {
+        page(
+            "List installed plugins or commands in a plugin",
+            "creft plugin list [name]",
+            PLUGIN_LIST_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_search() -> String {
+        page(
+            "Search for commands across installed plugins",
+            "creft plugin search <query...>",
+            PLUGIN_SEARCH_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_settings() -> String {
+        page(
+            "Manage settings",
+            "creft settings <subcommand>",
+            SETTINGS_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_settings_show() -> String {
+        page(
+            "Show current settings",
+            "creft settings show",
+            "Prints all current configuration values.",
+        )
+    }
+
+    pub fn render_settings_set() -> String {
+        page(
+            "Set a configuration value",
+            "creft settings set <key> <value>",
+            "Sets a configuration key to the specified value.\n\nExample:\n  creft settings set shell zsh\n  creft settings set shell none    Disable shell preference",
+        )
+    }
+
+    pub fn render_up() -> String {
+        page_with_options(
+            "Install creft for your coding AI",
+            "creft up [system] [OPTIONS]",
+            UP_LONG_ABOUT,
+            &[(
+                "--global, -g",
+                "Install globally (~/.claude/skills/creft/ etc.)",
+            )],
+        )
+    }
+
+    pub fn render_init() -> String {
+        page(
+            "Initialize local skill storage",
+            "creft init",
+            INIT_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_doctor() -> String {
+        page(
+            "Check environment and skill health",
+            "creft doctor [skill]",
+            DOCTOR_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_completions() -> String {
+        page(
+            "Generate shell completions",
+            "creft completions <shell>",
+            COMPLETIONS_LONG_ABOUT,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn builtins_returns_ten_entries() {
+        assert_eq!(builtins().len(), 10);
+    }
+
+    #[test]
+    fn builtins_sorted_alphabetically() {
+        let names: Vec<&str> = builtins().iter().map(|e| e.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "builtin entries must be alphabetically sorted"
+        );
+    }
+
+    #[test]
+    fn builtins_descriptions_under_50_chars() {
+        for entry in builtins() {
+            assert!(
+                entry.description.len() < 50,
+                "builtin '{}' description '{}' is {} chars, must be under 50",
+                entry.name,
+                entry.description,
+                entry.description.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn builtins_descriptions_non_empty() {
+        for entry in builtins() {
+            assert!(
+                !entry.description.is_empty(),
+                "builtin '{}' must have a non-empty description",
+                entry.name,
+            );
+        }
+    }
+
+    #[test]
+    fn builtins_contains_expected_commands() {
+        let names: Vec<&str> = builtins().iter().map(|e| e.name).collect();
+        let expected = [
+            "add",
+            "completions",
+            "doctor",
+            "init",
+            "list",
+            "plugin",
+            "remove",
+            "settings",
+            "show",
+            "up",
+        ];
+        for cmd in &expected {
+            assert!(
+                names.contains(cmd),
+                "builtins() must contain '{cmd}', got: {names:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_version_matches_cargo_pkg_version() {
+        let version = render_version();
+        assert!(
+            version.starts_with("creft "),
+            "version must start with 'creft ', got: {version:?}",
+        );
+        assert!(
+            version.contains(env!("CARGO_PKG_VERSION")),
+            "version must contain CARGO_PKG_VERSION",
+        );
+    }
+
+    #[test]
+    fn render_add_contains_usage_line() {
+        yansi::disable();
+        let output = render(BuiltinHelp::Add);
+        yansi::enable();
+        assert!(
+            output.contains("Usage: creft add"),
+            "render(Add) must contain 'Usage: creft add', got: {output:?}",
+        );
+    }
+
+    #[test]
+    fn render_show_contains_blocks_flag() {
+        yansi::disable();
+        let output = render(BuiltinHelp::Show);
+        yansi::enable();
+        assert!(
+            output.contains("--blocks"),
+            "render(Show) must document --blocks flag, got: {output:?}",
+        );
+    }
+
+    #[test]
+    fn all_renders_contain_usage_line() {
+        yansi::disable();
+        let variants = [
+            BuiltinHelp::Add,
+            BuiltinHelp::List,
+            BuiltinHelp::Show,
+            BuiltinHelp::Remove,
+            BuiltinHelp::Plugin,
+            BuiltinHelp::PluginInstall,
+            BuiltinHelp::PluginUpdate,
+            BuiltinHelp::PluginUninstall,
+            BuiltinHelp::PluginActivate,
+            BuiltinHelp::PluginDeactivate,
+            BuiltinHelp::PluginList,
+            BuiltinHelp::PluginSearch,
+            BuiltinHelp::Settings,
+            BuiltinHelp::SettingsShow,
+            BuiltinHelp::SettingsSet,
+            BuiltinHelp::Up,
+            BuiltinHelp::Init,
+            BuiltinHelp::Doctor,
+            BuiltinHelp::Completions,
+        ];
+        for variant in variants {
+            let output = render(variant);
+            assert!(
+                output.contains("Usage:"),
+                "render({variant:?}) must contain a Usage: line, got: {output:?}",
+            );
+        }
+        yansi::enable();
+    }
+
+    #[test]
+    fn render_disabled_produces_no_ansi() {
+        yansi::disable();
+        let output = render(BuiltinHelp::Add);
+        yansi::enable();
+        assert!(
+            !output.contains("\x1b["),
+            "render with yansi disabled must not contain ANSI escapes",
+        );
+    }
+
+    #[test]
+    fn render_enabled_produces_ansi_bold_on_headers() {
+        yansi::enable();
+        let output = render(BuiltinHelp::Add);
+        assert!(
+            output.contains("\x1b["),
+            "render with yansi enabled must contain ANSI escapes on section headers",
+        );
+    }
+
+    #[test]
+    fn no_output_contains_built_in_tag() {
+        yansi::disable();
+        let variants = [
+            BuiltinHelp::Add,
+            BuiltinHelp::List,
+            BuiltinHelp::Show,
+            BuiltinHelp::Remove,
+            BuiltinHelp::Plugin,
+            BuiltinHelp::Settings,
+            BuiltinHelp::Up,
+            BuiltinHelp::Init,
+            BuiltinHelp::Doctor,
+            BuiltinHelp::Completions,
+        ];
+        for variant in variants {
+            let output = render(variant);
+            assert!(
+                !output.contains("(built-in)"),
+                "render({variant:?}) must not contain '(built-in)', got: {output:?}",
+            );
+        }
+        yansi::enable();
+    }
+}

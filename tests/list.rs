@@ -7,7 +7,10 @@ use predicates::prelude::*;
 
 // ── list tests ────────────────────────────────────────────────────────────────
 
-/// `creft list` with an empty store reports that no commands exist.
+/// `creft list` with an empty skill store renders the Commands: section without a Skills: section.
+///
+/// Even with no user skills the root listing is always shown — the Skills: section is omitted
+/// when the store is empty, but the Commands: section (built-in commands) always appears.
 #[test]
 fn test_list_empty() {
     let dir = creft_env();
@@ -15,7 +18,9 @@ fn test_list_empty() {
         .args(["cmd", "list"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("no commands found"));
+        .stdout(predicate::str::contains("Commands:"))
+        .stdout(predicate::str::contains("Skills:").not())
+        .stderr(predicate::str::is_empty());
 }
 
 /// After adding two commands, `creft list` shows both names.
@@ -315,7 +320,7 @@ fn test_list_namespace_with_nonexistent_tag() {
 
     let stderr = String::from_utf8_lossy(&output.get_output().stderr);
     assert!(
-        stderr.contains("no commands found. use 'creft cmd add' to create one."),
+        stderr.contains("no commands found. use 'creft add' to create one."),
         "expected generic empty message; got: {stderr:?}"
     );
     assert!(
@@ -766,7 +771,7 @@ fn test_list_shows_footer_with_namespaces() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "See 'creft <skill> --help' for details.",
+            "See 'creft <command> --help' for details.",
         ));
 }
 
@@ -818,7 +823,7 @@ fn test_list_footer_always_shown_at_root() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "See 'creft <skill> --help' for details.",
+            "See 'creft <command> --help' for details.",
         ));
 }
 
@@ -1423,7 +1428,10 @@ fn test_list_namespace_without_leaf_no_subskill_annotation() {
     );
 }
 
-/// `creft list` on empty store shows no "Skills:" header — early return fires first.
+/// `creft list` on empty store shows Commands: but no Skills: section.
+///
+/// When no user skills are installed the root listing renders the built-in Commands:
+/// section and omits the Skills: section entirely.
 #[test]
 fn test_list_empty_no_header() {
     let dir = creft_env();
@@ -1439,8 +1447,12 @@ fn test_list_empty_no_header() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("no commands found"),
-        "empty list should print 'no commands found' to stderr; got: {stderr:?}"
+        stdout.contains("Commands:"),
+        "empty list should print Commands: header; got: {stdout:?}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "empty list should produce no stderr output; got: {stderr:?}"
     );
     assert!(
         !stdout.contains("Skills:"),

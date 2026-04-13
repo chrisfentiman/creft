@@ -5,7 +5,7 @@ use yansi::Paint;
 
 use crate::error::CreftError;
 use crate::model::AppContext;
-use crate::{frontmatter, markdown, model, store, validate};
+use crate::{frontmatter, help, markdown, model, store, style, validate};
 
 /// Maximum description characters shown in list output.
 /// Matches the visual width used by cargo's command listing.
@@ -111,15 +111,7 @@ pub fn cmd_list(
     show_all: bool,
     namespace: Vec<String>,
 ) -> Result<(), CreftError> {
-    use std::collections::{HashMap, HashSet};
-
     let all = store::list_all_with_source(ctx)?;
-
-    if all.is_empty() {
-        eprintln!("no commands found. use 'creft cmd add' to create one.");
-        return Ok(());
-    }
-
     let prefix: Vec<&str> = namespace.iter().map(|s| s.as_str()).collect();
 
     // Check the unfiltered list so a tag filter that empties a valid namespace doesn't
@@ -147,11 +139,6 @@ pub fn cmd_list(
         all
     };
 
-    if tag_filtered.is_empty() {
-        eprintln!("no commands found. use 'creft cmd add' to create one.");
-        return Ok(());
-    }
-
     // Suppress hidden commands unless the user explicitly named a hidden prefix or
     // passed --all (which opts into seeing everything).
     let explicit_hidden = prefix.iter().any(|p| p.starts_with('_'));
@@ -165,6 +152,7 @@ pub fn cmd_list(
     };
 
     if show_all {
+        // Flat listing: render all skills without grouping.
         let flat: Vec<_> = if prefix.is_empty() {
             visible
         } else {
@@ -182,7 +170,7 @@ pub fn cmd_list(
         };
 
         if flat.is_empty() {
-            eprintln!("no commands found. use 'creft cmd add' to create one.");
+            eprintln!("no commands found. use 'creft add' to create one.");
             return Ok(());
         }
 
@@ -201,29 +189,144 @@ pub fn cmd_list(
 
     let entries = store::group_by_namespace(visible, &prefix);
 
-    if entries.is_empty() {
-        eprintln!("no commands found. use 'creft cmd add' to create one.");
-        return Ok(());
-    }
-
     if prefix.is_empty() {
-        println!("{}", crate::help::ROOT_ABOUT.bold());
-        println!();
-        println!("{}creft <skill> [ARGS] [OPTIONS]", "Usage: ".bold());
-        println!();
-        println!("{}", "Skills:".bold());
+        // Root listing: Commands: section + Skills: section with truncation.
+        print_root_listing(&entries, /* display_limit */ compute_display_limit());
     } else {
+        // Namespace drill-in: skills in the requested namespace only, no builtins.
+        if entries.is_empty() {
+            eprintln!("no commands found. use 'creft add' to create one.");
+            return Ok(());
+        }
         let header = format!("Skills in '{}':", prefix.join(" "));
         println!("{}", header.as_str().bold());
+        println!();
+        print_skill_entries(&entries, &prefix, None);
     }
+
+    Ok(())
+}
+
+/// Compute the display limit for the Skills section based on terminal height.
+///
+/// Returns `None` when stdout is not a TTY (no truncation for piped output).
+fn compute_display_limit() -> Option<usize> {
+    let rows = style::terminal_rows()?;
+    // ~20 lines consumed by tagline, usage, Commands: header, 10 builtins, blank
+    // lines, Skills: header, flags, footer.
+    let limit = (rows as usize).saturating_sub(20).max(20);
+    Some(limit)
+}
+
+/// Print the root listing: tagline, usage, Commands: section, then Skills: section.
+fn print_root_listing(entries: &[model::NamespaceEntry], display_limit: Option<usize>) {
+    println!("{}", help::ROOT_ABOUT.bold());
     println!();
+    println!("{}creft <command> [ARGS] [OPTIONS]", "Usage: ".bold());
+    println!();
+
+    // Commands: section — fixed list of builtins, always shown in full.
+    println!("{}", "Commands:".bold());
+    let builtins = help::builtins();
+    let max_builtin_name = builtins.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    for entry in builtins {
+        let pad = " ".repeat(max_builtin_name - entry.name.len());
+        println!("  {}{}  {}", entry.name.bold(), pad, entry.description);
+    }
+
+    if entries.is_empty() {
+        // No skills installed — omit the Skills: section entirely.
+        println!();
+        print_global_flags(max_builtin_name);
+        println!();
+        println!("See 'creft <command> --help' for details.");
+        return;
+    }
+
+    // Skills: section.
+    println!();
+    println!("{}", "Skills:".bold());
+    println!();
+
+    let empty_prefix: &[&str] = &[];
+    let total = count_visible_entries(entries);
+    let limit = display_limit.unwrap_or(usize::MAX);
+
+    print_skill_entries_limited(entries, empty_prefix, limit);
+
+    if total > limit {
+        println!("  (showing {limit} of {total} — use 'creft list --all' to see all)");
+    }
+
+    println!();
+    print_global_flags(max_builtin_name);
+    println!();
+    println!("See 'creft <command> --help' for details.");
+}
+
+/// Count the number of visible (non-suppressed) entries in a namespace group.
+fn count_visible_entries(entries: &[model::NamespaceEntry]) -> usize {
+    use std::collections::HashSet;
+
+    let mut leaf_names: HashSet<&str> = HashSet::new();
+    for entry in entries {
+        if let model::NamespaceEntry::Skill(def, _) = entry {
+            let parts = def.name_parts();
+            if let Some(relative) = parts.first() {
+                leaf_names.insert(relative);
+            }
+        }
+    }
+
+    entries
+        .iter()
+        .filter(|e| match e {
+            model::NamespaceEntry::Skill(_, _) => true,
+            model::NamespaceEntry::Namespace { name, .. } => {
+                let relative = name.split_whitespace().next_back().unwrap_or(name.as_str());
+                !leaf_names.contains(relative)
+            }
+        })
+        .count()
+}
+
+/// Print the global flags below the Skills section.
+fn print_global_flags(col_width: usize) {
+    let pad = " ".repeat(col_width.saturating_sub("--dry-run".len()));
+    println!(
+        "  --dry-run{}       Show rendered blocks, do not execute",
+        pad
+    );
+    let pad2 = " ".repeat(col_width.saturating_sub("--verbose, -v".len()));
+    println!(
+        "  --verbose, -v{}   Show rendered blocks on stderr, then execute",
+        pad2
+    );
+}
+
+/// Print skill entries for a namespace drill-in (no truncation applied here;
+/// caller passes `None` to disable truncation).
+fn print_skill_entries(
+    entries: &[model::NamespaceEntry],
+    prefix: &[&str],
+    _display_limit: Option<usize>,
+) {
+    print_skill_entries_limited(entries, prefix, usize::MAX);
+}
+
+/// Print skill entries up to `limit`, applying column alignment.
+///
+/// When a leaf skill and a namespace share the same relative name the namespace
+/// entry is suppressed and the leaf is annotated with `[N subskills]`.
+fn print_skill_entries_limited(entries: &[model::NamespaceEntry], prefix: &[&str], limit: usize) {
+    use std::collections::{HashMap, HashSet};
 
     // When a leaf skill and a namespace share the same relative name, suppress
     // the namespace entry and annotate the leaf with "[N subskills]" instead.
     let mut namespace_map: HashMap<String, (usize, Option<String>)> = HashMap::new();
     let mut leaf_names: HashSet<String> = HashSet::new();
 
-    for entry in &entries {
+    for entry in entries {
         match entry {
             model::NamespaceEntry::Namespace {
                 name,
@@ -263,7 +366,11 @@ pub fn cmd_list(
         .max()
         .unwrap_or(0);
 
-    for entry in &entries {
+    let mut printed = 0;
+    for entry in entries {
+        if printed >= limit {
+            break;
+        }
         match entry {
             model::NamespaceEntry::Skill(def, source) => {
                 let desc = format_skill_desc(def, source, LIST_DESC_MAX);
@@ -280,6 +387,7 @@ pub fn cmd_list(
                 };
                 let pad = " ".repeat(max_name - def.name.len());
                 println!("  {}{}  {desc}{suffix}", def.name.as_str().bold(), pad);
+                printed += 1;
             }
             model::NamespaceEntry::Namespace {
                 name,
@@ -298,16 +406,10 @@ pub fn cmd_list(
                     name.as_str().bold(),
                     pad,
                 );
+                printed += 1;
             }
         }
     }
-
-    if prefix.is_empty() {
-        println!();
-        println!("See 'creft <skill> --help' for details.");
-    }
-
-    Ok(())
 }
 
 pub fn cmd_show(ctx: &AppContext, name: &str) -> Result<(), CreftError> {
