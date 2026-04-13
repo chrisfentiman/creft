@@ -603,4 +603,3 @@ fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     })?;
     Ok(Parsed::Command(Command::Completions { shell }))
 }
-

@@ -8,8 +8,18 @@ use crate::model::{AppContext, CommandDef, NamespaceEntry, ParsedCommand, Scope,
 use crate::registry::{self, ActivationEntry};
 
 const RESERVED: &[&str] = &[
-    "add", "list", "show", "remove", "plugin", "settings", "up", "help", "version", "init",
-    "doctor", "completions",
+    "add",
+    "list",
+    "show",
+    "remove",
+    "plugin",
+    "settings",
+    "up",
+    "help",
+    "version",
+    "init",
+    "doctor",
+    "completions",
 ];
 
 /// Returns `true` if `name` is a built-in creft subcommand that cannot be used as a skill name.

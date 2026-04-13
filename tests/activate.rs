@@ -14,7 +14,7 @@ use tempfile::TempDir;
 /// Install a plugin to `creft_home` using `creft plugin install`.
 fn install_plugin(creft_home: &TempDir, pkg_repo: &TempDir) {
     helpers::creft_with(creft_home)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 }
@@ -173,7 +173,7 @@ fn activate_without_global_writes_to_local_scope() {
     // Install the plugin (always global).
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
@@ -213,7 +213,7 @@ fn activate_with_global_flag_writes_to_global_scope() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
@@ -241,7 +241,7 @@ fn local_activation_is_visible_from_project_scope() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
@@ -268,7 +268,7 @@ fn deactivate_without_global_removes_from_all_scopes() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
@@ -303,7 +303,7 @@ fn deactivate_with_global_flag_removes_only_from_global() {
 
     let pkg_repo = create_test_package("my-tools", &[("hello.md", HELLO_SKILL)]);
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 

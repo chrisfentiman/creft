@@ -210,7 +210,7 @@ fn test_scope_plugin_install_always_global() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -249,7 +249,7 @@ fn test_scope_plugin_install_never_uses_local_scope() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -285,13 +285,13 @@ fn test_scope_deprecated_update_forwards_to_plugin_update() {
 
     // Install via the plugins namespace (always global).
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Update via the plugins namespace.
     creft_two_scope(&env)
-        .args(["plugin", "update","updatable-pkg"])
+        .args(["plugin", "update", "updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -314,13 +314,13 @@ fn test_scope_update_finds_global_package() {
 
     // Install to global plugins cache.
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     // Update should find the plugin in the global cache and succeed.
     creft_two_scope(&env)
-        .args(["plugin", "update","global-updatable-pkg"])
+        .args(["plugin", "update", "global-updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -345,12 +345,12 @@ fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["plugin", "uninstall","local-removable-pkg"])
+        .args(["plugin", "uninstall", "local-removable-pkg"])
         .assert()
         .success();
 
@@ -375,12 +375,12 @@ fn test_scope_uninstall_finds_global_package() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["plugin", "install",pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["plugin", "uninstall","global-removable-pkg"])
+        .args(["plugin", "uninstall", "global-removable-pkg"])
         .assert()
         .success();
 
