@@ -110,7 +110,7 @@ pub fn detect_systems(dir: &Path) -> Vec<System> {
     if dir.join(".aider.conf.yml").exists() || dir.join("CONVENTIONS.md").exists() {
         found.push(System::Aider);
     }
-    if dir.join(".github").exists() {
+    if dir.join(".github/copilot-instructions.md").exists() {
         found.push(System::Copilot);
     }
     if dir.join("AGENTS.md").exists() || dir.join(".codex").exists() {
@@ -1119,7 +1119,12 @@ mod tests {
     #[case::windsurf_rules_file(".windsurfrules", false, System::Windsurf, "rules")]
     #[case::aider_conf_file(".aider.conf.yml", false, System::Aider, "model: gpt-4")]
     #[case::aider_conventions_file("CONVENTIONS.md", false, System::Aider, "# conventions")]
-    #[case::copilot_github_directory(".github", true, System::Copilot, "")]
+    #[case::copilot_instructions_file(
+        ".github/copilot-instructions.md",
+        false,
+        System::Copilot,
+        "# copilot"
+    )]
     #[case::codex_agents_file("AGENTS.md", false, System::Codex, "# agents")]
     #[case::codex_directory(".codex", true, System::Codex, "")]
     #[case::claude_code_directory(".claude", true, System::ClaudeCode, "")]
@@ -1134,12 +1139,32 @@ mod tests {
         if is_dir {
             std::fs::create_dir(&path).unwrap();
         } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
             std::fs::write(&path, content).unwrap();
         }
         let detected = detect_systems(dir.path());
         assert!(
             detected.contains(&expected),
             "expected {expected:?} to be detected via {marker}"
+        );
+    }
+
+    #[test]
+    fn detect_systems_github_directory_alone_does_not_trigger_copilot() {
+        // Every GitHub-hosted repo has .github/; creft must not auto-install
+        // Copilot instructions just because .github/ exists. Only the presence
+        // of .github/copilot-instructions.md signals explicit Copilot use.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".github")).unwrap();
+        // Also create a common subdirectory that is present in virtually every repo.
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(dir.path().join(".github/workflows/ci.yml"), "name: CI\n").unwrap();
+        let detected = detect_systems(dir.path());
+        assert!(
+            !detected.contains(&System::Copilot),
+            ".github directory alone must not trigger Copilot detection"
         );
     }
 
