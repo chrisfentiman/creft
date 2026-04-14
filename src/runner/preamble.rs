@@ -39,7 +39,18 @@ creft_print() {
   printf '{"type":"print","message":"%s"}\n' "$(_creft_escape "$1")" >&3 2>/dev/null
 }
 creft_status() {
-  printf '{"type":"status","message":"%s"}\n' "$(_creft_escape "$1")" >&3 2>/dev/null
+  local _progress=""
+  if [ -n "$2" ]; then
+    case "$2" in
+      *[!0-9]*|'') ;;
+      *)
+        local _p="$2"
+        [ "$_p" -gt 100 ] 2>/dev/null && _p=100
+        _progress=",\"progress\":$_p"
+        ;;
+    esac
+  fi
+  printf '{"type":"status","message":"%s"%s}\n' "$(_creft_escape "$1")" "$_progress" >&3 2>/dev/null
 }
 creft_prompt() {
   local _creft_id
@@ -79,8 +90,11 @@ def _creft_write(obj):
         pass
 def creft_print(message):
     _creft_write({"type": "print", "message": str(message)})
-def creft_status(message):
-    _creft_write({"type": "status", "message": str(message)})
+def creft_status(message, progress=None):
+    obj = {"type": "status", "message": str(message)}
+    if progress is not None:
+        obj["progress"] = max(0, min(100, int(progress)))
+    _creft_write(obj)
 def creft_prompt(question, choices=""):
     global _creft_fd4
     _id = f"prompt_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
@@ -114,7 +128,13 @@ function _creft_write(obj) {
   try { _creft_fs.writeSync(3, JSON.stringify(obj) + '\n'); } catch(e) {}
 }
 function creft_print(message) { _creft_write({type:'print',message:String(message)}); }
-function creft_status(message) { _creft_write({type:'status',message:String(message)}); }
+function creft_status(message, progress) {
+  const obj = {type:'status', message:String(message)};
+  if (typeof progress === 'number') {
+    obj.progress = Math.max(0, Math.min(100, Math.floor(progress)));
+  }
+  _creft_write(obj);
+}
 function creft_prompt(question, choices) {
   if (!_creft_fs) return '';
   const id = `prompt_${process.pid}_${Math.random().toString(36).slice(2)}`;
@@ -240,5 +260,46 @@ mod tests {
             let p = for_language(lang).unwrap();
             assert!(p.ends_with('\n'), "{lang} preamble must end with newline");
         }
+    }
+
+    /// Bash preamble contains the digit-only guard that rejects non-numeric $2.
+    ///
+    /// The guard (`*[!0-9]*`) ensures non-numeric input falls through to spinner
+    /// mode rather than producing bare unquoted text in the JSON.
+    #[test]
+    fn bash_preamble_has_digit_guard_for_progress() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(
+            p.contains("*[!0-9]*"),
+            "bash preamble must contain digit-only guard *[!0-9]*"
+        );
+        assert!(
+            p.contains("_progress"),
+            "bash preamble must contain _progress local variable"
+        );
+    }
+
+    /// Python preamble's creft_status accepts an optional progress parameter.
+    #[test]
+    fn python_preamble_creft_status_accepts_progress_param() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(
+            p.contains("def creft_status(message, progress=None)"),
+            "python creft_status must accept progress=None"
+        );
+    }
+
+    /// Node preamble's creft_status accepts a second parameter.
+    #[test]
+    fn node_preamble_creft_status_accepts_progress_param() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("function creft_status(message, progress)"),
+            "node creft_status must accept a second progress parameter"
+        );
+        assert!(
+            p.contains("typeof progress === 'number'"),
+            "node creft_status must guard progress with typeof check"
+        );
     }
 }

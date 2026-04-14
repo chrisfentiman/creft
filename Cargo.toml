@@ -26,6 +26,7 @@ regex = "1"
 tempfile = "3"
 shell-escape = "0.1"
 ureq = "3"
+indicatif = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

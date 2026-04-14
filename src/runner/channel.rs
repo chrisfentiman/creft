@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal as _, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 /// File descriptor number for the block → creft message channel.
 pub(super) const CONTROL_FD: i32 = 3;
@@ -154,7 +155,13 @@ pub(crate) enum ChannelMessage {
     #[serde(rename = "print")]
     Print { message: String },
     #[serde(rename = "status")]
-    Status { message: String },
+    Status {
+        message: String,
+        /// Percentage 0-100. Absent in the JSON (`serde(default)`) means
+        /// spinner mode; present means progress bar mode.
+        #[serde(default)]
+        progress: Option<u8>,
+    },
     #[serde(rename = "prompt")]
     Prompt {
         id: String,
@@ -163,16 +170,38 @@ pub(crate) enum ChannelMessage {
     },
 }
 
+/// The currently active terminal indicator, if any.
+///
+/// indicatif's `ProgressBar` can serve as both a spinner (no length) and a
+/// progress bar (fixed length). We distinguish them so that switching modes
+/// — e.g. a spinner followed by a progress message — finishes the old
+/// indicator before creating the new one. Reusing a single `ProgressBar` by
+/// swapping its length mid-flight is not reliable with indicatif.
+enum ActiveIndicator {
+    /// Animated braille spinner driven by indicatif's steady tick.
+    Spinner(indicatif::ProgressBar),
+    /// Percentage-based progress bar (0-100).
+    Progress(indicatif::ProgressBar),
+}
+
+impl ActiveIndicator {
+    /// The inner `ProgressBar`, regardless of mode.
+    fn bar(&self) -> &indicatif::ProgressBar {
+        match self {
+            Self::Spinner(pb) | Self::Progress(pb) => pb,
+        }
+    }
+}
+
 /// State behind the `TerminalWriter` mutex.
 ///
-/// Combining `has_status` and `stderr` in a single lock means that
-/// clearing a status line and writing the next message are atomic.
-/// Two separate locks would allow a concurrent thread to write between
-/// the status clear and the new content.
+/// Combining `indicator` and `stderr` in a single lock means that finishing
+/// an indicator and writing the next message are atomic — no concurrent
+/// thread can write between the two operations.
 struct TerminalWriterInner {
     stderr: std::io::Stderr,
-    /// True when a status line has been written and not yet cleared.
-    has_status: bool,
+    /// The currently active spinner or progress bar, if any.
+    indicator: Option<ActiveIndicator>,
 }
 
 /// Serialises terminal output from multiple concurrent reader threads.
@@ -196,13 +225,23 @@ pub(crate) struct TerminalWriter {
     is_tty: bool,
 }
 
+/// Finish and clear any active indicator inside an already-locked guard.
+///
+/// Called by `clear_status()` and `handle_prompt`. Centralising the logic
+/// avoids duplicating the `finish_and_clear` + `indicator = None` pattern.
+fn clear_indicator_locked(inner: &mut TerminalWriterInner) {
+    if let Some(indicator) = inner.indicator.take() {
+        indicator.bar().finish_and_clear();
+    }
+}
+
 impl TerminalWriter {
     pub(crate) fn new() -> Self {
         let is_tty = std::io::stderr().is_terminal();
         Self {
             inner: std::sync::Mutex::new(TerminalWriterInner {
                 stderr: std::io::stderr(),
-                has_status: false,
+                indicator: None,
             }),
             is_tty,
         }
@@ -210,15 +249,15 @@ impl TerminalWriter {
 
     /// Construct a `TerminalWriter` with an explicit TTY override.
     ///
-    /// Used in tests to exercise TTY-gated paths (status, clear_status)
-    /// without requiring the test process to run with a real TTY attached
-    /// to stderr.
+    /// Used in tests to exercise TTY-gated paths (status, progress,
+    /// clear_status) without requiring the test process to run with a real
+    /// TTY attached to stderr.
     #[cfg(test)]
     fn with_tty(is_tty: bool) -> Self {
         Self {
             inner: std::sync::Mutex::new(TerminalWriterInner {
                 stderr: std::io::stderr(),
-                has_status: false,
+                indicator: None,
             }),
             is_tty,
         }
@@ -226,31 +265,34 @@ impl TerminalWriter {
 
     /// Write a print message to stderr.
     ///
-    /// Clears any active status line first so the print text appears on a
-    /// clean line. After writing, `has_status` is false. Always renders,
-    /// regardless of TTY state.
+    /// Suspends any active indicator so the printed line appears cleanly
+    /// without interleaving with spinner or progress bar rendering. Always
+    /// renders regardless of TTY state.
     pub(crate) fn print(&self, message: &str) {
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
-        if g.has_status {
-            // Carriage-return + spaces clears the status line content.
-            let _ = write!(g.stderr, "\r{:width$}\r", "", width = 80);
-            g.has_status = false;
+        if let Some(ref indicator) = g.indicator {
+            // Clone the bar before calling suspend: we need an immutable borrow
+            // of `g.indicator` to get the bar, but the closure passed to
+            // `suspend` needs to borrow `g.stderr` mutably. Cloning is a
+            // refcount increment — `ProgressBar` is internally `Arc`-based.
+            let pb = indicator.bar().clone();
+            pb.suspend(|| {
+                let _ = writeln!(g.stderr, "{message}");
+            });
+        } else {
+            let _ = writeln!(g.stderr, "{message}");
         }
-        let _ = writeln!(g.stderr, "{message}");
     }
 
-    /// Write a status line that will be overwritten by the next status.
+    /// Show or update an animated spinner with the given message.
     ///
-    /// Uses `\r` to move to the start of the current line, clears it with
-    /// spaces, then writes the new message without a trailing newline so the
-    /// next status can overwrite it. When a print message arrives afterwards,
-    /// `print` clears this line first.
+    /// Creates the spinner on the first call; subsequent calls update the
+    /// message in place. If a progress bar is currently active, it is
+    /// finished and replaced with a spinner.
     ///
-    /// Silently dropped when stderr is not a TTY. Status messages are
-    /// ephemeral visual feedback; in non-TTY contexts (piped output, CI,
-    /// agent subprocess) they would appear as garbled escape sequences.
+    /// Silently dropped when stderr is not a TTY.
     pub(crate) fn status(&self, message: &str) {
         if !self.is_tty {
             return;
@@ -258,26 +300,76 @@ impl TerminalWriter {
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
-        // Clear any previous status content before writing the new one.
-        let _ = write!(g.stderr, "\r{:width$}\r{message}", "", width = 80);
-        g.has_status = true;
+        match g.indicator {
+            Some(ActiveIndicator::Spinner(ref pb)) => {
+                pb.set_message(message.to_owned());
+                return;
+            }
+            Some(ActiveIndicator::Progress(ref pb)) => {
+                pb.finish_and_clear();
+            }
+            None => {}
+        }
+        // Create a new spinner.
+        let pb = indicatif::ProgressBar::new_spinner()
+            .with_style(indicatif::ProgressStyle::default_spinner())
+            .with_message(message.to_owned());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        g.indicator = Some(ActiveIndicator::Spinner(pb));
     }
 
-    /// Clear the active status line, if any.
+    /// Show or update a progress bar at the given percentage (0-100).
     ///
-    /// Called when the block exits so no stale status line remains on screen.
-    /// No-op when stderr is not a TTY (status messages are never written there).
-    pub(crate) fn clear_status(&self) {
+    /// Creates the progress bar on the first call; subsequent calls update
+    /// the position and message in place. If a spinner is currently active,
+    /// it is finished and replaced with a progress bar. Values above 100 are
+    /// saturated to 100.
+    ///
+    /// Silently dropped when stderr is not a TTY.
+    pub(crate) fn progress(&self, message: &str, pct: u8) {
         if !self.is_tty {
             return;
         }
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
-        if g.has_status {
-            let _ = write!(g.stderr, "\r{:width$}\r", "", width = 80);
-            g.has_status = false;
+        let pct = pct.min(100) as u64;
+        match g.indicator {
+            Some(ActiveIndicator::Progress(ref pb)) => {
+                pb.set_position(pct);
+                pb.set_message(message.to_owned());
+                return;
+            }
+            Some(ActiveIndicator::Spinner(ref pb)) => {
+                pb.finish_and_clear();
+            }
+            None => {}
         }
+        // Create a new progress bar.
+        //
+        // The template unwrap is safe: the template string is a compile-time
+        // constant with no dynamic user input.
+        let style =
+            indicatif::ProgressStyle::with_template("{msg} [{wide_bar:.cyan/blue}] {percent}%")
+                .expect("progress bar template is a compile-time constant")
+                .progress_chars("━╸─");
+        let pb = indicatif::ProgressBar::new(100)
+            .with_style(style)
+            .with_message(message.to_owned());
+        pb.set_position(pct);
+        g.indicator = Some(ActiveIndicator::Progress(pb));
+    }
+
+    /// Clear any active indicator.
+    ///
+    /// Called when the block exits so no stale spinner or progress bar
+    /// remains on screen. No-op when no indicator is active. No-op when
+    /// stderr is not a TTY (indicators are never created there).
+    pub(crate) fn clear_status(&self) {
+        let Ok(mut g) = self.inner.lock() else {
+            return;
+        };
+        clear_indicator_locked(&mut g);
     }
 }
 
@@ -328,9 +420,10 @@ pub(crate) fn spawn_reader(
                     ChannelMessage::Print { message } => {
                         writer.print(&message);
                     }
-                    ChannelMessage::Status { message } => {
-                        writer.status(&message);
-                    }
+                    ChannelMessage::Status { message, progress } => match progress {
+                        None => writer.status(&message),
+                        Some(pct) => writer.progress(&message, pct),
+                    },
                     ChannelMessage::Prompt {
                         id,
                         question,
@@ -408,11 +501,9 @@ pub(crate) fn handle_prompt(
         return;
     };
 
-    // Clear any active status line before rendering the prompt.
-    if g.has_status {
-        let _ = write!(g.stderr, "\r{:width$}\r", "", width = 80);
-        g.has_status = false;
-    }
+    // Finish any active indicator before rendering the prompt so indicatif's
+    // tick thread does not write over the prompt text.
+    clear_indicator_locked(&mut g);
 
     // Render the prompt question and choices to stderr.
     if choices.is_empty() {
@@ -669,13 +760,62 @@ mod tests {
     }
 
     /// A well-formed status message deserializes to the Status variant.
+    ///
+    /// Backward compatibility: messages without a `progress` field must
+    /// still deserialize — `serde(default)` makes the field optional.
     #[test]
     fn channel_message_status_deserializes() {
         let json = r#"{"type":"status","message":"Loading..."}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
-            super::ChannelMessage::Status { message } => {
+            super::ChannelMessage::Status { message, progress } => {
                 assert_eq!(message, "Loading...");
+                assert_eq!(
+                    progress, None,
+                    "absent progress field must deserialize to None"
+                );
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    /// Status message with progress 50 deserializes to Some(50).
+    #[test]
+    fn channel_message_status_with_progress_deserializes() {
+        let json = r#"{"type":"status","message":"Downloading...","progress":50}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Status { message, progress } => {
+                assert_eq!(message, "Downloading...");
+                assert_eq!(progress, Some(50));
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    /// Status message with progress 0 deserializes to Some(0).
+    #[test]
+    fn channel_message_status_with_progress_zero_deserializes() {
+        let json = r#"{"type":"status","message":"Starting...","progress":0}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Status { message, progress } => {
+                assert_eq!(message, "Starting...");
+                assert_eq!(progress, Some(0));
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    /// Status message with progress 100 deserializes to Some(100).
+    #[test]
+    fn channel_message_status_with_progress_hundred_deserializes() {
+        let json = r#"{"type":"status","message":"Done","progress":100}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Status { message, progress } => {
+                assert_eq!(message, "Done");
+                assert_eq!(progress, Some(100));
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -720,71 +860,146 @@ mod tests {
 
     // ---- TerminalWriter ----
 
-    /// TerminalWriter::print writes the message followed by a newline to stderr.
-    ///
-    /// We can't easily intercept stderr in a unit test, but we can verify the
-    /// call completes without panicking and that has_status is false afterwards.
+    /// TerminalWriter::print completes without panicking regardless of TTY state.
     #[test]
     fn terminal_writer_print_does_not_panic() {
         let tw = super::TerminalWriter::new();
         tw.print("test message");
-        // has_status should be false after a print.
+        // No active indicator after a plain print.
         let g = tw.inner.lock().unwrap();
-        assert!(!g.has_status, "print clears has_status");
+        assert!(g.indicator.is_none(), "print must not create an indicator");
     }
 
-    /// TerminalWriter::status sets has_status to true when stderr is a TTY.
+    /// TerminalWriter::status creates an active indicator when stderr is a TTY.
     ///
-    /// Uses with_tty(true) because test stderr is never a real TTY — without
-    /// the override, status() is a no-op and has_status stays false.
+    /// Uses `with_tty(true)` because test stderr is never a real TTY — without
+    /// the override, status() is a no-op and no indicator is created.
     #[test]
-    fn terminal_writer_status_sets_has_status_when_tty() {
+    fn terminal_writer_status_creates_indicator_when_tty() {
         let tw = super::TerminalWriter::with_tty(true);
         tw.status("Working...");
         let g = tw.inner.lock().unwrap();
-        assert!(g.has_status, "status must set has_status on a TTY");
+        assert!(
+            g.indicator.is_some(),
+            "status must create an active indicator on a TTY"
+        );
     }
 
     /// TerminalWriter::status is a no-op when stderr is not a TTY.
     ///
     /// Status messages are ephemeral visual feedback. In non-TTY contexts
-    /// (piped output, CI, agent subprocess), they would appear as garbled
-    /// escape sequences, so they are silently dropped.
+    /// (piped output, CI, agent subprocess) they are silently dropped.
     #[test]
     fn terminal_writer_status_dropped_when_not_tty() {
         let tw = super::TerminalWriter::with_tty(false);
         tw.status("Working...");
         let g = tw.inner.lock().unwrap();
-        assert!(!g.has_status, "status must not set has_status on non-TTY");
+        assert!(
+            g.indicator.is_none(),
+            "status must not create an indicator on a non-TTY"
+        );
     }
 
-    /// TerminalWriter::clear_status resets has_status after a status call.
+    /// TerminalWriter::clear_status removes the active indicator.
     #[test]
-    fn terminal_writer_clear_status_resets_flag() {
+    fn terminal_writer_clear_status_removes_indicator() {
         let tw = super::TerminalWriter::with_tty(true);
         tw.status("Running");
         tw.clear_status();
         let g = tw.inner.lock().unwrap();
-        assert!(!g.has_status, "clear_status must reset has_status");
+        assert!(
+            g.indicator.is_none(),
+            "clear_status must remove the active indicator"
+        );
     }
 
-    /// clear_status is a no-op when no status is active (must not panic).
+    /// clear_status is a no-op when no indicator is active (must not panic).
     #[test]
     fn terminal_writer_clear_status_noop_when_no_status() {
         let tw = super::TerminalWriter::new();
-        tw.clear_status(); // should not panic
+        tw.clear_status(); // must not panic
         let g = tw.inner.lock().unwrap();
-        assert!(!g.has_status, "has_status must remain false");
+        assert!(
+            g.indicator.is_none(),
+            "indicator must remain None after clear_status with nothing active"
+        );
     }
 
-    /// print clears an active status before writing.
+    /// print completes without panic when a spinner indicator is active.
     #[test]
-    fn terminal_writer_print_clears_active_status() {
+    fn terminal_writer_print_does_not_panic_with_active_indicator() {
         let tw = super::TerminalWriter::with_tty(true);
         tw.status("Pending");
-        tw.print("Done"); // must clear status first
+        tw.print("Done"); // must not panic when indicator is active
+    }
+
+    /// progress creates a progress indicator when stderr is a TTY.
+    #[test]
+    fn terminal_writer_progress_creates_indicator_when_tty() {
+        let tw = super::TerminalWriter::with_tty(true);
+        tw.progress("Downloading...", 50);
         let g = tw.inner.lock().unwrap();
-        assert!(!g.has_status, "print must clear has_status");
+        assert!(
+            g.indicator.is_some(),
+            "progress must create an active indicator on a TTY"
+        );
+    }
+
+    /// progress is a no-op when stderr is not a TTY.
+    #[test]
+    fn terminal_writer_progress_dropped_when_not_tty() {
+        let tw = super::TerminalWriter::with_tty(false);
+        tw.progress("Downloading...", 50);
+        let g = tw.inner.lock().unwrap();
+        assert!(
+            g.indicator.is_none(),
+            "progress must not create an indicator on a non-TTY"
+        );
+    }
+
+    /// Switching from spinner to progress bar does not panic.
+    #[test]
+    fn terminal_writer_spinner_to_progress_does_not_panic() {
+        let tw = super::TerminalWriter::with_tty(true);
+        tw.status("Preparing...");
+        tw.progress("Downloading...", 25); // switch to progress bar
+        let g = tw.inner.lock().unwrap();
+        assert!(
+            g.indicator.is_some(),
+            "a progress indicator must be active after switching from spinner"
+        );
+    }
+
+    /// Switching from progress bar to spinner does not panic.
+    #[test]
+    fn terminal_writer_progress_to_spinner_does_not_panic() {
+        let tw = super::TerminalWriter::with_tty(true);
+        tw.progress("Downloading...", 50);
+        tw.status("Processing..."); // switch to spinner
+        let g = tw.inner.lock().unwrap();
+        assert!(
+            g.indicator.is_some(),
+            "a spinner indicator must be active after switching from progress"
+        );
+    }
+
+    /// progress values above 100 are saturated without panicking.
+    #[test]
+    fn terminal_writer_progress_saturates_above_100() {
+        let tw = super::TerminalWriter::with_tty(true);
+        tw.progress("Overloaded", 200); // saturates to 100
+        let g = tw.inner.lock().unwrap();
+        assert!(
+            g.indicator.is_some(),
+            "saturated progress value must still create an indicator"
+        );
+    }
+
+    /// print does not panic when no indicator is active.
+    #[test]
+    fn terminal_writer_print_does_not_panic_without_indicator() {
+        let tw = super::TerminalWriter::with_tty(true);
+        tw.print("Hello"); // no indicator active
     }
 
     // ---- handle_prompt ----
