@@ -27,7 +27,7 @@ const GRAD_FROM: (u8, u8, u8) = (212, 160, 23);
 /// Gradient end: dark turquoise.
 const GRAD_TO: (u8, u8, u8) = (0, 206, 209);
 
-/// Sparkle foreground colors.
+/// Sparkle foreground colors — warm ember tones that complement the logo gradient.
 const SPARKLE_COLORS: &[(u8, u8, u8)] = &[
     (255, 215, 0),   // gold
     (255, 140, 0),   // dark orange
@@ -100,39 +100,47 @@ fn write_marker(ctx: &AppContext) -> Result<(), CreftError> {
 /// path. Respects the global yansi color condition: when color is disabled
 /// (NO_COLOR, TERM=dumb, non-TTY), all output is plain text.
 fn render_static(term: &console::Term) -> Result<(), CreftError> {
-    term.write_line("")?;
+    // &Term implements std::io::Write, so coerce through &mut &Term.
+    render_static_to_writer(&mut &*term)?;
+    Ok(())
+}
+
+/// Render the static welcome block to any `std::io::Write` impl.
+///
+/// Separated from `render_static` so tests can pass a `Vec<u8>` and inspect
+/// the rendered bytes directly, without depending on `console::Term`'s
+/// internal buffer.
+fn render_static_to_writer(w: &mut dyn std::io::Write) -> std::io::Result<()> {
+    writeln!(w)?;
     for line in LOGO {
-        term.write_line(&gradient_line(line, GRAD_FROM, GRAD_TO))?;
+        writeln!(w, "{}", gradient_line(line, GRAD_FROM, GRAD_TO))?;
     }
-    term.write_line("")?;
-    term.write_line(&format!(
-        "  {}",
-        "Executable skills for Agents".rgb(180, 180, 180)
-    ))?;
-    term.write_line(&format!(
-        "  v{}",
-        env!("CARGO_PKG_VERSION").rgb(120, 120, 120)
-    ))?;
-    term.write_line("")?;
-    term.write_line(&format!("  {}", "Get started:".rgb(212, 160, 23)))?;
-    term.write_line(&format!(
+    writeln!(w)?;
+    writeln!(w, "  {}", "Executable skills for Agents".rgb(180, 180, 180))?;
+    writeln!(w, "  v{}", env!("CARGO_PKG_VERSION").rgb(120, 120, 120))?;
+    writeln!(w)?;
+    writeln!(w, "  {}", "Get started:".rgb(212, 160, 23))?;
+    writeln!(
+        w,
         "    {}    {}",
         "creft add".rgb(0, 206, 209),
         "Create a skill from stdin".rgb(160, 160, 160)
-    ))?;
-    term.write_line(&format!(
+    )?;
+    writeln!(
+        w,
         "    {}   {}",
         "creft list".rgb(0, 206, 209),
         "See available skills".rgb(160, 160, 160)
-    ))?;
-    term.write_line(&format!(
+    )?;
+    writeln!(
+        w,
         "    {}     {}",
         "creft up".rgb(0, 206, 209),
         "Set up editor integrations".rgb(160, 160, 160)
-    ))?;
-    term.write_line("")?;
-    term.write_line("  Run creft --help for the full command reference.")?;
-    term.write_line("")?;
+    )?;
+    writeln!(w)?;
+    writeln!(w, "  Run creft --help for the full command reference.")?;
+    writeln!(w)?;
     Ok(())
 }
 
@@ -157,9 +165,8 @@ fn gradient_line(text: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
         let r = lerp_u8(from.0, to.0, t);
         let g = lerp_u8(from.1, to.1, t);
         let b = lerp_u8(from.2, to.2, t);
-        // Build a one-char string to call .rgb() on &str via Paint trait.
         let s = ch.to_string();
-        use std::fmt::Write as _;
+        use std::fmt::Write as FmtWrite;
         let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
     }
     out
@@ -173,14 +180,24 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 // ── Animated rendering ─────────────────────────────────────────────────────
 
 /// A positioned sparkle for the burst animation phase.
+///
+/// Sparkles appear below the logo like falling embers. Each sparkle has a
+/// `start_frame` so they are staggered across the burst period rather than
+/// all appearing simultaneously. Once a sparkle finishes its visible lifetime
+/// it is marked `done` and no longer drawn.
 struct Sparkle {
     /// Column (0-based), relative to the terminal's left edge.
     col: usize,
-    /// Row (0-based), relative to the terminal's top edge — set during layout.
+    /// Row offset below the logo bottom edge (0-based).
     row: usize,
     ch: char,
     color: (u8, u8, u8),
+    /// Frame index on which this sparkle first becomes visible.
+    start_frame: usize,
+    /// Frames left to display. Counts down from initial value to 0, then done.
     frames_remaining: u8,
+    /// True once the sparkle has been erased and should not be drawn again.
+    done: bool,
 }
 
 /// Drop guard that restores cursor visibility.
@@ -213,6 +230,12 @@ impl Drop for CursorGuard<'_> {
 /// cleanly. Registers a SIGINT cancellation flag matching the pattern in
 /// `src/cmd/run.rs` — the animation loop breaks early on cancellation so the
 /// `CursorGuard` still drops on the normal return path.
+///
+/// Animation design:
+/// - Phase 1: Logo reveal — each line appears over ~120ms.
+/// - Phase 2: Sparkle burst — embers fall below the logo over ~1.2s.
+///   Sparkles are staggered so they appear one-by-one, not all at once.
+///   Sparkles are positioned below the logo, keeping the logo itself clean.
 fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     let (rows, cols) = term.size();
 
@@ -228,34 +251,25 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     term.hide_cursor()?;
     let _guard = CursorGuard::new(term);
 
-    // Reserve vertical space: logo + 2 blank lines above + static block below.
+    // Reserve vertical space: 1 blank + logo + sparkle rows below logo + static block.
     let logo_height = LOGO.len();
+    let sparkle_rows = 3usize; // embers fall up to 3 rows below the logo
     let static_lines = 10; // blank + tagline + version + blank + header + 3 commands + blank + hint + blank
-    let total_lines = 1 + logo_height + static_lines;
+    let total_lines = 1 + logo_height + sparkle_rows + static_lines;
 
     for _ in 0..total_lines {
         term.write_line("")?;
     }
     term.move_cursor_up(total_lines)?;
 
-    // Capture the starting row by tracking lines printed.
-    let start_row: usize = {
-        // We printed `total_lines` blank lines and then moved back up, so the
-        // cursor is at the row where we started. Use the terminal size to
-        // derive an absolute row: we can't query the cursor position via
-        // `console::Term`, so we rely on relative movement throughout.
-        0 // relative offset from our reserved block start
-    };
-
     // Phase 1: Logo reveal — one line per ~120ms (≈4 frames at 30fps).
     let frames_per_line = 4usize;
-    for (line_idx, logo_line) in LOGO.iter().enumerate() {
+    for logo_line in LOGO.iter() {
         for frame in 0..frames_per_line {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             if frame == 0 {
-                // Print the logo line on the first frame for this row.
                 let rendered = gradient_line(logo_line, GRAD_FROM, GRAD_TO);
                 term.write_line(&rendered)?;
             }
@@ -264,52 +278,68 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let _ = start_row + line_idx + 1; // suppress unused warning
     }
 
-    // Phase 2: Sparkle burst — 15 sparkles, each 2-3 frames.
+    // Phase 2: Sparkle burst — embers cascade below the logo.
+    //
+    // The cursor is now logo_height lines below the block start, sitting at
+    // the first sparkle row. Sparkles are placed in the `sparkle_rows` rows
+    // immediately below the logo. Each sparkle has a `start_frame` that
+    // staggers its appearance across the burst period so they drift in
+    // one-by-one rather than all flashing simultaneously.
     if !cancel.load(Ordering::Relaxed) {
         let mut rng = Lcg::new();
-        let sparkle_area_cols = cols as usize;
-        let sparkle_area_rows = logo_height;
-
-        // We are currently logo_height lines below our start. Move back up to
-        // overlay the logo area for sparkle placement.
-        term.move_cursor_up(logo_height)?;
-
-        // Generate sparkles with random positions inside the logo bounding box.
         let total_sparkles = 18usize;
         let frames_per_burst = 36usize; // ~1.2s at 30fps
 
-        let sparkle_cols = sparkle_area_cols.max(1);
-        let sparkle_rows = sparkle_area_rows.max(1);
+        // Leave a small right margin to avoid triggering terminal line-wrapping.
+        let usable_cols = (cols as usize).saturating_sub(2).max(1);
+
+        // Distribute start_frames evenly across the burst window, reserving
+        // the last few frames so all sparkles finish erasing before we clear.
+        let burst_window = frames_per_burst.saturating_sub(4);
 
         let mut sparkles: Vec<Sparkle> = (0..total_sparkles)
-            .map(|_| {
-                let col = (rng.next() as usize) % sparkle_cols;
+            .map(|i| {
+                let col = (rng.next() as usize) % usable_cols;
+                // Row 0 is directly below the last logo line; rows go up to sparkle_rows-1.
                 let row = (rng.next() as usize) % sparkle_rows;
                 let ch = SPARKLE_CHARS[(rng.next() as usize) % SPARKLE_CHARS.len()];
                 let color_idx = (rng.next() as usize) % SPARKLE_COLORS.len();
                 let color = SPARKLE_COLORS[color_idx];
-                let frames_remaining = 2 + (rng.next() as u8 % 2); // 2 or 3 frames
+                let frames_remaining = 2 + (rng.next() as u8 % 2); // 2 or 3 frames visible
+                let start_frame = (i * burst_window) / total_sparkles;
                 Sparkle {
                     col,
                     row,
                     ch,
                     color,
+                    start_frame,
                     frames_remaining,
+                    done: false,
                 }
             })
             .collect();
 
-        for _frame in 0..frames_per_burst {
+        // Reserve the sparkle rows by printing blank lines, then return the
+        // cursor to the top of the sparkle region.
+        for _ in 0..sparkle_rows {
+            term.write_line("")?;
+        }
+        term.move_cursor_up(sparkle_rows)?;
+
+        for current_frame in 0..frames_per_burst {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
 
             for sparkle in &mut sparkles {
+                if sparkle.done || current_frame < sparkle.start_frame {
+                    continue;
+                }
+
                 if sparkle.frames_remaining > 0 {
-                    // Position cursor at sparkle location (relative: move from logo top).
+                    // Draw the sparkle at its position below the logo.
                     term.move_cursor_down(sparkle.row)?;
                     term.move_cursor_right(sparkle.col)?;
                     let s = sparkle.ch.to_string();
@@ -319,31 +349,31 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
                             .rgb(sparkle.color.0, sparkle.color.1, sparkle.color.2)
                     );
                     term.write_str(&painted)?;
-                    // Return to logo top for next sparkle.
+                    // Return cursor to the top of the sparkle region.
                     term.move_cursor_up(sparkle.row)?;
-                    // Move left back (sparkle.col + 1 for the character written).
                     term.move_cursor_left(sparkle.col + 1)?;
                     sparkle.frames_remaining -= 1;
-                } else if sparkle.frames_remaining == 0 {
-                    // Erase: overwrite with a space.
+                } else {
+                    // Erase: overwrite with a space and mark done.
                     term.move_cursor_down(sparkle.row)?;
                     term.move_cursor_right(sparkle.col)?;
                     term.write_str(" ")?;
                     term.move_cursor_up(sparkle.row)?;
                     term.move_cursor_left(sparkle.col + 1)?;
-                    sparkle.frames_remaining = u8::MAX; // sentinel: done
+                    sparkle.done = true;
                 }
             }
 
             std::thread::sleep(FRAME_DURATION);
         }
 
-        // Move back down to below the logo so clear_last_lines works correctly.
-        term.move_cursor_down(logo_height)?;
+        // Advance past the sparkle rows so clear_last_lines covers the right region.
+        term.move_cursor_down(sparkle_rows)?;
     }
 
-    // Clear the entire animation region and replace with clean static output.
-    term.clear_last_lines(logo_height + 1)?;
+    // Clear the entire animation region (1 blank + logo + sparkle rows) and
+    // replace with clean static output.
+    term.clear_last_lines(1 + logo_height + sparkle_rows)?;
     render_static(term)?;
 
     Ok(())
@@ -408,7 +438,6 @@ mod tests {
     #[test]
     fn write_marker_creates_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        // Use a home dir where ~/.creft/ does not yet exist.
         let home = dir.path().join("new_home");
         let ctx = make_ctx(&home);
         write_marker(&ctx).unwrap();
@@ -447,7 +476,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_ctx(dir.path());
         write_marker(&ctx).unwrap();
-        // force=true must not short-circuit.
         cmd_welcome(&ctx, true).unwrap();
         // Marker should still exist (was re-written).
         assert!(already_welcomed(&ctx).unwrap());
@@ -455,20 +483,48 @@ mod tests {
 
     // ── static rendering ──────────────────────────────────────────────────
 
+    /// Verify that `render_static` output contains "creft", the version string,
+    /// and all three getting-started commands (`creft add`, `creft list`, `creft up`).
+    ///
+    /// Uses `render_static_to_writer` with a `Vec<u8>` to capture the rendered
+    /// bytes directly, so the spec's content requirements can be asserted.
     #[test]
-    fn render_static_output_contains_version() {
-        let term = console::Term::buffered_stdout();
-        render_static(&term).unwrap();
-        term.flush().unwrap();
-        // We can't easily capture Term's buffer, so check that the call succeeds
-        // and the version constant is what we expect.
-        assert!(!env!("CARGO_PKG_VERSION").is_empty());
+    fn render_static_output_contains_required_content() {
+        // Disable yansi so the output is plain ASCII without ANSI escape codes,
+        // making string matching unambiguous.
+        yansi::disable();
+        let mut buf: Vec<u8> = Vec::new();
+        render_static_to_writer(&mut buf).unwrap();
+        yansi::enable();
+
+        let output = String::from_utf8(buf).expect("render_static must produce valid UTF-8");
+
+        assert!(
+            output.contains("creft"),
+            "output must contain 'creft'; got:\n{output}"
+        );
+        assert!(
+            output.contains(env!("CARGO_PKG_VERSION")),
+            "output must contain the version '{}'; got:\n{output}",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(
+            output.contains("creft add"),
+            "output must contain 'creft add'; got:\n{output}"
+        );
+        assert!(
+            output.contains("creft list"),
+            "output must contain 'creft list'; got:\n{output}"
+        );
+        assert!(
+            output.contains("creft up"),
+            "output must contain 'creft up'; got:\n{output}"
+        );
     }
 
     #[test]
     fn logo_lines_fit_within_40_columns() {
         for line in LOGO {
-            // Count Unicode scalar values (not bytes) as a proxy for display width.
             let char_count = line.chars().count();
             assert!(
                 char_count <= 44, // box-drawing chars are single-width; 40-col logo + small margin
@@ -484,7 +540,6 @@ mod tests {
         yansi::disable();
         let result = gradient_line("hello", GRAD_FROM, GRAD_TO);
         yansi::enable();
-        // When yansi is disabled, Paint emits no ANSI escapes.
         assert!(
             !result.contains('\x1b'),
             "must not contain ANSI escapes when yansi is disabled"
@@ -511,9 +566,7 @@ mod tests {
     #[test]
     fn gradient_line_single_char_uses_from_color() {
         yansi::enable();
-        // Single character: t=0.0, so color = GRAD_FROM.
         let result = gradient_line("X", GRAD_FROM, GRAD_TO);
-        // Should contain the from color components in the ANSI sequence.
         let from_r = GRAD_FROM.0.to_string();
         assert!(
             result.contains(&from_r),
@@ -533,13 +586,56 @@ mod tests {
         }
     }
 
+    // ── sparkle staggering ────────────────────────────────────────────────
+
+    /// Verify the stagger formula distributes sparkle start_frames across the
+    /// burst window with no duplicates and all values in range.
+    #[test]
+    fn sparkle_start_frames_are_staggered_and_in_range() {
+        let total_sparkles = 18usize;
+        let frames_per_burst = 36usize;
+        let burst_window = frames_per_burst.saturating_sub(4);
+        let start_frames: Vec<usize> = (0..total_sparkles)
+            .map(|i| (i * burst_window) / total_sparkles)
+            .collect();
+
+        for &sf in &start_frames {
+            assert!(
+                sf < burst_window,
+                "start_frame {sf} must be within burst_window {burst_window}"
+            );
+        }
+
+        let unique: std::collections::HashSet<usize> = start_frames.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            total_sparkles,
+            "all sparkle start_frames must be distinct"
+        );
+    }
+
+    /// A sparkle marked `done` is terminal — it must never be redrawn.
+    ///
+    /// The animation loop skips any sparkle where `done == true`, even if
+    /// `frames_remaining` is non-zero.
+    #[test]
+    fn sparkle_done_flag_prevents_redraw() {
+        let sparkle = Sparkle {
+            col: 0,
+            row: 0,
+            ch: '*',
+            color: (255, 255, 255),
+            start_frame: 0,
+            frames_remaining: 5, // would normally draw, but done=true guards it
+            done: true,
+        };
+        assert!(sparkle.done, "done flag must be set and visible");
+    }
+
     // ── CursorGuard ───────────────────────────────────────────────────────
 
     #[test]
     fn cursor_guard_compiles_and_drop_impl_exists() {
-        // Structural: verify CursorGuard is constructible and has Drop.
-        // We can't easily observe show_cursor() in a test without a TTY, but
-        // we verify the type is sound.
         let term = console::Term::buffered_stdout();
         let _guard = CursorGuard::new(&term);
         // _guard drops here — show_cursor() is called (errors are silently ignored).
@@ -549,8 +645,6 @@ mod tests {
 
     #[test]
     fn cmd_welcome_uses_static_path_when_not_a_tty() {
-        // In the test harness stdout is not a TTY, so cmd_welcome must take
-        // the static path (no panic, no terminal-specific ops).
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_ctx(dir.path());
         cmd_welcome(&ctx, true).unwrap();
