@@ -180,6 +180,9 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
         return Ok(());
     }
 
-    print!("{}", render_namespace_listing(&entries, prefix, &prefix_str));
+    print!(
+        "{}",
+        render_namespace_listing(&entries, prefix, &prefix_str)
+    );
     Ok(())
 }

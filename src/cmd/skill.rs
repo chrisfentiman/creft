@@ -311,7 +311,6 @@ pub(crate) fn render_namespace_listing(
 
     writeln!(out, "{}", help::ROOT_ABOUT.bold()).unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "{}", "Skills:".bold()).unwrap();
     writeln!(
         out,
         "{}creft {} <command> [ARGS] [OPTIONS]",
@@ -320,6 +319,7 @@ pub(crate) fn render_namespace_listing(
     )
     .unwrap();
     writeln!(out).unwrap();
+    writeln!(out, "{}", "Skills:".bold()).unwrap();
 
     let (skills_output, max_skill_name) = render_skill_entries_limited(entries, prefix, usize::MAX);
     out.push_str(&skills_output);
@@ -453,7 +453,11 @@ fn render_skill_entries_limited(
                 if leaf_names.contains(relative) {
                     None
                 } else {
-                    let label = if in_namespace { relative } else { name.as_str() };
+                    let label = if in_namespace {
+                        relative
+                    } else {
+                        name.as_str()
+                    };
                     Some(label.len())
                 }
             }
@@ -499,7 +503,11 @@ fn render_skill_entries_limited(
                 if leaf_names.contains(relative) {
                     continue;
                 }
-                let label = if in_namespace { relative } else { name.as_str() };
+                let label = if in_namespace {
+                    relative
+                } else {
+                    name.as_str()
+                };
                 let plural = if *skill_count == 1 { "skill" } else { "skills" };
                 let pkg_suffix = if package.is_some() { "  [package]" } else { "" };
                 let pad = " ".repeat(max_name - label.len());
@@ -720,6 +728,26 @@ mod tests {
         assert!(
             output.contains("--help"),
             "namespace listing must contain --help footer;\ngot:\n{output}",
+        );
+    }
+
+    /// Namespace listing orders Usage: before Skills: to match root listing structure.
+    ///
+    /// The root listing renders tagline → Usage → Commands/Skills → flags → footer.
+    /// Namespace listing must follow the same ordering so both feel like the same UI.
+    #[test]
+    fn namespace_listing_usage_appears_before_skills_header() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(2);
+        let prefix: Vec<&str> = vec!["artifacts"];
+        let output = render_namespace_listing(&entries, &prefix, "artifacts");
+        yansi::enable();
+
+        let usage_pos = output.find("Usage:").expect("Usage: must be present");
+        let skills_pos = output.find("Skills:").expect("Skills: must be present");
+        assert!(
+            usage_pos < skills_pos,
+            "Usage: must appear before Skills: in namespace listing;\ngot:\n{output}",
         );
     }
 

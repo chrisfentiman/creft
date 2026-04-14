@@ -470,12 +470,18 @@ impl ParsedCommand {
                 // Column width is computed from plain name length to preserve alignment
                 // when ANSI escapes are present (they inflate byte count but not display width).
                 let pad = " ".repeat(max_name - arg.name.len());
-                out.push_str(&format!(
-                    "  {}{pad}  {}{}\n",
-                    arg.name.as_str().bold(),
-                    arg.description,
-                    default_hint,
-                ));
+                if arg.description.is_empty() && default_hint.is_empty() {
+                    // No description or default: omit the description column entirely
+                    // so the line ends cleanly at the name rather than with trailing spaces.
+                    out.push_str(&format!("  {}{pad}\n", arg.name.as_str().bold()));
+                } else {
+                    out.push_str(&format!(
+                        "  {}{pad}  {}{}\n",
+                        arg.name.as_str().bold(),
+                        arg.description,
+                        default_hint,
+                    ));
+                }
             }
         }
 
@@ -861,6 +867,51 @@ name: MY_TOKEN
         // Default format uses square brackets to match clap convention
         assert!(help.contains("[default: 10]"));
         assert!(!help.contains("(default: 10)"));
+    }
+
+    /// Arg with no description and no default renders as `  name` with no trailing spaces.
+    ///
+    /// When a skill author omits the description field, the arg line must end cleanly
+    /// at the name rather than leaving a dangling two-space separator column that
+    /// makes the output look ragged compared to built-in help.
+    #[test]
+    fn test_help_text_arg_without_description_has_no_trailing_spaces() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "greet".into(),
+                description: "Greet someone".into(),
+                args: vec![Arg {
+                    name: "who".into(),
+                    description: String::new(),
+                    default: None,
+                    required: false,
+                    validation: None,
+                }],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![],
+        };
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
+        assert!(help.contains("Arguments:"));
+        assert!(
+            help.contains("  who\n"),
+            "arg line must end at the name with no trailing spaces; got:\n{help}"
+        );
+        // No description separator should appear when there is nothing to describe.
+        let arg_line = help
+            .lines()
+            .find(|l| l.trim_start().starts_with("who"))
+            .unwrap_or("");
+        assert!(
+            !arg_line.ends_with("  "),
+            "arg line must not have trailing spaces; got: {arg_line:?}",
+        );
     }
 
     // ── help_text: usage line construction ───────────────────────────────────
