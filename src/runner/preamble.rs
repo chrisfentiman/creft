@@ -67,6 +67,11 @@ creft_prompt() {
   read -r _creft_response <&4
   printf '%s' "$_creft_response" | sed 's/.*"value":"\([^"]*\)".*/\1/'
 }
+creft_exit() {
+  local _code="${1:-0}"
+  printf '{"type":"exit","code":%s}\n' "$_code" >&3 2>/dev/null
+  exit 0
+}
 # -- end creft runtime bindings --
 "#;
 
@@ -106,6 +111,10 @@ def creft_prompt(question, choices=""):
         return _creft_json.loads(_line).get("value", "")
     except (OSError, ValueError):
         return ""
+def creft_exit(code=0):
+    _creft_write({"type": "exit", "code": int(code)})
+    import sys
+    sys.exit(0)
 # -- end creft runtime bindings --
 "#;
 
@@ -143,6 +152,10 @@ function creft_prompt(question, choices) {
   const n = _creft_fs.readSync(4, buf, 0, buf.length);
   try { return JSON.parse(buf.slice(0, n).toString().trim()).value || ''; } catch(e) { return ''; }
 }
+function creft_exit(code) {
+  _creft_write({type:'exit',code:typeof code === 'number' ? code : 0});
+  process.exit(0);
+}
 // -- end creft runtime bindings --
 "#;
 
@@ -153,14 +166,11 @@ mod tests {
 
     use super::for_language;
 
-    /// Bash preamble contains all three public function definitions.
+    /// Bash preamble contains all public function definitions.
     #[test]
     fn bash_preamble_contains_all_functions() {
         let p = for_language("bash").expect("bash must have a preamble");
-        assert!(
-            p.contains("creft_print"),
-            "bash preamble missing creft_print"
-        );
+        assert!(p.contains("creft_print"), "bash preamble missing creft_print");
         assert!(
             p.contains("creft_status"),
             "bash preamble missing creft_status"
@@ -169,9 +179,13 @@ mod tests {
             p.contains("creft_prompt"),
             "bash preamble missing creft_prompt"
         );
+        assert!(
+            p.contains("creft_exit"),
+            "bash preamble missing creft_exit"
+        );
     }
 
-    /// Python preamble contains the def form of all three functions.
+    /// Python preamble contains the def form of all public functions.
     #[test]
     fn python_preamble_contains_all_functions() {
         let p = for_language("python").expect("python must have a preamble");
@@ -187,9 +201,13 @@ mod tests {
             p.contains("def creft_prompt"),
             "python preamble missing def creft_prompt"
         );
+        assert!(
+            p.contains("def creft_exit"),
+            "python preamble missing def creft_exit"
+        );
     }
 
-    /// Node preamble contains the function form of all three functions.
+    /// Node preamble contains the function form of all public functions.
     #[test]
     fn node_preamble_contains_all_functions() {
         let p = for_language("node").expect("node must have a preamble");
@@ -204,6 +222,10 @@ mod tests {
         assert!(
             p.contains("function creft_prompt"),
             "node preamble missing function creft_prompt"
+        );
+        assert!(
+            p.contains("function creft_exit"),
+            "node preamble missing function creft_exit"
         );
     }
 

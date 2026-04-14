@@ -142,6 +142,13 @@ fn os_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((r, w))
 }
 
+/// Shared slot for the `creft_exit` signal from the side channel.
+///
+/// `None` means no exit signal was received. `Some(code)` means `creft_exit(code)`
+/// was called inside the block. The reader thread writes to this slot; the main
+/// thread reads after joining the reader (no concurrent access, Mutex never contended).
+pub(crate) type ExitSignal = Arc<std::sync::Mutex<Option<i32>>>;
+
 /// A message from a block to creft via the side channel.
 ///
 /// Each line on fd 3 is a newline-delimited JSON object. The `type` field
@@ -169,6 +176,12 @@ pub(crate) enum ChannelMessage {
         id: String,
         question: String,
         choices: String,
+    },
+    #[serde(rename = "exit")]
+    Exit {
+        /// Process exit code. 0 = success (pipeline skip), non-zero = failure.
+        #[serde(default)]
+        code: i32,
     },
 }
 
@@ -467,6 +480,7 @@ pub(crate) fn spawn_reader(
     writer: Arc<TerminalWriter>,
     prompt_tx: Option<std::sync::mpsc::Sender<ChannelMessage>>,
     mut response_writer: Option<File>,
+    exit_signal: Option<ExitSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("creft-channel-reader".to_owned())
@@ -518,6 +532,13 @@ pub(crate) fn spawn_reader(
                                 let _ = rw.write_all(response.as_bytes());
                                 let _ = rw.flush();
                             }
+                        }
+                    }
+                    ChannelMessage::Exit { code } => {
+                        if let Some(ref signal) = exit_signal
+                            && let Ok(mut slot) = signal.lock()
+                        {
+                            *slot = Some(code);
                         }
                     }
                 }
@@ -1182,7 +1203,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
 
         let status = child.wait().unwrap();
         assert!(status.success(), "bash must exit successfully");
@@ -1228,7 +1249,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
 
         child.wait().unwrap();
         handle
@@ -1273,7 +1294,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
 
         let status = child.wait().unwrap();
         assert!(status.success());
@@ -1331,7 +1352,7 @@ printf '%s' "$_resp"
         let (prompt_tx, prompt_rx) = mpsc::channel::<super::ChannelMessage>();
 
         let reader_handle =
-            super::spawn_reader(ctrl_reader, Arc::clone(&writer), Some(prompt_tx), None);
+            super::spawn_reader(ctrl_reader, Arc::clone(&writer), Some(prompt_tx), None, None);
         let prompt_handle = super::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, false);
 
         let output = child.wait_with_output().unwrap();
@@ -1343,6 +1364,55 @@ printf '%s' "$_resp"
         let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
         assert_eq!(parsed["id"], "t1");
         assert_eq!(parsed["value"], "");
+    }
+
+    // ---- ChannelMessage::Exit deserialization ----
+
+    /// `{"type":"exit","code":1}` deserializes to `Exit { code: 1 }`.
+    #[test]
+    fn channel_message_exit_with_code_deserializes() {
+        let json = r#"{"type":"exit","code":1}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Exit { code } => {
+                assert_eq!(code, 1, "exit code must be 1");
+            }
+            other => panic!("expected Exit, got {other:?}"),
+        }
+    }
+
+    /// `{"type":"exit"}` (no code field) deserializes to `Exit { code: 0 }`.
+    ///
+    /// The `serde(default)` on the `code` field means a missing field
+    /// deserializes to the type's default (0 for i32), which matches
+    /// the no-arg `creft_exit` behavior.
+    #[test]
+    fn channel_message_exit_without_code_defaults_to_zero() {
+        let json = r#"{"type":"exit"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Exit { code } => {
+                assert_eq!(code, 0, "missing code field must default to 0");
+            }
+            other => panic!("expected Exit, got {other:?}"),
+        }
+    }
+
+    // ---- ExitSignal ----
+
+    /// Writing then reading through an ExitSignal round-trips the value.
+    ///
+    /// Verifies the Arc<Mutex<Option<i32>>> pattern works as documented:
+    /// the writer sets Some(code) and the reader sees the same value.
+    #[test]
+    fn exit_signal_write_then_read_roundtrips() {
+        let signal: super::ExitSignal = Arc::new(std::sync::Mutex::new(None));
+        {
+            let mut slot = signal.lock().unwrap();
+            *slot = Some(42);
+        }
+        let value = *signal.lock().unwrap();
+        assert_eq!(value, Some(42), "ExitSignal round-trip must preserve the code");
     }
 
     // ---- CappedTerm ----

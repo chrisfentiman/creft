@@ -80,8 +80,15 @@ Code Blocks:
   Exit codes:
     0     Success, continue to the next block
     1-98  Error, stop the pipeline and propagate the exit code
-    99    Early successful return -- stop the pipeline, creft exits 0
     100+  Error, stop the pipeline and propagate the exit code
+
+  Early exit:
+    Call creft_exit to stop the pipeline from inside a block:
+      creft_exit          Stop with success (exit 0)
+      creft_exit 0        Same as above
+      creft_exit 1        Stop with failure (exit 1)
+
+    exit 99 is deprecated -- use creft_exit instead.
 
   Interpreters: bash, python, node, zsh, docs (not executed -- shown in --help)
 

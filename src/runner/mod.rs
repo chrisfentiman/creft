@@ -566,7 +566,7 @@ fn execute_block(
     // the child's stdin for data — interactive reading from the same
     // terminal is not possible.
     #[cfg(unix)]
-    let (reader_thread, prompt_thread) = {
+    let (reader_thread, prompt_thread, exit_signal) = {
         let ctrl_reader = side_channel
             .take_control_reader()
             .expect("control reader taken exactly once per block");
@@ -582,6 +582,8 @@ fn execute_block(
         // Interactive prompts require an unpiped stdin (terminal access).
         let interactive = stdin_data.is_none();
 
+        let exit_signal: channel::ExitSignal =
+            Arc::new(std::sync::Mutex::new(None));
         let reader = channel::spawn_reader(
             ctrl_reader,
             std::sync::Arc::clone(&writer),
@@ -589,10 +591,11 @@ fn execute_block(
             // The reader does not write responses directly — the prompt
             // handler thread owns the response writer.
             None,
+            Some(Arc::clone(&exit_signal)),
         );
         let prompter =
             channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
-        (reader, prompter)
+        (reader, prompter, exit_signal)
     };
 
     // When prev_output data must be written to the child's stdin, do it on a
@@ -637,7 +640,8 @@ fn execute_block(
     // When the reader exits it drops prompt_tx, which closes the mpsc channel
     // and causes the prompt handler thread to exit.
     // Joining here ensures all side-channel messages are rendered before
-    // the function returns.
+    // the function returns, and that the exit_signal slot is final before
+    // we read it below.
     #[cfg(unix)]
     {
         reader_thread
@@ -650,7 +654,33 @@ fn execute_block(
             .expect("side-channel prompt handler thread panicked");
     }
 
+    // Check the creft_exit side-channel signal before the exit-99 check.
+    // creft_exit causes the block to exit 0, so exit_code_of returns Some(0),
+    // not Some(99). There is no ambiguity between the two paths.
+    #[cfg(unix)]
+    {
+        let signal_code = exit_signal
+            .lock()
+            .expect("exit signal lock poisoned")
+            .take();
+        if let Some(code) = signal_code {
+            // Flush any stdout the block produced before creft_exit.
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            print!("{stdout}");
+            if code == 0 {
+                return Err(CreftError::EarlyExit);
+            } else {
+                return Err(CreftError::ExecutionFailed {
+                    block: block_idx,
+                    lang: block.lang.clone(),
+                    code,
+                });
+            }
+        }
+    }
+
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
+        eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
         // Print any output produced before the early exit so it is not lost.
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         print!("{}", stdout);

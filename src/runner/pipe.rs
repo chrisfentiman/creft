@@ -11,7 +11,7 @@ use super::{
 };
 
 #[cfg(unix)]
-use super::channel::{SideChannel, TerminalWriter};
+use super::channel::{ExitSignal, SideChannel, TerminalWriter};
 #[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
@@ -812,6 +812,7 @@ fn wait_pipe_children_unix(
             BlockOutcome::Exited(status) => {
                 if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
                     early_exit = true;
+                    eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
                     // Kill all processes in the pipe group so grandchildren are also killed.
                     // Falls back to per-PID kills if killpg fails.
                     kill_pipe_group_by_pids(child_pgid, &child_pids);
@@ -1055,6 +1056,12 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let mut reader_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
+    // ExitSignal slots parallel to reader_handles (same index = same block).
+    // Written by reader threads when they receive ChannelMessage::Exit;
+    // read by run_pipe_chain after reader threads are joined (no concurrent access).
+    #[cfg(unix)]
+    let mut exit_signals: Vec<ExitSignal> = Vec::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -1237,13 +1244,16 @@ pub(super) fn run_pipe_chain(
             let resp_writer = block_channel
                 .take_response_writer()
                 .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
+            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
             let handle = super::channel::spawn_reader(
                 ctrl_reader,
                 std::sync::Arc::clone(&terminal_writer),
                 None,
                 resp_writer,
+                Some(std::sync::Arc::clone(&signal)),
             );
             reader_handles.push(handle);
+            exit_signals.push(signal);
         }
         node_deps_dirs.push(node_deps_dir);
 
@@ -1338,8 +1348,13 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
+    // Child PIDs saved before wait_pipe_children_unix consumes `children`.
+    // Used in the post-reader-join exit-signal cleanup.
     #[cfg(unix)]
-    let (results, early_exit) = {
+    let saved_child_pids: Vec<u32>;
+
+    #[cfg(unix)]
+    let (results, mut early_exit) = {
         let last_stdout = last_child_stdout.ok_or_else(|| {
             CreftError::Setup("internal: failed to capture last block stdout".to_owned())
         })?;
@@ -1348,6 +1363,7 @@ pub(super) fn run_pipe_chain(
         let tx = reaper_tx;
         let rx = reaper_rx;
         let child_pids: Vec<u32> = children.iter().map(|(c, _, _, _)| c.id()).collect();
+        saved_child_pids = child_pids.clone();
         wait_pipe_children_unix(
             WaitArgs {
                 children,
@@ -1380,6 +1396,45 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     for handle in reader_handles {
         handle.join().expect("side-channel reader thread panicked");
+    }
+
+    // Reader threads are joined — all ExitSignal slots are now final.
+    // Check whether any block called creft_exit. This happens after reader
+    // joins because the reader thread writes the signal; the main thread
+    // must not read until the writer has exited.
+    #[cfg(unix)]
+    for (block_idx, signal) in exit_signals.iter().enumerate() {
+        let exit_code = *signal
+            .lock()
+            .expect("exit signal lock poisoned");
+        if let Some(code) = exit_code {
+            if code == 0 {
+                if !early_exit {
+                    early_exit = true;
+                    // All processes have already exited (wait_pipe_children_unix
+                    // joined them). kill_pipe_group_by_pids is a no-op for already-
+                    // exited PIDs, but ensures any late grandchildren are cleaned up.
+                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    ctx.request_cancel();
+                }
+            } else {
+                // creft_exit with non-zero: explicit failure.
+                if !early_exit {
+                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    ctx.request_cancel();
+                }
+                let lang = results
+                    .iter()
+                    .find(|r| r.block == block_idx)
+                    .map(|r| r.lang.clone())
+                    .unwrap_or_default();
+                return Err(CreftError::ExecutionFailed {
+                    block: block_idx,
+                    lang,
+                    code,
+                });
+            }
+        }
     }
 
     if early_exit {
