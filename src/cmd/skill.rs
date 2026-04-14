@@ -309,6 +309,8 @@ pub(crate) fn render_namespace_listing(
 
     let mut out = String::new();
 
+    writeln!(out, "{}", help::ROOT_ABOUT.bold()).unwrap();
+    writeln!(out).unwrap();
     writeln!(out, "{}", "Skills:".bold()).unwrap();
     writeln!(
         out,
@@ -428,17 +430,31 @@ fn render_skill_entries_limited(
         }
     }
 
+    // When drilling into a namespace, display only the relative portion of each
+    // name (the part after the prefix). At root level the prefix is empty and
+    // the full name is used. Both the column-width computation and the rendered
+    // label use the same display string so they stay in sync.
+    let in_namespace = !prefix.is_empty();
+
     // Exclude suppressed namespace entries from column-width computation.
     let max_name = entries
         .iter()
         .filter_map(|e| match e {
-            model::NamespaceEntry::Skill(def, _) => Some(def.name.len()),
+            model::NamespaceEntry::Skill(def, _) => {
+                let label = if in_namespace {
+                    def.name.split_whitespace().next_back().unwrap_or(&def.name)
+                } else {
+                    &def.name
+                };
+                Some(label.len())
+            }
             model::NamespaceEntry::Namespace { name, .. } => {
                 let relative = name.split_whitespace().next_back().unwrap_or(name.as_str());
                 if leaf_names.contains(relative) {
                     None
                 } else {
-                    Some(name.len())
+                    let label = if in_namespace { relative } else { name.as_str() };
+                    Some(label.len())
                 }
             }
         })
@@ -465,8 +481,13 @@ fn render_skill_entries_limited(
                 } else {
                     String::new()
                 };
-                let pad = " ".repeat(max_name - def.name.len());
-                writeln!(out, "  {}{}  {desc}{suffix}", def.name.as_str().bold(), pad).unwrap();
+                let label = if in_namespace {
+                    def.name.split_whitespace().next_back().unwrap_or(&def.name)
+                } else {
+                    &def.name
+                };
+                let pad = " ".repeat(max_name - label.len());
+                writeln!(out, "  {}{}  {desc}{suffix}", label.bold(), pad).unwrap();
                 printed += 1;
             }
             model::NamespaceEntry::Namespace {
@@ -478,13 +499,14 @@ fn render_skill_entries_limited(
                 if leaf_names.contains(relative) {
                     continue;
                 }
+                let label = if in_namespace { relative } else { name.as_str() };
                 let plural = if *skill_count == 1 { "skill" } else { "skills" };
                 let pkg_suffix = if package.is_some() { "  [package]" } else { "" };
-                let pad = " ".repeat(max_name - name.len());
+                let pad = " ".repeat(max_name - label.len());
                 writeln!(
                     out,
                     "  {}{}  {skill_count} {plural}{pkg_suffix}",
-                    name.as_str().bold(),
+                    label.bold(),
                     pad,
                 )
                 .unwrap();
@@ -721,6 +743,73 @@ mod tests {
         assert!(
             output.contains("creft my-ns <command> --help"),
             "footer must reference the namespace name;\ngot:\n{output}",
+        );
+    }
+
+    /// Namespace listing begins with the project tagline.
+    ///
+    /// The tagline mirrors the root listing so the namespace output feels like a
+    /// natural subset of the top-level help rather than a bare command dump.
+    #[test]
+    fn namespace_listing_includes_tagline() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(2);
+        let prefix: Vec<&str> = vec!["artifacts"];
+        let output = render_namespace_listing(&entries, &prefix, "artifacts");
+        yansi::enable();
+
+        assert!(
+            output.contains(help::ROOT_ABOUT),
+            "namespace listing must begin with the project tagline;\ngot:\n{output}",
+        );
+    }
+
+    /// Skill names in namespace listings show only the relative component.
+    ///
+    /// When a user drills into `creft artifacts`, a skill named `artifacts cleanup`
+    /// must appear as `cleanup` — the namespace prefix is implicit from context.
+    #[test]
+    fn namespace_listing_strips_namespace_prefix_from_skill_names() {
+        yansi::disable();
+
+        let make_skill = |name: &str| {
+            model::NamespaceEntry::Skill(
+                model::CommandDef {
+                    name: name.to_string(),
+                    description: "test skill".to_string(),
+                    args: vec![],
+                    flags: vec![],
+                    env: vec![],
+                    tags: vec![],
+                    supports: vec![],
+                },
+                model::SkillSource::Owned(model::Scope::Local),
+            )
+        };
+
+        let entries = vec![
+            make_skill("artifacts cleanup"),
+            make_skill("artifacts deploy"),
+        ];
+        let prefix: Vec<&str> = vec!["artifacts"];
+        let output = render_namespace_listing(&entries, &prefix, "artifacts");
+        yansi::enable();
+
+        assert!(
+            output.contains("cleanup"),
+            "relative skill name must appear in namespace listing;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("deploy"),
+            "relative skill name must appear in namespace listing;\ngot:\n{output}",
+        );
+        assert!(
+            !output.contains("artifacts cleanup"),
+            "fully-qualified skill name must not appear in namespace listing;\ngot:\n{output}",
+        );
+        assert!(
+            !output.contains("artifacts deploy"),
+            "fully-qualified skill name must not appear in namespace listing;\ngot:\n{output}",
         );
     }
 }

@@ -397,18 +397,18 @@ fn test_list_drill_into_namespace() {
 
     let stdout = String::from_utf8_lossy(&output);
 
-    // Full skill names appear with their descriptions.
+    // Relative skill names appear (namespace prefix is implicit from context).
     assert!(
-        stdout.contains("tavily search"),
-        "tavily search should appear in drill-in output; got: {stdout:?}"
+        stdout.contains("search"),
+        "search should appear in drill-in output; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Search the web"),
         "tavily search description should appear; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily crawl"),
-        "tavily crawl should appear in drill-in output; got: {stdout:?}"
+        stdout.contains("crawl"),
+        "crawl should appear in drill-in output; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Crawl a website"),
@@ -464,12 +464,12 @@ fn test_list_deep_namespace() {
     let aws_stdout = String::from_utf8_lossy(&aws_output);
 
     assert!(
-        aws_stdout.contains("aws s3"),
-        "aws s3 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
+        aws_stdout.contains("s3"),
+        "s3 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
     );
     assert!(
-        aws_stdout.contains("aws ec2"),
-        "aws ec2 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
+        aws_stdout.contains("ec2"),
+        "ec2 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
     );
     // Leaf skills should not appear at this level.
     assert!(
@@ -497,16 +497,16 @@ fn test_list_deep_namespace() {
     let s3_stdout = String::from_utf8_lossy(&s3_output);
 
     assert!(
-        s3_stdout.contains("aws s3 copy"),
-        "aws s3 copy should appear in aws s3 drill-in; got: {s3_stdout:?}"
+        s3_stdout.contains("copy"),
+        "copy should appear in aws s3 drill-in; got: {s3_stdout:?}"
     );
     assert!(
         s3_stdout.contains("Copy objects between S3 buckets"),
         "aws s3 copy description should appear; got: {s3_stdout:?}"
     );
     assert!(
-        s3_stdout.contains("aws s3 sync"),
-        "aws s3 sync should appear in aws s3 drill-in; got: {s3_stdout:?}"
+        s3_stdout.contains("sync"),
+        "sync should appear in aws s3 drill-in; got: {s3_stdout:?}"
     );
     assert!(
         s3_stdout.contains("Sync a local directory to S3"),
@@ -639,13 +639,13 @@ fn hidden_subcommand_excluded_from_namespace_drill_in() {
         "hooks namespace should show 1 skill (hidden guard excluded); got: {top_stdout:?}"
     );
 
-    // Drill-in: hooks deploy appears, hooks _guard does not.
+    // Drill-in: deploy appears (without namespace prefix), _guard does not.
     creft_with(&dir)
         .args(["list", "hooks"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("hooks deploy"))
-        .stdout(predicate::str::contains("hooks _guard").not());
+        .stdout(predicate::str::contains("deploy"))
+        .stdout(predicate::str::contains("_guard").not());
 }
 
 /// A namespace whose own token starts with `_` is entirely excluded from `creft list`.
@@ -677,11 +677,12 @@ fn explicit_hidden_prefix_shows_hidden_commands() {
         .assert()
         .success();
 
+    // The namespace is implicit from context — only the relative name appears.
     creft_with(&dir)
         .args(["list", "_private"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("_private mycommand"));
+        .stdout(predicate::str::contains("mycommand"));
 }
 
 /// A hidden command executes normally when called by name.
@@ -1007,22 +1008,22 @@ fn test_namespace_help() {
         "namespace help should show usage line with namespace name; got: {stdout:?}"
     );
 
-    // Individual skills should be listed with descriptions.
+    // Individual skills appear by their relative name (namespace prefix is implicit).
     assert!(
-        stdout.contains("tavily search"),
-        "tavily search should appear in namespace help; got: {stdout:?}"
+        stdout.contains("search"),
+        "search should appear in namespace help; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Search the web"),
         "tavily search description should appear; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily crawl"),
-        "tavily crawl should appear in namespace help; got: {stdout:?}"
+        stdout.contains("crawl"),
+        "crawl should appear in namespace help; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily extract"),
-        "tavily extract should appear in namespace help; got: {stdout:?}"
+        stdout.contains("extract"),
+        "extract should appear in namespace help; got: {stdout:?}"
     );
 }
 
