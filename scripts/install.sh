@@ -179,7 +179,7 @@ verify_checksum() {
 # --- Install ---
 
 install_creft() {
-    local version target tarball_name tarball_url checksum_url install_dir tmp_dir
+    local version tag target tarball_name tarball_url checksum_url install_dir tmp_dir
 
     # Resolve version
     if [ -n "${CREFT_VERSION:-}" ]; then
@@ -191,11 +191,18 @@ install_creft() {
         info "latest version is $version"
     fi
 
+    # Normalize to a release tag — accept either "0.2.8" or "creft-v0.2.8"
+    case "$version" in
+        creft-v*) tag="$version" ;;
+        v*)       tag="creft-${version}" ;;
+        *)        tag="creft-v${version}" ;;
+    esac
+
     target="$(get_target)"
     debug "target triple: $target"
 
     tarball_name="creft-${target}.tar.gz"
-    tarball_url="https://github.com/chrisfentiman/creft/releases/download/${version}/${tarball_name}"
+    tarball_url="https://github.com/chrisfentiman/creft/releases/download/${tag}/${tarball_name}"
     checksum_url="${tarball_url}.sha256"
 
     install_dir="${CREFT_INSTALL_DIR:-$HOME/.local/bin}"
