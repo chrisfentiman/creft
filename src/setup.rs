@@ -383,12 +383,12 @@ fn replace_creft_section(existing: &str, new_content: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error if the existing file contains invalid JSON, or if the
-/// file cannot be read or written. The file is never truncated before a
-/// successful parse.
+/// Returns an error if the existing file contains invalid JSON, if the
+/// mutator returns an error, or if the file cannot be read or written.
+/// The file is never truncated before a successful parse.
 fn read_modify_write_json(
     path: &Path,
-    mutate: impl FnOnce(&mut serde_json::Value),
+    mutate: impl FnOnce(&mut serde_json::Value) -> Result<(), CreftError>,
 ) -> Result<(), CreftError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -402,7 +402,7 @@ fn read_modify_write_json(
         serde_json::Value::Object(serde_json::Map::new())
     };
 
-    mutate(&mut value);
+    mutate(&mut value)?;
 
     let serialized = serde_json::to_string_pretty(&value)
         .map_err(|e| CreftError::Serialization(e.to_string()))?;
@@ -416,22 +416,55 @@ fn read_modify_write_json(
 /// Navigates to `value["hooks"]["SessionStart"]`, finds or creates the creft
 /// entry (identified by `"creft_managed": true` on the inner hook object), and
 /// updates `command` and `creft_version` in place.
-fn merge_session_start_hook(value: &mut serde_json::Value, command: &str, timeout: u64) {
+///
+/// # Errors
+///
+/// Returns an error with the file path for context if the root value is not a
+/// JSON object, if the `hooks` key maps to a non-object value, or if the
+/// `SessionStart` key maps to a non-array value. These indicate a corrupt or
+/// hand-edited settings file.
+fn merge_session_start_hook(
+    value: &mut serde_json::Value,
+    command: &str,
+    timeout: u64,
+    path: &Path,
+) -> Result<(), CreftError> {
     use serde_json::{Value, json};
 
+    if !value.is_object() {
+        return Err(CreftError::Setup(format!(
+            "expected JSON object at root of {}, got {}",
+            path.display(),
+            value_type_name(value),
+        )));
+    }
     let hooks = value
         .as_object_mut()
-        .unwrap()
+        .expect("checked above")
         .entry("hooks")
         .or_insert_with(|| json!({}));
 
+    if !hooks.is_object() {
+        return Err(CreftError::Setup(format!(
+            "expected \"hooks\" to be a JSON object in {}, got {}",
+            path.display(),
+            value_type_name(hooks),
+        )));
+    }
     let session_start = hooks
         .as_object_mut()
-        .unwrap()
+        .expect("checked above")
         .entry("SessionStart")
         .or_insert_with(|| Value::Array(vec![]));
 
-    let entries = session_start.as_array_mut().unwrap();
+    if !session_start.is_array() {
+        return Err(CreftError::Setup(format!(
+            "expected \"hooks.SessionStart\" to be a JSON array in {}, got {}",
+            path.display(),
+            value_type_name(session_start),
+        )));
+    }
+    let entries = session_start.as_array_mut().expect("checked above");
 
     // Search for an existing creft-managed entry (identified by creft_managed: true
     // on the inner hook object within a matcher group).
@@ -474,6 +507,20 @@ fn merge_session_start_hook(value: &mut serde_json::Value, command: &str, timeou
                 }
             ]
         }));
+    }
+
+    Ok(())
+}
+
+/// Returns a human-readable type name for a JSON value, used in error messages.
+fn value_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -544,7 +591,7 @@ fn install_hook_claude_code(
     }
 
     read_modify_write_json(&settings_path, |value| {
-        merge_session_start_hook(value, "creft _creft session start", 10);
+        merge_session_start_hook(value, "creft _creft session start", 10, &settings_path)
     })?;
 
     eprintln!(
@@ -604,7 +651,7 @@ fn install_hook_gemini(
     read_modify_write_json(&settings_path, |value| {
         // Gemini CLI uses milliseconds for timeouts (10000 = 10 seconds),
         // unlike Claude Code which uses seconds.
-        merge_session_start_hook(value, command, 10000);
+        merge_session_start_hook(value, command, 10000, &settings_path)
     })?;
 
     eprintln!(
@@ -1492,6 +1539,7 @@ mod tests {
         let path = dir.path().join("subdir/settings.json");
         read_modify_write_json(&path, |v| {
             v["key"] = serde_json::json!("value");
+            Ok(())
         })
         .unwrap();
         assert!(path.exists());
@@ -1507,6 +1555,7 @@ mod tests {
         std::fs::write(&path, r#"{"existing": "data"}"#).unwrap();
         read_modify_write_json(&path, |v| {
             v["new_key"] = serde_json::json!(42);
+            Ok(())
         })
         .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1520,7 +1569,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "not valid json {{").unwrap();
-        let result = read_modify_write_json(&path, |_| {});
+        let result = read_modify_write_json(&path, |_| Ok(()));
         assert!(
             result.is_err(),
             "invalid JSON must produce an error, not silently overwrite"
@@ -1529,6 +1578,53 @@ mod tests {
         assert!(
             err_str.contains("settings.json"),
             "error must include the file path: {err_str}"
+        );
+    }
+
+    #[test]
+    fn merge_session_start_hook_errors_on_root_json_array() {
+        // A settings file whose root is an array (not an object) must produce a
+        // descriptive error naming the file — not a panic.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "[]").unwrap();
+        let result = read_modify_write_json(&path, |value| {
+            merge_session_start_hook(value, "creft _creft session start", 10, &path)
+        });
+        assert!(result.is_err(), "root JSON array must produce an error");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("settings.json"),
+            "error must include the file path: {err_str}"
+        );
+        assert!(
+            err_str.contains("object"),
+            "error must mention expected type: {err_str}"
+        );
+    }
+
+    #[test]
+    fn merge_session_start_hook_errors_on_hooks_non_object() {
+        // A settings file where "hooks" maps to a string (not an object) must
+        // produce a descriptive error — not a panic.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"hooks": "not-an-object"}"#).unwrap();
+        let result = read_modify_write_json(&path, |value| {
+            merge_session_start_hook(value, "creft _creft session start", 10, &path)
+        });
+        assert!(
+            result.is_err(),
+            "non-object hooks value must produce an error"
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("settings.json"),
+            "error must include the file path: {err_str}"
+        );
+        assert!(
+            err_str.contains("hooks"),
+            "error must mention the hooks key: {err_str}"
         );
     }
 
