@@ -2917,3 +2917,51 @@ fn test_pipe_chain_blocks_see_env_vars() {
         .stdout(predicate::str::contains("block1:v1"))
         .stdout(predicate::str::contains("block2:v1"));
 }
+
+// ── namespace bare invocation tests ──────────────────────────────────────────
+
+/// `creft <namespace>` lists the namespace contents instead of erroring.
+///
+/// This matches the behaviour of `creft <namespace> --help`, making bare
+/// namespace invocation a first-class discovery mechanism.
+#[test]
+fn bare_namespace_invocation_lists_contents() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: deploy build\ndescription: build for deploy\n---\n\n```bash\necho build\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: deploy release\ndescription: cut a release\n---\n\n```bash\necho release\n```\n",
+        )
+        .assert()
+        .success();
+
+    // Bare namespace invocation should list the skills, not error.
+    creft_with(&dir)
+        .args(["deploy"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build"))
+        .stdout(predicate::str::contains("release"));
+}
+
+/// `creft <unknown>` still produces a CommandNotFound error.
+///
+/// The namespace fallback must not swallow genuine unknown command names.
+#[test]
+fn unknown_command_still_errors() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["xyzzy-nonexistent-command"])
+        .assert()
+        .failure();
+}

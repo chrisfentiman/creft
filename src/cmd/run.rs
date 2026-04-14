@@ -71,7 +71,18 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         return Ok(());
     }
 
-    let (name, remaining, source) = store::resolve_command(ctx, &filtered)?;
+    let (name, remaining, source) = match store::resolve_command(ctx, &filtered) {
+        Ok(result) => result,
+        Err(e) => {
+            // Bare namespace invocation: `creft <ns>` lists the namespace
+            // instead of erroring, matching the behaviour of `creft <ns> --help`.
+            let prefix: Vec<&str> = filtered.iter().map(|s| s.as_str()).collect();
+            if store::namespace_exists(ctx, &prefix)? {
+                return cmd_namespace_help(ctx, &prefix);
+            }
+            return Err(e);
+        }
+    };
     let cwd = ctx.derive_cwd(&source);
     let cwd_str = cwd.to_string_lossy().to_string();
     let cmd = store::load_from(ctx, &name, &source)?;

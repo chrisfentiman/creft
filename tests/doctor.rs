@@ -158,6 +158,59 @@ fn test_skill_check_circular_reference() {
     );
 }
 
+// ── doctor namespace tests ────────────────────────────────────────────────────
+
+/// `creft doctor <namespace>` runs checks on every skill in the namespace and
+/// renders a report per skill.
+#[test]
+fn test_doctor_namespace_runs_all_skills() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: tools build\ndescription: build tool\n---\n\n```bash\necho building\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: tools lint\ndescription: lint tool\n---\n\n```bash\necho linting\n```\n",
+        )
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["doctor", "tools"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Both skills should appear in the combined report output.
+    assert!(
+        stderr.contains("tools build"),
+        "expected 'tools build' in doctor output, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("tools lint"),
+        "expected 'tools lint' in doctor output, got: {stderr:?}"
+    );
+}
+
+/// `creft doctor <unknown>` still errors for a name that is neither a skill
+/// nor a namespace.
+#[test]
+fn test_doctor_unknown_name_errors() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["doctor", "xyzzy-nonexistent-namespace"])
+        .assert()
+        .failure();
+}
+
 /// `creft doctor <skill>` stops recursion at depth 10 and reports the limit.
 #[test]
 fn test_skill_check_depth_limit() {
