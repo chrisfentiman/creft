@@ -18,6 +18,18 @@ pub struct Settings {
 /// Known setting keys.
 const KNOWN_KEYS: &[&str] = &["shell"];
 
+/// Default behavior descriptions for each known key, parallel to `KNOWN_KEYS`.
+const KNOWN_DEFAULTS: &[(&str, &str)] = &[("shell", "$SHELL env var, or block language tag")];
+
+/// The effective value for a setting key: explicitly configured or using its default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingValue {
+    /// Explicitly configured value.
+    Set(String),
+    /// Not configured; description of the default behavior.
+    Default(&'static str),
+}
+
 impl Settings {
     /// Load settings from a JSON file, or return defaults if the file
     /// doesn't exist.
@@ -61,8 +73,27 @@ impl Settings {
     }
 
     /// Iterate over all settings as (key, value) pairs.
+    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Returns each known setting key paired with its effective value.
+    ///
+    /// Keys that have been explicitly configured appear as [`SettingValue::Set`].
+    /// Keys that have not been configured appear as [`SettingValue::Default`] with
+    /// a description of what the runtime will use in their absence.
+    pub fn known_entries(&self) -> Vec<(&'static str, SettingValue)> {
+        KNOWN_DEFAULTS
+            .iter()
+            .map(|(key, default_desc)| {
+                let value = match self.get(key) {
+                    Some(v) => SettingValue::Set(v.to_string()),
+                    None => SettingValue::Default(default_desc),
+                };
+                (*key, value)
+            })
+            .collect()
     }
 }
 
@@ -190,6 +221,61 @@ mod tests {
     fn iter_is_empty_on_default() {
         let settings = Settings::default();
         assert_eq!(settings.iter().count(), 0);
+    }
+
+    // ── Settings::known_entries() ────────────────────────────────────────────
+
+    #[test]
+    fn known_entries_returns_one_entry_per_known_key() {
+        let settings = Settings::default();
+        let entries = settings.known_entries();
+        assert_eq!(entries.len(), KNOWN_KEYS.len());
+    }
+
+    #[test]
+    fn known_defaults_and_known_keys_are_in_sync() {
+        // Every key in KNOWN_KEYS must appear in KNOWN_DEFAULTS and vice versa.
+        assert_eq!(KNOWN_KEYS.len(), KNOWN_DEFAULTS.len());
+        for key in KNOWN_KEYS {
+            assert!(
+                KNOWN_DEFAULTS.iter().any(|(k, _)| k == key),
+                "KNOWN_KEYS contains '{key}' but KNOWN_DEFAULTS does not"
+            );
+        }
+    }
+
+    #[test]
+    fn known_entries_shows_default_when_key_not_set() {
+        let settings = Settings::default();
+        let entries = settings.known_entries();
+        let (key, value) = entries.iter().find(|(k, _)| *k == "shell").unwrap();
+        assert_eq!(*key, "shell");
+        assert!(
+            matches!(value, SettingValue::Default(_)),
+            "expected Default variant for unset shell, got {value:?}"
+        );
+    }
+
+    #[test]
+    fn known_entries_shows_set_value_when_key_is_configured() {
+        let mut settings = Settings::default();
+        settings.set("shell", "zsh").unwrap();
+        let entries = settings.known_entries();
+        let (_, value) = entries.iter().find(|(k, _)| *k == "shell").unwrap();
+        assert_eq!(value, &SettingValue::Set("zsh".to_string()));
+    }
+
+    #[test]
+    fn known_entries_default_description_is_non_empty() {
+        let settings = Settings::default();
+        for (key, value) in settings.known_entries() {
+            if let SettingValue::Default(desc) = value {
+                assert!(
+                    !desc.is_empty(),
+                    "default description for '{key}' must not be empty"
+                );
+            }
+        }
     }
 
     // ── round-trip JSON format ────────────────────────────────────────────────
