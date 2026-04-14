@@ -37,8 +37,14 @@ const SPARKLE_COLORS: &[(u8, u8, u8)] = &[
 
 // ── Timing ─────────────────────────────────────────────────────────────────
 
-/// Target frame duration: ~30 FPS.
-const FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(33);
+/// Reveal frame duration: ~120 FPS for the logo wipe.
+const REVEAL_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Sparkle frame duration: ~60 FPS.
+const SPARKLE_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Columns of logo revealed per frame during the wipe phase.
+const COLS_PER_FRAME: usize = 3;
 
 // ── Sparkle characters ─────────────────────────────────────────────────────
 
@@ -200,6 +206,43 @@ struct Sparkle {
     done: bool,
 }
 
+/// A pre-rendered logo line with per-character color information for partial reveals.
+///
+/// Storing chars alongside their ANSI-colored string fragments lets the column
+/// wipe emit exactly `n` display-width columns without re-computing the gradient
+/// on every frame.
+struct RenderedLine {
+    /// One entry per display column: the ANSI-colored string for that character.
+    fragments: Vec<String>,
+}
+
+impl RenderedLine {
+    fn new(raw: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> Self {
+        let chars: Vec<char> = raw.chars().collect();
+        let n = chars.len();
+        let mut fragments = Vec::with_capacity(n);
+        for (i, ch) in chars.iter().enumerate() {
+            let t = if n <= 1 {
+                0.0f32
+            } else {
+                i as f32 / (n - 1) as f32
+            };
+            let r = lerp_u8(from.0, to.0, t);
+            let g = lerp_u8(from.1, to.1, t);
+            let b = lerp_u8(from.2, to.2, t);
+            fragments.push(format!("{}", ch.to_string().as_str().rgb(r, g, b)));
+        }
+        Self { fragments }
+    }
+
+    /// Append the first `cols` display columns to `buf`.
+    fn write_partial(&self, buf: &mut String, cols: usize) {
+        for frag in self.fragments.iter().take(cols) {
+            buf.push_str(frag);
+        }
+    }
+}
+
 /// Drop guard that restores cursor visibility.
 ///
 /// Handles normal exit and early `?` returns. Does NOT handle SIGINT on its
@@ -232,10 +275,14 @@ impl Drop for CursorGuard<'_> {
 /// `CursorGuard` still drops on the normal return path.
 ///
 /// Animation design:
-/// - Phase 1: Logo reveal — each line appears over ~120ms.
-/// - Phase 2: Sparkle burst — embers fall below the logo over ~1.2s.
-///   Sparkles are staggered so they appear one-by-one, not all at once.
-///   Sparkles are positioned below the logo, keeping the logo itself clean.
+/// - Phase 1 (~160ms): Column wipe — all six logo lines are revealed
+///   simultaneously, sweeping left to right at `COLS_PER_FRAME` columns per
+///   frame. Each frame rewrites all logo lines in-place using `\r` and
+///   clear-to-EOL, with a single `write_str` call to eliminate flicker.
+/// - Phase 2 (~80ms): Underline sweep — a colored rule sweeps below the logo.
+/// - Phase 3 (~500ms): Sparkle burst — embers cascade below the logo.
+///   All cursor movements for a frame are batched into one string and written
+///   with a single `write_str`, so the cursor never visibly jumps mid-frame.
 fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     let (rows, cols) = term.size();
 
@@ -251,63 +298,114 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     term.hide_cursor()?;
     let _guard = CursorGuard::new(term);
 
-    // Reserve vertical space: 1 blank + logo + sparkle rows below logo + static block.
+    // Pre-render each logo line as a fully-colored string and collect the
+    // char-level representation for column-accurate partial reveals.
     let logo_height = LOGO.len();
-    let sparkle_rows = 3usize; // embers fall up to 3 rows below the logo
-    let static_lines = 10; // blank + tagline + version + blank + header + 3 commands + blank + hint + blank
-    let total_lines = 1 + logo_height + sparkle_rows + static_lines;
+    let rendered_logos: Vec<RenderedLine> = LOGO
+        .iter()
+        .map(|raw| RenderedLine::new(raw, GRAD_FROM, GRAD_TO))
+        .collect();
 
-    for _ in 0..total_lines {
-        term.write_line("")?;
-    }
-    term.move_cursor_up(total_lines)?;
+    // Logo width in display columns (chars, not bytes — box-drawing chars are
+    // single-width in every terminal font that renders them correctly).
+    let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(40);
 
-    // Phase 1: Logo reveal — one line per ~120ms (≈4 frames at 30fps).
-    let frames_per_line = 4usize;
-    for logo_line in LOGO.iter() {
-        for frame in 0..frames_per_line {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            if frame == 0 {
-                let rendered = gradient_line(logo_line, GRAD_FROM, GRAD_TO);
-                term.write_line(&rendered)?;
-            }
-            std::thread::sleep(FRAME_DURATION);
-        }
+    // Print blank lines to claim vertical space for the logo, then return the
+    // cursor to the top so Phase 1 can write in-place.
+    term.write_str(&"\n".repeat(logo_height))?;
+    term.move_cursor_up(logo_height)?;
+
+    // ── Phase 1: Column wipe ────────────────────────────────────────────────
+    //
+    // Each frame builds a single string that rewrites all logo lines in-place:
+    //   \r          — go to column 0
+    //   <partial>   — the revealed portion of the gradient line
+    //   \x1b[K      — clear to end of line (erase any leftover chars)
+    //   \n          — advance to next line
+    // After writing all lines we move the cursor back to the top of the logo.
+    let total_reveal_frames = logo_width.div_ceil(COLS_PER_FRAME);
+    for frame in 0..=total_reveal_frames {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        let cols_visible = ((frame + 1) * COLS_PER_FRAME).min(logo_width);
+        let mut buf = String::with_capacity(logo_height * (cols_visible * 20 + 10));
+        for rl in &rendered_logos {
+            buf.push('\r');
+            rl.write_partial(&mut buf, cols_visible);
+            buf.push_str("\x1b[K\n");
+        }
+        // Return cursor to the top of the logo block after writing all lines.
+        buf.push_str(&format!("\x1b[{}A", logo_height));
+        term.write_str(&buf)?;
+        std::thread::sleep(REVEAL_FRAME);
     }
 
-    // Phase 2: Sparkle burst — embers cascade below the logo.
+    // Cursor is at the top of the logo block after the last frame's \x1b[{n}A.
+    // Advance past the logo so Phase 2 can write the underline row below it.
+    // Track `lines_below_logo` so the final clear covers exactly what was written.
+    let mut lines_below_logo = 0usize;
+    term.move_cursor_down(logo_height)?;
+
+    // ── Phase 2: Underline sweep ────────────────────────────────────────────
     //
-    // The cursor is now logo_height lines below the block start, sitting at
-    // the first sparkle row. Sparkles are placed in the `sparkle_rows` rows
-    // immediately below the logo. Each sparkle has a `start_frame` that
-    // staggers its appearance across the burst period so they drift in
-    // one-by-one rather than all flashing simultaneously.
+    // A horizontal rule sweeps left to right below the logo over ~80ms.
+    if !cancel.load(Ordering::Relaxed) {
+        let rule_char = '─';
+        let rule_width = logo_width;
+        let sweep_cols_per_frame = 4usize;
+        let sweep_frames = rule_width.div_ceil(sweep_cols_per_frame);
+
+        // Claim the underline row.
+        term.write_str("\n")?;
+        term.move_cursor_up(1)?;
+        lines_below_logo += 1;
+
+        for frame in 0..=sweep_frames {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let visible = ((frame + 1) * sweep_cols_per_frame).min(rule_width);
+            let t = visible as f32 / rule_width as f32;
+            let r = lerp_u8(GRAD_FROM.0, GRAD_TO.0, t);
+            let g = lerp_u8(GRAD_FROM.1, GRAD_TO.1, t);
+            let b = lerp_u8(GRAD_FROM.2, GRAD_TO.2, t);
+            let rule: String = std::iter::repeat_n(rule_char, visible).collect();
+            let colored = format!("\r{}\x1b[K", rule.as_str().rgb(r, g, b));
+            term.write_str(&colored)?;
+            std::thread::sleep(REVEAL_FRAME);
+        }
+        // Advance past the underline row into the sparkle region.
+        term.write_str("\n")?;
+    } else {
+        // Cancelled — still write a blank line to keep the cursor below the logo
+        // so the clear covers the logo region correctly.
+        term.write_str("\n")?;
+        lines_below_logo += 1;
+    }
+
+    // ── Phase 3: Sparkle burst ──────────────────────────────────────────────
+    //
+    // Embers cascade in the `sparkle_rows` rows immediately below the underline.
+    // All cursor movements per frame are batched into one write — the cursor
+    // never visibly repositions mid-frame.
+    let sparkle_rows = 3usize;
+
     if !cancel.load(Ordering::Relaxed) {
         let mut rng = Lcg::new();
         let total_sparkles = 18usize;
-        let frames_per_burst = 36usize; // ~1.2s at 30fps
+        let frames_per_burst = 32usize; // ~500ms at 16ms/frame
 
-        // Leave a small right margin to avoid triggering terminal line-wrapping.
         let usable_cols = (cols as usize).saturating_sub(2).max(1);
-
-        // Distribute start_frames evenly across the burst window, reserving
-        // the last few frames so all sparkles finish erasing before we clear.
         let burst_window = frames_per_burst.saturating_sub(4);
 
         let mut sparkles: Vec<Sparkle> = (0..total_sparkles)
             .map(|i| {
                 let col = (rng.next() as usize) % usable_cols;
-                // Row 0 is directly below the last logo line; rows go up to sparkle_rows-1.
                 let row = (rng.next() as usize) % sparkle_rows;
                 let ch = SPARKLE_CHARS[(rng.next() as usize) % SPARKLE_CHARS.len()];
-                let color_idx = (rng.next() as usize) % SPARKLE_COLORS.len();
-                let color = SPARKLE_COLORS[color_idx];
-                let frames_remaining = 2 + (rng.next() as u8 % 2); // 2 or 3 frames visible
+                let color = SPARKLE_COLORS[(rng.next() as usize) % SPARKLE_COLORS.len()];
+                let frames_remaining = 2 + (rng.next() as u8 % 2);
                 let start_frame = (i * burst_window) / total_sparkles;
                 Sparkle {
                     col,
@@ -321,59 +419,68 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
             })
             .collect();
 
-        // Reserve the sparkle rows by printing blank lines, then return the
-        // cursor to the top of the sparkle region.
-        for _ in 0..sparkle_rows {
-            term.write_line("")?;
-        }
+        // Claim sparkle rows and return cursor to the top of the sparkle region.
+        term.write_str(&"\n".repeat(sparkle_rows))?;
         term.move_cursor_up(sparkle_rows)?;
+        lines_below_logo += sparkle_rows;
 
         for current_frame in 0..frames_per_burst {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
 
+            // Build the entire frame as one string: for each sparkle that needs
+            // update, emit relative moves (down/right), the char or a space,
+            // then moves back to the origin (top-left of sparkle region).
+            // Using raw ANSI sequences keeps everything in one write call.
+            let mut buf = String::new();
             for sparkle in &mut sparkles {
                 if sparkle.done || current_frame < sparkle.start_frame {
                     continue;
                 }
-
+                // Move down `sparkle.row` lines, right `sparkle.col` cols.
+                if sparkle.row > 0 {
+                    buf.push_str(&format!("\x1b[{}B", sparkle.row));
+                }
+                if sparkle.col > 0 {
+                    buf.push_str(&format!("\x1b[{}C", sparkle.col));
+                }
                 if sparkle.frames_remaining > 0 {
-                    // Draw the sparkle at its position below the logo.
-                    term.move_cursor_down(sparkle.row)?;
-                    term.move_cursor_right(sparkle.col)?;
                     let s = sparkle.ch.to_string();
-                    let painted = format!(
+                    buf.push_str(&format!(
                         "{}",
                         s.as_str()
                             .rgb(sparkle.color.0, sparkle.color.1, sparkle.color.2)
-                    );
-                    term.write_str(&painted)?;
-                    // Return cursor to the top of the sparkle region.
-                    term.move_cursor_up(sparkle.row)?;
-                    term.move_cursor_left(sparkle.col + 1)?;
+                    ));
                     sparkle.frames_remaining -= 1;
                 } else {
-                    // Erase: overwrite with a space and mark done.
-                    term.move_cursor_down(sparkle.row)?;
-                    term.move_cursor_right(sparkle.col)?;
-                    term.write_str(" ")?;
-                    term.move_cursor_up(sparkle.row)?;
-                    term.move_cursor_left(sparkle.col + 1)?;
+                    buf.push(' ');
                     sparkle.done = true;
+                }
+                // Return to origin (top-left of sparkle region).
+                if sparkle.row > 0 {
+                    buf.push_str(&format!("\x1b[{}A", sparkle.row));
+                }
+                // col+1 for the character written; use \x1b[D (cursor left) to return.
+                if sparkle.col > 0 {
+                    buf.push_str(&format!("\x1b[{}D", sparkle.col));
                 }
             }
 
-            std::thread::sleep(FRAME_DURATION);
+            if !buf.is_empty() {
+                term.write_str(&buf)?;
+            }
+
+            std::thread::sleep(SPARKLE_FRAME);
         }
 
-        // Advance past the sparkle rows so clear_last_lines covers the right region.
+        // Advance past the sparkle rows so clear_last_lines covers them.
         term.move_cursor_down(sparkle_rows)?;
     }
 
-    // Clear the entire animation region (1 blank + logo + sparkle rows) and
-    // replace with clean static output.
-    term.clear_last_lines(1 + logo_height + sparkle_rows)?;
+    // Clear the entire animation region (logo + all lines below) and replace
+    // with clean static output.
+    term.clear_last_lines(logo_height + lines_below_logo)?;
     render_static(term)?;
 
     Ok(())
@@ -593,7 +700,7 @@ mod tests {
     #[test]
     fn sparkle_start_frames_are_staggered_and_in_range() {
         let total_sparkles = 18usize;
-        let frames_per_burst = 36usize;
+        let frames_per_burst = 32usize;
         let burst_window = frames_per_burst.saturating_sub(4);
         let start_frames: Vec<usize> = (0..total_sparkles)
             .map(|i| (i * burst_window) / total_sparkles)
@@ -658,6 +765,42 @@ mod tests {
         let a = rng.next();
         let b = rng.next();
         assert_ne!(a, b, "LCG must advance state each call");
+    }
+
+    // ── RenderedLine ──────────────────────────────────────────────────────
+
+    /// Partial reveal of zero columns produces an empty string.
+    #[test]
+    fn rendered_line_partial_zero_cols_is_empty() {
+        yansi::enable();
+        let rl = RenderedLine::new("hello", GRAD_FROM, GRAD_TO);
+        let mut buf = String::new();
+        rl.write_partial(&mut buf, 0);
+        assert_eq!(buf, "");
+    }
+
+    /// Full reveal matches the output of `gradient_line` for the same input.
+    #[test]
+    fn rendered_line_full_reveal_matches_gradient_line() {
+        yansi::enable();
+        let input = "hello";
+        let rl = RenderedLine::new(input, GRAD_FROM, GRAD_TO);
+        let mut buf = String::new();
+        rl.write_partial(&mut buf, input.chars().count());
+        let expected = gradient_line(input, GRAD_FROM, GRAD_TO);
+        assert_eq!(buf, expected);
+    }
+
+    /// Requesting more cols than the line length reveals the entire line without panic.
+    #[test]
+    fn rendered_line_partial_clamps_to_line_length() {
+        yansi::enable();
+        let input = "hi";
+        let rl = RenderedLine::new(input, GRAD_FROM, GRAD_TO);
+        let mut buf = String::new();
+        rl.write_partial(&mut buf, 999);
+        let expected = gradient_line(input, GRAD_FROM, GRAD_TO);
+        assert_eq!(buf, expected);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
