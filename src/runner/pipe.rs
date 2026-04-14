@@ -11,6 +11,8 @@ use super::{
 };
 
 #[cfg(unix)]
+use super::channel::{SideChannel, TerminalWriter};
+#[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
 /// A duplicated pipe file descriptor that implements `Read`.
@@ -1043,6 +1045,16 @@ pub(super) fn run_pipe_chain(
         std::sync::mpsc::Receiver<bool>,
     > = std::collections::HashMap::new();
 
+    // Shared terminal writer for all reader threads in this pipe chain.
+    // Created once so all threads serialise through the same mutex.
+    #[cfg(unix)]
+    let terminal_writer = std::sync::Arc::new(TerminalWriter::new());
+
+    // Join handles for side-channel reader threads (one per non-sponge block).
+    // Joined after all children exit to flush any buffered side-channel output.
+    #[cfg(unix)]
+    let mut reader_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -1183,6 +1195,16 @@ pub(super) fn run_pipe_chain(
         #[cfg(unix)]
         let sigint_ignored = i > 0;
 
+        // Create a side channel for this block before spawning so the child
+        // inherits the pipe ends via pre_exec/dup2. Each block gets its own
+        // independent pipe pair and reader thread.
+        #[cfg(unix)]
+        let mut block_channel = SideChannel::new().inspect_err(|_| {
+            kill_pipe_group(child_pgid, &children);
+            drop(children.drain(..));
+            drop(node_deps_dirs.drain(..));
+        })?;
+
         let (mut child, node_deps_dir) = spawn_block(
             block,
             script_path,
@@ -1194,7 +1216,7 @@ pub(super) fn run_pipe_chain(
             #[cfg(unix)]
             sigint_ignored,
             #[cfg(unix)]
-            None, // pipe-chain side channel wiring is deferred to a future stage
+            Some(&block_channel),
         )
         .inspect_err(|_| {
             #[cfg(unix)]
@@ -1202,6 +1224,27 @@ pub(super) fn run_pipe_chain(
             drop(children.drain(..));
             drop(node_deps_dirs.drain(..));
         })?;
+
+        // Close parent's copies of the child's pipe ends immediately after
+        // spawn. If kept open, the reader thread will never see EOF.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+            block_channel.close_child_ends();
+            let ctrl_reader = block_channel
+                .take_control_reader()
+                .expect("control reader taken exactly once per block");
+            let resp_writer = block_channel
+                .take_response_writer()
+                .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
+            let handle = super::channel::spawn_reader(
+                ctrl_reader,
+                std::sync::Arc::clone(&terminal_writer),
+                None,
+                resp_writer,
+            );
+            reader_handles.push(handle);
+        }
         node_deps_dirs.push(node_deps_dir);
 
         // After spawning the first non-sponge block, record its PID as the
@@ -1329,6 +1372,15 @@ pub(super) fn run_pipe_chain(
             .collect();
         wait_pipe_children_fallback(children_opt)?
     };
+
+    // Join all side-channel reader threads now that every child has exited.
+    // The children's fd 3 write ends are closed on exit; close_child_ends()
+    // above closed the parent's copies, so every reader has seen EOF.
+    // Joining here flushes any buffered side-channel output to the terminal.
+    #[cfg(unix)]
+    for handle in reader_handles {
+        handle.join().expect("side-channel reader thread panicked");
+    }
 
     if early_exit {
         // Ensure the cancel token is set for any code that polls it after the

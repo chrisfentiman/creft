@@ -559,27 +559,23 @@ fn execute_block(
     #[cfg(unix)]
     side_channel.close_child_ends();
 
-    // Move the control reader into a background thread that drains it.
-    // This runs concurrently with stdout capture so neither side blocks.
+    // Spawn the side-channel reader thread that parses NDJSON from fd 3
+    // and renders print/status messages to the terminal via stderr.
+    // Runs concurrently with stdout capture so neither pipe blocks.
     #[cfg(unix)]
     let reader_thread = {
-        use std::io::Read as _;
         use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
         let ctrl_reader = side_channel
             .take_control_reader()
             .expect("control reader taken exactly once per block");
-        // Drop the response writer — stage 1 has no bidirectional prompts.
-        // Dropping it closes the write end so any child blocked on fd 4 sees EOF.
-        let _response_writer = side_channel.take_response_writer();
-        std::thread::spawn(move || {
-            // SAFETY: ctrl_reader is valid and exclusively owned by this thread.
-            // Wrapping it as a File gives us buffered read via Read trait.
-            let mut file = unsafe { std::fs::File::from_raw_fd(ctrl_reader.into_raw_fd()) };
-            let mut buf = Vec::new();
-            // Drain until EOF (child exited and parent closed write end above).
-            let _ = file.read_to_end(&mut buf);
-            buf
-        })
+        // Take the response writer so the reader can send empty prompt
+        // responses (stage 3 non-interactive fallback). Converting to File
+        // here so spawn_reader owns it for the thread lifetime.
+        let resp_writer = side_channel
+            .take_response_writer()
+            .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
+        let writer = std::sync::Arc::new(channel::TerminalWriter::new());
+        channel::spawn_reader(ctrl_reader, writer, None, resp_writer)
     };
 
     // When prev_output data must be written to the child's stdin, do it on a
@@ -618,13 +614,13 @@ fn execute_block(
             .map_err(CreftError::Io)?;
     }
 
-    // Join the side-channel reader thread after the child has exited and
-    // stdout has been drained. The child's exit guarantees its fd 3 write
-    // end is closed; our close_child_ends() call above closed the parent's
-    // copy, so the reader thread will have seen EOF and returned by now.
-    // Stage 1: collected bytes are discarded (no rendering yet).
+    // Join the reader thread after the child has exited and stdout has been
+    // drained. The child's exit closes its fd 3 write end; close_child_ends()
+    // above closed the parent's copy, so the reader will have seen EOF.
+    // Joining here ensures all side-channel messages are rendered before
+    // the function returns.
     #[cfg(unix)]
-    let _ = reader_thread
+    reader_thread
         .join()
         .expect("side-channel reader thread panicked");
 
