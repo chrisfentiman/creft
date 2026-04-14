@@ -6,7 +6,12 @@
 ///
 /// The preamble assumes fd 3 (write, block → creft) and fd 4 (read,
 /// creft → block) are open. If they aren't (non-unix fallback, or something
-/// unexpected), the functions silently fail or fall back to stderr.
+/// unexpected), the functions silently fail.
+///
+/// The Node preamble is compatible with both CommonJS and ESM. In ESM
+/// contexts (e.g., blocks that use top-level `await`), the channel functions
+/// become no-ops because `require` is not available — but the block runs
+/// without a `ERR_AMBIGUOUS_MODULE_SYNTAX` error.
 pub(crate) fn for_language(lang: &str) -> Option<String> {
     match lang {
         "bash" | "sh" | "zsh" => Some(BASH_PREAMBLE.to_string()),
@@ -90,19 +95,28 @@ def creft_prompt(question, choices=""):
 # -- end creft runtime bindings --
 "#;
 
-/// Node (CommonJS) preamble defining creft_print, creft_status, and creft_prompt.
+/// Node preamble defining creft_print, creft_status, and creft_prompt.
 ///
-/// Uses synchronous fs.writeSync/readSync so no async event loop setup is needed.
-/// ESM blocks using import/export syntax are not supported — require() fails in
-/// a "type":"module" context.
+/// Uses synchronous `fs.writeSync`/`readSync` so no async event loop setup is
+/// needed. The `fs` module is loaded via a `typeof require` guard rather than a
+/// bare `require()` call: this makes the preamble syntactically valid in both
+/// CommonJS and ESM contexts.
+///
+/// In CommonJS, `require` is defined and `fs` is loaded normally. In ESM,
+/// `typeof require` evaluates to `'undefined'`, the require branch is skipped,
+/// and `_creft_fs` is null. With a null `_creft_fs`, all three functions become
+/// no-ops — the user's ESM block with top-level `await` runs without the
+/// `ERR_AMBIGUOUS_MODULE_SYNTAX` error that a bare `require()` call would trigger.
 const NODE_PREAMBLE: &str = r#"// -- creft runtime bindings --
-const _creft_fs = require('fs');
+const _creft_fs = typeof require === 'function' ? require('fs') : null;
 function _creft_write(obj) {
+  if (!_creft_fs) return;
   try { _creft_fs.writeSync(3, JSON.stringify(obj) + '\n'); } catch(e) {}
 }
 function creft_print(message) { _creft_write({type:'print',message:String(message)}); }
 function creft_status(message) { _creft_write({type:'status',message:String(message)}); }
 function creft_prompt(question, choices) {
+  if (!_creft_fs) return '';
   const id = `prompt_${process.pid}_${Math.random().toString(36).slice(2)}`;
   _creft_write({type:'prompt',id,question:String(question),choices:String(choices||'')});
   const buf = Buffer.alloc(4096);
@@ -170,6 +184,28 @@ mod tests {
         assert!(
             p.contains("function creft_prompt"),
             "node preamble missing function creft_prompt"
+        );
+    }
+
+    /// Node preamble uses a typeof-guarded require rather than a bare require()
+    /// call, so it is syntactically valid in ESM contexts with top-level await.
+    ///
+    /// A bare `require('fs')` in an ESM file triggers `ERR_AMBIGUOUS_MODULE_SYNTAX`
+    /// when top-level `await` is also present. The guard keeps the preamble
+    /// ESM-compatible: in ESM `typeof require` is `'undefined'`, the branch is
+    /// skipped, and `_creft_fs` is null (functions no-op silently).
+    #[test]
+    fn node_preamble_uses_typeof_require_guard() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("typeof require"),
+            "node preamble must use typeof require guard for ESM compatibility"
+        );
+        // The preamble must not contain a bare require() call at the statement
+        // level. The only require() call must be inside the typeof guard.
+        assert!(
+            !p.contains("= require('fs')") && p.contains("? require('fs')"),
+            "node preamble must gate require('fs') behind the typeof check, not call it unconditionally"
         );
     }
 

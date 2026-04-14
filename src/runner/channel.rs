@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal as _, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{Arc, mpsc};
 
@@ -181,24 +181,54 @@ struct TerminalWriterInner {
 /// synchronisation, concurrent writes to stderr interleave. Every public
 /// method acquires the inner mutex for the duration of a single write,
 /// so each message renders atomically.
+///
+/// Status messages are ephemeral visual feedback intended for a human
+/// watching a terminal. When stderr is not a TTY (piped output, CI, agent
+/// contexts), status messages are silently dropped. Print messages always
+/// render regardless of TTY state.
 pub(crate) struct TerminalWriter {
     inner: std::sync::Mutex<TerminalWriterInner>,
+    /// True when stderr is connected to a TTY at construction time.
+    ///
+    /// Checked once at construction rather than per-call: the TTY state of
+    /// a file descriptor does not change during the lifetime of a process,
+    /// and avoiding repeated `isatty(2)` syscalls in the hot path is free.
+    is_tty: bool,
 }
 
 impl TerminalWriter {
     pub(crate) fn new() -> Self {
+        let is_tty = std::io::stderr().is_terminal();
         Self {
             inner: std::sync::Mutex::new(TerminalWriterInner {
                 stderr: std::io::stderr(),
                 has_status: false,
             }),
+            is_tty,
+        }
+    }
+
+    /// Construct a `TerminalWriter` with an explicit TTY override.
+    ///
+    /// Used in tests to exercise TTY-gated paths (status, clear_status)
+    /// without requiring the test process to run with a real TTY attached
+    /// to stderr.
+    #[cfg(test)]
+    fn with_tty(is_tty: bool) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(TerminalWriterInner {
+                stderr: std::io::stderr(),
+                has_status: false,
+            }),
+            is_tty,
         }
     }
 
     /// Write a print message to stderr.
     ///
     /// Clears any active status line first so the print text appears on a
-    /// clean line. After writing, `has_status` is false.
+    /// clean line. After writing, `has_status` is false. Always renders,
+    /// regardless of TTY state.
     pub(crate) fn print(&self, message: &str) {
         let Ok(mut g) = self.inner.lock() else {
             return;
@@ -217,7 +247,14 @@ impl TerminalWriter {
     /// spaces, then writes the new message without a trailing newline so the
     /// next status can overwrite it. When a print message arrives afterwards,
     /// `print` clears this line first.
+    ///
+    /// Silently dropped when stderr is not a TTY. Status messages are
+    /// ephemeral visual feedback; in non-TTY contexts (piped output, CI,
+    /// agent subprocess) they would appear as garbled escape sequences.
     pub(crate) fn status(&self, message: &str) {
+        if !self.is_tty {
+            return;
+        }
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
@@ -229,7 +266,11 @@ impl TerminalWriter {
     /// Clear the active status line, if any.
     ///
     /// Called when the block exits so no stale status line remains on screen.
+    /// No-op when stderr is not a TTY (status messages are never written there).
     pub(crate) fn clear_status(&self) {
+        if !self.is_tty {
+            return;
+        }
         let Ok(mut g) = self.inner.lock() else {
             return;
         };
@@ -692,19 +733,35 @@ mod tests {
         assert!(!g.has_status, "print clears has_status");
     }
 
-    /// TerminalWriter::status sets has_status to true.
+    /// TerminalWriter::status sets has_status to true when stderr is a TTY.
+    ///
+    /// Uses with_tty(true) because test stderr is never a real TTY — without
+    /// the override, status() is a no-op and has_status stays false.
     #[test]
-    fn terminal_writer_status_sets_has_status() {
-        let tw = super::TerminalWriter::new();
+    fn terminal_writer_status_sets_has_status_when_tty() {
+        let tw = super::TerminalWriter::with_tty(true);
         tw.status("Working...");
         let g = tw.inner.lock().unwrap();
-        assert!(g.has_status, "status must set has_status");
+        assert!(g.has_status, "status must set has_status on a TTY");
+    }
+
+    /// TerminalWriter::status is a no-op when stderr is not a TTY.
+    ///
+    /// Status messages are ephemeral visual feedback. In non-TTY contexts
+    /// (piped output, CI, agent subprocess), they would appear as garbled
+    /// escape sequences, so they are silently dropped.
+    #[test]
+    fn terminal_writer_status_dropped_when_not_tty() {
+        let tw = super::TerminalWriter::with_tty(false);
+        tw.status("Working...");
+        let g = tw.inner.lock().unwrap();
+        assert!(!g.has_status, "status must not set has_status on non-TTY");
     }
 
     /// TerminalWriter::clear_status resets has_status after a status call.
     #[test]
     fn terminal_writer_clear_status_resets_flag() {
-        let tw = super::TerminalWriter::new();
+        let tw = super::TerminalWriter::with_tty(true);
         tw.status("Running");
         tw.clear_status();
         let g = tw.inner.lock().unwrap();
@@ -723,7 +780,7 @@ mod tests {
     /// print clears an active status before writing.
     #[test]
     fn terminal_writer_print_clears_active_status() {
-        let tw = super::TerminalWriter::new();
+        let tw = super::TerminalWriter::with_tty(true);
         tw.status("Pending");
         tw.print("Done"); // must clear status first
         let g = tw.inner.lock().unwrap();
