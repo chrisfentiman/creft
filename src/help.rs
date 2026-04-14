@@ -170,30 +170,32 @@ Examples:
 
 /// Extended description shown by `creft up --help`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
-Installs creft instructions for your coding AI
+Install creft into your coding AI tools.
 
-Detects which AI coding systems are present and installs the appropriate
-instruction file so the LLM knows how to discover and use creft skills.
+For supported tools (Claude Code, Gemini), installs a session-start
+hook that teaches the agent about creft. The hook runs automatically
+and updates when creft updates -- no need to re-run `creft up`.
+
+For other tools (Cursor, Windsurf, Aider, Copilot, Codex), writes a static
+instruction file. Run `creft up` again after upgrading creft to refresh.
 
 Examples:
   creft up                  Auto-detect and install for all found systems
   creft up claude-code      Install for Claude Code only
   creft up cursor           Install for Cursor only
-  creft up -g claude-code   Install globally (~/.claude/skills/creft/)
+  creft up -g claude-code   Install globally (~/.claude/settings.json)
 
 Supported Systems:
-  claude-code    .claude/skills/creft/SKILL.md
+  claude-code    .claude/settings.json (session start hook)
+  gemini         .gemini/settings.json (session start hook)
   cursor         .cursor/rules/creft.mdc
   windsurf       .windsurf/rules/creft.md
   aider          CONVENTIONS.md (appends)
   copilot        .github/copilot-instructions.md
   codex          AGENTS.md (appends)
-  gemini         GEMINI.md (appends)
 
-The installer never overwrites existing content. Existing creft sections
-are refreshed; non-creft content is preserved. Files already containing
-current instructions are skipped. Some systems (Cursor, Windsurf) don't
-support global rules via files.";
+Make sure `creft` is on your PATH for the hook to work.
+Some systems (Cursor, Windsurf) don't support global rules via files.";
 
 /// Extended description shown by `creft doctor --help`, covering global and skill-specific check modes.
 pub const DOCTOR_LONG_ABOUT: &str = "\
@@ -416,7 +418,8 @@ Example:
 Run 'creft remove --docs' for the full reference.";
 
 const UP_SHORT_ABOUT: &str = "\
-Detects AI coding systems and installs the appropriate instruction file.
+Installs creft into your coding AI tools. Hook-based for Claude Code and
+Gemini; static instruction file for Cursor, Windsurf, Aider, Copilot, Codex.
 
 Examples:
   creft up                  Auto-detect and install for all found systems

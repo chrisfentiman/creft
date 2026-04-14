@@ -16,6 +16,7 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             "installing creft instructions for {}...",
             sys.display_name()
         );
+        setup::ensure_session_skill(ctx, &cwd, global)?;
         setup::install(ctx, sys, &cwd, global)?;
     } else if global {
         // Aider global requires a manual config step, so it's excluded here.
@@ -25,6 +26,7 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             setup::System::Gemini,
         ];
         eprintln!("installing creft instructions globally...");
+        setup::ensure_session_skill(ctx, &cwd, global)?;
         for sys in &global_systems {
             eprintln!();
             eprintln!("{}:", sys.display_name());
@@ -50,6 +52,7 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             "detected {} system(s), installing creft instructions...",
             detected.len()
         );
+        setup::ensure_session_skill(ctx, &cwd, false)?;
         for sys in &detected {
             eprintln!();
             eprintln!("{}:", sys.display_name());
@@ -61,6 +64,6 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
     }
 
     eprintln!();
-    eprintln!("done. the LLM now knows about creft.");
+    eprintln!("done. creft bootstraps itself at session start.");
     Ok(())
 }
