@@ -5,17 +5,15 @@ use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::{model, registry};
 
-pub fn cmd_plugin_install(
-    ctx: &AppContext,
-    source: &str,
-    plugin: Option<&str>,
-) -> Result<(), CreftError> {
+pub fn cmd_plugin_install(ctx: &AppContext, source: &str) -> Result<(), CreftError> {
     let pkg = if source.contains("://") || source.starts_with("git@") || source.starts_with('/') {
-        // Full URL or absolute path: clone directly.
-        registry::plugin_install(ctx, source, plugin)?
+        // Full URL or absolute path: clone directly. The repo must contain
+        // exactly one plugin; multi-plugin repos require the owner/plugin
+        // shorthand format (e.g. `creft plugin install creft/ask`).
+        registry::plugin_install(ctx, source, None)?
     } else if source.contains('/') {
-        // Shorthand name (owner/repo or creft/plugin): resolve via install_by_name.
-        registry::install_by_name(ctx, source, plugin)?
+        // Shorthand name (owner/repo or creft/plugin): derive plugin name from path.
+        registry::install_by_name(ctx, source)?
     } else {
         return Err(CreftError::InvalidManifest(format!(
             "'{source}' is not a valid plugin source — use owner/repo or a full git URL"

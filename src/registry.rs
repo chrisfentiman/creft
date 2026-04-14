@@ -464,7 +464,7 @@ pub fn plugin_install(
             None => {
                 let names: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
                 return Err(CreftError::InvalidManifest(format!(
-                    "repository contains {} plugins: {}. Use --plugin <name> to install a specific one",
+                    "repository contains {} plugins: {}. Use 'creft plugin install owner/<name>' to install a specific one",
                     cat.plugins.len(),
                     names.join(", ")
                 )));
@@ -586,11 +586,11 @@ pub fn install_from_path(
 ///
 /// `creft/<plugin>` resolves to the official creft repo. All other
 /// `owner/repo` patterns resolve to `https://github.com/<owner>/<repo>`.
+/// The plugin name is always derived from the path segment after `/`.
 /// Bare names (no `/`) return an error.
 pub fn install_by_name(
     ctx: &AppContext,
     qualified_name: &str,
-    plugin_filter: Option<&str>,
 ) -> Result<InstalledPackage, CreftError> {
     let Some(slash_pos) = qualified_name.find('/') else {
         return Err(CreftError::InvalidManifest(format!(
@@ -605,9 +605,10 @@ pub fn install_by_name(
         // creft shorthand: clone the official repo and install the named plugin.
         plugin_install(ctx, CREFT_REPO, Some(plugin))
     } else {
-        // Treat as GitHub owner/repo shorthand.
+        // Treat as GitHub owner/repo shorthand. The plugin name is the repo
+        // name (the part after `/`), which is always derivable from the source.
         let url = format!("https://github.com/{owner}/{plugin}");
-        plugin_install(ctx, &url, plugin_filter)
+        plugin_install(ctx, &url, Some(plugin))
     }
 }
 
@@ -832,7 +833,7 @@ pub struct PluginSettings {
 /// Deserialization: `true` → `All(true)`, `["cmd1", "cmd2"]` → `Commands(vec)`.
 /// `false` is rejected by `PluginSettings::validate`. An empty command list
 /// is normalized to `All(true)` by `validate` — key presence means active.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ActivationEntry {
     /// All commands from this plugin are active.
@@ -904,9 +905,29 @@ pub fn save_settings(
     Ok(())
 }
 
+/// Activate all commands for an already-validated installed plugin.
+///
+/// Writes `All(true)` into the plugin's activation entry and persists settings.
+/// Callers must verify the plugin directory exists before calling this.
+fn activate_plugin_all(
+    ctx: &AppContext,
+    plugin_name: &str,
+    scope: Scope,
+) -> Result<(), CreftError> {
+    let mut settings = load_settings(ctx, scope)?;
+    settings
+        .activated
+        .insert(plugin_name.to_string(), ActivationEntry::All(true));
+    save_settings(ctx, scope, &settings)
+}
+
 /// Activate a command or all commands from an installed plugin.
 ///
-/// `target` is either `plugin` (activate all) or `plugin/cmd` (one command).
+/// `target` is either `plugin` (activate all), `plugin/cmd` (one command),
+/// or `owner/plugin` (qualified install name — the owner prefix is stripped).
+/// The qualified-name form lets callers use `creft plugin activate creft/ask`
+/// interchangeably with `creft plugin activate ask`.
+///
 /// Validates the plugin is installed and the command exists before writing.
 /// Writes activation state to the `settings.json` for the given scope.
 pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), CreftError> {
@@ -915,6 +936,15 @@ pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), Cref
     let plugins_dir = ctx.plugins_dir()?;
     let plugin_dir = plugins_dir.join(plugin_name);
     if !plugin_dir.is_dir() {
+        // The first segment isn't an installed plugin. If the input looks like
+        // `owner/plugin` (i.e. cmd_name is Some and that name IS installed),
+        // treat it as a qualified install name and activate the second segment.
+        if let Some(qualified_plugin) = cmd_name {
+            let alt_dir = plugins_dir.join(qualified_plugin);
+            if alt_dir.is_dir() {
+                return activate_plugin_all(ctx, qualified_plugin, scope);
+            }
+        }
         return Err(CreftError::PackageNotFound(plugin_name.to_string()));
     }
 
@@ -2036,5 +2066,115 @@ mod tests {
         let local = ctx.packages_dir_for(Scope::Local).unwrap();
         let global = ctx.packages_dir_for(Scope::Global).unwrap();
         assert_eq!(local, global);
+    }
+
+    // --- activate: owner/plugin qualified name fallback ---
+
+    fn make_plugin_dir(creft_home: &std::path::Path, plugin_name: &str) {
+        let plugins = creft_home.join("plugins");
+        std::fs::create_dir_all(plugins.join(plugin_name)).unwrap();
+    }
+
+    fn make_plugin_skill(creft_home: &std::path::Path, plugin_name: &str, skill_file: &str) {
+        let plugin_dir = creft_home.join("plugins").join(plugin_name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(skill_file), b"---\nname: test\n---\n").unwrap();
+    }
+
+    fn activated_entry(ctx: &AppContext, plugin: &str) -> Option<ActivationEntry> {
+        let settings = load_settings(ctx, Scope::Global).unwrap();
+        settings.activated.get(plugin).cloned()
+    }
+
+    #[test]
+    fn activate_bare_plugin_name_activates_all_commands() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::All(true)),
+        );
+    }
+
+    #[test]
+    fn activate_qualified_owner_plugin_strips_owner_and_activates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // "creft" is not an installed plugin, but "ask" is.
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "creft/ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::All(true)),
+        );
+        // The "creft" key must not appear in the activation map.
+        assert!(activated_entry(&ctx, "creft").is_none());
+    }
+
+    #[test]
+    fn activate_plugin_slash_cmd_activates_specific_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // "ask" is installed and has a "fetch.md" skill file.
+        make_plugin_skill(dir.path(), "ask", "fetch.md");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "ask/fetch", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::Commands(vec!["fetch".to_string()])),
+        );
+    }
+
+    #[test]
+    fn activate_returns_package_not_found_when_neither_segment_is_installed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        let err = activate(&ctx, "creft/ask", Scope::Global).unwrap_err();
+        assert!(
+            matches!(err, CreftError::PackageNotFound(ref name) if name == "creft"),
+            "expected PackageNotFound(creft) when neither segment is installed; got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn activate_prefers_literal_interpretation_when_first_segment_is_installed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Both "creft" and "ask" are installed.
+        make_plugin_skill(dir.path(), "creft", "ask.md");
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        // "creft/ask" with "creft" installed → literal: plugin=creft, cmd=ask.
+        activate(&ctx, "creft/ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "creft"),
+            Some(ActivationEntry::Commands(vec!["ask".to_string()])),
+        );
+        // "ask" plugin must not be touched.
+        assert!(activated_entry(&ctx, "ask").is_none());
     }
 }

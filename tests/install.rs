@@ -556,7 +556,10 @@ fn plugin_install_bare_name_without_slash_fails() {
         .stderr(predicate::str::contains("not a valid plugin source"));
 }
 
-/// Multi-plugin repo without `--plugin` returns an error listing available plugins.
+/// Multi-plugin repo accessed by full URL returns an error directing to the shorthand format.
+///
+/// Without the `--plugin` flag, `creft plugin install <url>` cannot select one plugin from
+/// a multi-plugin repo. Use `creft plugin install owner/<name>` instead.
 #[test]
 fn plugin_install_multi_plugin_repo_without_filter_fails() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
@@ -567,12 +570,17 @@ fn plugin_install_multi_plugin_repo_without_filter_fails() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("Use --plugin"));
+        .stderr(predicate::str::contains(
+            "Use 'creft plugin install owner/<name>'",
+        ));
 }
 
-/// Multi-plugin repo with `--plugin <name>` installs only the named plugin.
+/// `--plugin` is no longer a valid flag; it is rejected with an unknown-option error.
+///
+/// Multi-plugin repos accessed by full URL are not supported without the shorthand format.
+/// Users should use `creft plugin install owner/<name>` to select a specific plugin.
 #[test]
-fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
+fn plugin_install_plugin_flag_is_rejected() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
     let creft_home = creft_env();
 
@@ -585,18 +593,13 @@ fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
             "alpha",
         ])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("installed: alpha"));
-
-    // Only alpha is in the plugins dir; beta is not.
-    let plugins_dir = creft_home.path().join("plugins");
-    assert!(plugins_dir.join("alpha").exists());
-    assert!(!plugins_dir.join("beta").exists());
+        .failure()
+        .stderr(predicate::str::contains("invalid option"));
 }
 
-/// Multi-plugin repo with `--plugin <name>` that does not exist returns PluginNotInCatalog.
+/// Short `-p` flag is also rejected as an unknown flag.
 #[test]
-fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
+fn plugin_install_short_p_flag_is_rejected() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha")]);
     let creft_home = creft_env();
 
@@ -605,13 +608,12 @@ fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
             "plugin",
             "install",
             repo.path().to_str().unwrap(),
-            "--plugin",
-            "nonexistent",
+            "-p",
+            "alpha",
         ])
         .assert()
         .failure()
-        .code(2)
-        .stderr(predicate::str::contains("not found in catalog"));
+        .stderr(predicate::str::contains("invalid option"));
 }
 
 /// A repo missing `.creft/catalog.json` returns ManifestNotFound.

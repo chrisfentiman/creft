@@ -65,30 +65,13 @@ pub(crate) enum Command {
 /// Subcommands for `creft plugin`.
 #[derive(Debug)]
 pub(crate) enum PluginCommand {
-    Install {
-        source: String,
-        plugin: Option<String>,
-    },
-    Update {
-        name: Option<String>,
-    },
-    Uninstall {
-        name: String,
-    },
-    Activate {
-        target: String,
-        global: bool,
-    },
-    Deactivate {
-        target: String,
-        global: bool,
-    },
-    List {
-        name: Option<String>,
-    },
-    Search {
-        query: Vec<String>,
-    },
+    Install { source: String },
+    Update { name: Option<String> },
+    Uninstall { name: String },
+    Activate { target: String, global: bool },
+    Deactivate { target: String, global: bool },
+    List { name: Option<String> },
+    Search { query: Vec<String> },
 }
 
 /// Subcommands for `creft settings`.
@@ -295,11 +278,9 @@ fn parse_plugin_install(parser: &mut lexopt::Parser) -> Result<Parsed, CliError>
     use lexopt::prelude::*;
 
     let mut source = None;
-    let mut plugin = None;
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('p') | Long("plugin") => plugin = Some(parser.value()?.string()?),
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginInstall)),
             Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginInstall)),
             Value(v) if source.is_none() => source = Some(v.string()?),
@@ -318,7 +299,6 @@ fn parse_plugin_install(parser: &mut lexopt::Parser) -> Result<Parsed, CliError>
     })?;
     Ok(Parsed::Command(Command::Plugin(PluginCommand::Install {
         source,
-        plugin,
     })))
 }
 
@@ -763,6 +743,40 @@ mod tests {
         assert!(
             matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Init)),
             "init --docs must return Parsed::Docs(Init); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_accepts_source_without_plugin_flag() {
+        let result = parse_args(&["plugin", "install", "creft/ask"])
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                result,
+                Parsed::Command(Command::Plugin(PluginCommand::Install {
+                    source: ref s,
+                })) if s == "creft/ask"
+            ),
+            "plugin install <source> must parse correctly; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_rejects_plugin_flag() {
+        let result = parse_args(&["plugin", "install", "creft/ask", "--plugin", "ask"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "--plugin must be rejected as an unknown flag; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_short_flag_p_rejected() {
+        let result = parse_args(&["plugin", "install", "creft/ask", "-p", "ask"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "-p must be rejected as an unknown flag; got: {result:?}",
         );
     }
 }

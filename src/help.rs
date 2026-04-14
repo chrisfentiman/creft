@@ -273,10 +273,10 @@ Any .md file with valid creft frontmatter
 becomes an available command, namespaced under the plugin name.
 
 Examples:
+  creft plugin install creft/ask
   creft plugin install https://github.com/user/my-plugin
   creft plugin install git@github.com:user/my-plugin.git
-  creft plugin install /path/to/local/plugin-repo
-  creft plugin install https://github.com/org/multi-plugin --plugin fetch";
+  creft plugin install /path/to/local/plugin-repo";
 
 /// Extended description shown by `creft plugin update --help`.
 pub const PLUGIN_UPDATE_LONG_ABOUT: &str = "\
@@ -810,14 +810,10 @@ mod renderer {
     }
 
     pub fn render_plugin_install() -> String {
-        page_with_options(
+        page(
             "Install a plugin from a git repository",
-            "creft plugin install <source> [OPTIONS]",
+            "creft plugin install <source>",
             PLUGIN_INSTALL_LONG_ABOUT,
-            &[(
-                "--plugin <name>",
-                "Install only a specific plugin from a multi-plugin repo",
-            )],
         )
     }
 
@@ -990,7 +986,7 @@ mod renderer {
     pub fn render_plugin_install_short() -> String {
         page(
             "Install a plugin from a git repository",
-            "creft plugin install <source> [OPTIONS]",
+            "creft plugin install <source>",
             PLUGIN_INSTALL_SHORT_ABOUT,
         )
     }

@@ -114,9 +114,7 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         }
 
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
-            cli::PluginCommand::Install { source, plugin } => {
-                cmd::plugin::cmd_plugin_install(ctx, &source, plugin.as_deref())
-            }
+            cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),
             cli::PluginCommand::Update { name } => cmd::plugin::cmd_plugin_update(ctx, name),
             cli::PluginCommand::Uninstall { name } => cmd::plugin::cmd_plugin_uninstall(ctx, &name),
             cli::PluginCommand::Activate { target, global } => {
