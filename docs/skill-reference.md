@@ -1,6 +1,6 @@
 # Skill Authoring Reference
 
-Complete reference for the creft skill format. Run `creft cmd add --help` for a shorter version accessible from the terminal.
+Complete reference for the creft skill format. Run `creft add --help` for a shorter version accessible from the terminal.
 
 ---
 
@@ -43,7 +43,7 @@ name: gh issue-body
 
 **Required.** String. One line: what the skill does and when to use it.
 
-Keep descriptions under 80 characters. Longer descriptions degrade `creft cmd list` output (a warning is emitted at save time).
+Keep descriptions under 80 characters. Longer descriptions degrade `creft list` output (a warning is emitted at save time).
 
 ```yaml
 description: Deploys the current branch to staging.
@@ -119,7 +119,7 @@ env:
 
 ### `tags`
 
-Optional. List of strings. Used with `creft cmd list --tag <tag>` to filter skills.
+Optional. List of strings. Used with `creft list --tag <tag>` to filter skills.
 
 ```yaml
 tags:
@@ -332,7 +332,7 @@ jq '.items[]' data.json | yq -
 
 Skills save to the nearest `.creft/commands/` directory found by walking up from the current directory. When no `.creft/` exists, skills save to `~/.creft/commands/`.
 
-Use `--global` on `creft cmd add` to always save to `~/.creft/` regardless of whether a local `.creft/` exists.
+Use `--global` on `creft add` to always save to `~/.creft/` regardless of whether a local `.creft/` exists.
 
 Run `creft init` in a project directory to create a local `.creft/commands/` for that project.
 
@@ -340,7 +340,7 @@ Run `creft init` in a project directory to create a local `.creft/commands/` for
 
 **CREFT_HOME:** Set `$CREFT_HOME` to override both local and global roots. All skills resolve to `$CREFT_HOME` when this variable is set.
 
-**Packages:** Installed packages live under `.creft/packages/` or `~/.creft/packages/`. See `creft plugins install --help`.
+**Packages:** Installed packages live under `.creft/packages/` or `~/.creft/packages/`. See `creft plugin install --help`.
 
 ---
 
@@ -366,6 +366,6 @@ Run `creft doctor <skill>` to check a skill's requirements after saving, includi
 
 Spaces in `name` create a hierarchy: `"aws s3 sync"` becomes `creft aws s3 sync` and stores at `.creft/commands/aws/s3/sync.md`.
 
-`creft cmd list aws` shows all skills under the `aws` namespace. `creft cmd list aws s3` drills into the `aws s3` sub-namespace.
+`creft list aws` shows all skills under the `aws` namespace. `creft list aws s3` drills into the `aws s3` sub-namespace.
 
 When two skills share a prefix — for example `"gh"` and `"gh issue-body"` — creft uses longest-match resolution: `creft gh issue-body` invokes the `gh issue-body` skill, not the `gh` skill with `issue-body` as a positional arg.

@@ -7,7 +7,7 @@ to automate — and skills burn tokens for what's mostly ceremony. With
 creft, you write a markdown file and it runs:
 
 ````sh
-creft cmd add <<'EOF'
+creft add <<'EOF'
 ---
 name: hello
 description: Greet someone
@@ -27,7 +27,7 @@ Hello, World!
 
 That's it. A markdown file became a CLI command.
 
-An agent can create these with `creft cmd add`. It can discover them with `creft cmd list`. It can run them with `creft <name>`. It can install collections of them with `creft plugins install`.
+An agent can create these with `creft add`. It can discover them with `creft list`. It can run them with `creft <name>`. It can install collections of them with `creft plugin install`.
 
 No shared context needed between sessions — the skill is the context.
 
@@ -47,7 +47,7 @@ That's it. Works with Claude Code, Cursor, Copilot, Windsurf, Codex, Gemini CLI.
 
 ---
 
-`creft cmd add --help` for the full skill format. Multi-language blocks, LLM pipes, typed args, validation, plugins — it's all there.
+`creft add --help` for the full skill format. Multi-language blocks, LLM pipes, typed args, validation, plugins — it's all there.
 
 [Docs](docs/) · [Skill Reference](docs/skill-reference.md) · [Bundled Plugins](docs/bundled-plugins.md) · [MIT License](LICENSE)
 
