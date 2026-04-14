@@ -133,6 +133,7 @@ name = "creft"
 version = "0.2.8"
 dependencies = [
  "assert_cmd",
+ "console",
  "indicatif",
  "lexopt",
  "libc",

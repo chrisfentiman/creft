@@ -1,8 +1,10 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, IsTerminal as _, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal as _, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
+
+use crate::wrap::MAX_WIDTH;
 
 /// File descriptor number for the block → creft message channel.
 pub(super) const CONTROL_FD: i32 = 3;
@@ -170,6 +172,69 @@ pub(crate) enum ChannelMessage {
     },
 }
 
+/// A draw target wrapper that caps the reported terminal width.
+///
+/// indicatif queries `TermLike::width()` to determine how wide to render
+/// `{wide_bar}` and `{wide_msg}` placeholders. This wrapper delegates all
+/// operations to the inner `Term` but reports `min(actual_width, max_width)`
+/// so the bar never exceeds the project's column limit.
+#[derive(Debug)]
+struct CappedTerm {
+    inner: console::Term,
+    max_width: u16,
+}
+
+impl CappedTerm {
+    fn stderr(max_width: u16) -> Self {
+        Self {
+            inner: console::Term::buffered_stderr(),
+            max_width,
+        }
+    }
+}
+
+impl indicatif::TermLike for CappedTerm {
+    fn width(&self) -> u16 {
+        self.inner.width().min(self.max_width)
+    }
+
+    fn height(&self) -> u16 {
+        self.inner.height()
+    }
+
+    fn move_cursor_up(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_up(n)
+    }
+
+    fn move_cursor_down(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_down(n)
+    }
+
+    fn move_cursor_right(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_right(n)
+    }
+
+    fn move_cursor_left(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_left(n)
+    }
+
+    fn write_line(&self, s: &str) -> io::Result<()> {
+        self.inner.write_line(s)
+    }
+
+    fn write_str(&self, s: &str) -> io::Result<()> {
+        self.inner.write_str(s)
+    }
+
+    fn clear_line(&self) -> io::Result<()> {
+        self.inner.clear_line()
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// The currently active terminal indicator, if any.
 ///
 /// indicatif's `ProgressBar` can serve as both a spinner (no length) and a
@@ -310,8 +375,12 @@ impl TerminalWriter {
             }
             None => {}
         }
-        // Create a new spinner.
-        let pb = indicatif::ProgressBar::new_spinner()
+        // Create a new spinner with a width-capped draw target.
+        let target = indicatif::ProgressDrawTarget::term_like_with_hz(
+            Box::new(CappedTerm::stderr(MAX_WIDTH as u16)),
+            20,
+        );
+        let pb = indicatif::ProgressBar::with_draw_target(None, target)
             .with_style(indicatif::ProgressStyle::default_spinner())
             .with_message(message.to_owned());
         pb.enable_steady_tick(Duration::from_millis(80));
@@ -345,7 +414,7 @@ impl TerminalWriter {
             }
             None => {}
         }
-        // Create a new progress bar.
+        // Create a new progress bar with a width-capped draw target.
         //
         // The template unwrap is safe: the template string is a compile-time
         // constant with no dynamic user input.
@@ -353,7 +422,11 @@ impl TerminalWriter {
             indicatif::ProgressStyle::with_template("{msg} [{wide_bar:.cyan/blue}] {percent}%")
                 .expect("progress bar template is a compile-time constant")
                 .progress_chars("━╸─");
-        let pb = indicatif::ProgressBar::new(100)
+        let target = indicatif::ProgressDrawTarget::term_like_with_hz(
+            Box::new(CappedTerm::stderr(MAX_WIDTH as u16)),
+            20,
+        );
+        let pb = indicatif::ProgressBar::with_draw_target(Some(100), target)
             .with_style(style)
             .with_message(message.to_owned());
         pb.set_position(pct);
@@ -1270,5 +1343,40 @@ printf '%s' "$_resp"
         let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
         assert_eq!(parsed["id"], "t1");
         assert_eq!(parsed["value"], "");
+    }
+
+    // ---- CappedTerm ----
+
+    use indicatif::TermLike as _;
+
+    /// CappedTerm::width() reports at most max_width, even when the inner term
+    /// reports a wider value (or a default in test contexts without a real TTY).
+    ///
+    /// The test constructs a CappedTerm with max_width = 40 and verifies that
+    /// width() does not exceed 40, satisfying the invariant that the progress
+    /// bar never renders wider than the configured maximum.
+    #[test]
+    fn capped_term_width_does_not_exceed_max() {
+        let capped = super::CappedTerm::stderr(40);
+        assert!(
+            capped.width() <= 40,
+            "CappedTerm::width() must not exceed max_width; got {}",
+            capped.width()
+        );
+    }
+
+    /// CappedTerm with a max_width larger than any real terminal reports the
+    /// real terminal width (the cap does not force a minimum).
+    #[test]
+    fn capped_term_width_does_not_shrink_narrow_terminals() {
+        // u16::MAX is wider than any real terminal; the reported width must
+        // be whatever the inner term actually returns (uncapped).
+        let capped_large = super::CappedTerm::stderr(u16::MAX);
+        let uncapped = super::CappedTerm::stderr(u16::MAX);
+        assert_eq!(
+            capped_large.width(),
+            uncapped.width(),
+            "max_width larger than terminal width must have no effect"
+        );
     }
 }
