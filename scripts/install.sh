@@ -84,24 +84,58 @@ check_downloader() {
     fi
 }
 
+github_auth_header() {
+    local token
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "$token" ]; then
+        printf 'Authorization: token %s' "$token"
+    fi
+}
+
 download_to_stdout() {
-    local url downloader
+    local url downloader auth_header
     url="$1"
     downloader="$(check_downloader)"
+    auth_header="$(github_auth_header)"
     case "$downloader" in
-        curl) curl --proto '=https' --tlsv1.2 -fsSL "$url" ;;
-        wget) wget -qO- "$url" ;;
+        curl)
+            if [ -n "$auth_header" ]; then
+                curl --proto '=https' --tlsv1.2 -fsSL -H "$auth_header" "$url"
+            else
+                curl --proto '=https' --tlsv1.2 -fsSL "$url"
+            fi
+            ;;
+        wget)
+            if [ -n "$auth_header" ]; then
+                wget -qO- --header "$auth_header" "$url"
+            else
+                wget -qO- "$url"
+            fi
+            ;;
     esac
 }
 
 download_to_file() {
-    local url dest downloader
+    local url dest downloader auth_header
     url="$1"
     dest="$2"
     downloader="$(check_downloader)"
+    auth_header="$(github_auth_header)"
     case "$downloader" in
-        curl) curl --proto '=https' --tlsv1.2 -fSL -o "$dest" "$url" ;;
-        wget) wget -q -O "$dest" "$url" ;;
+        curl)
+            if [ -n "$auth_header" ]; then
+                curl --proto '=https' --tlsv1.2 -fSL -H "$auth_header" -o "$dest" "$url"
+            else
+                curl --proto '=https' --tlsv1.2 -fSL -o "$dest" "$url"
+            fi
+            ;;
+        wget)
+            if [ -n "$auth_header" ]; then
+                wget -q -O "$dest" --header "$auth_header" "$url"
+            else
+                wget -q -O "$dest" "$url"
+            fi
+            ;;
     esac
 }
 
