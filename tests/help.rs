@@ -301,9 +301,9 @@ fn test_add_help_uses_skill_terminology() {
         stdout.contains("skill"),
         "add --help should use 'skill' terminology; got: {stdout:?}"
     );
-    // "Saves a new skill" should be present (from the short doc comment or long_about)
+    // Short help says "Save a skill from stdin" as the one-line description.
     assert!(
-        stdout.contains("Saves a new skill") || stdout.contains("Save a new skill"),
+        stdout.contains("Save a skill"),
         "add --help should describe saving a skill; got: {stdout:?}"
     );
 }
@@ -477,12 +477,15 @@ fn test_add_help_has_usage_section() {
     );
 }
 
-/// `creft add --help` uses Title Case `Frontmatter Fields:` not ALL CAPS.
+/// `creft add --docs` uses Title Case `Frontmatter Fields:` not ALL CAPS.
+///
+/// The `Frontmatter Fields:` section is in the full reference (`--docs`),
+/// not the short help (`--help`).
 #[test]
-fn test_add_help_has_frontmatter_section() {
+fn test_add_docs_has_frontmatter_section() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["add", "--help"])
+        .args(["add", "--docs"])
         .assert()
         .success()
         .get_output()
@@ -492,20 +495,23 @@ fn test_add_help_has_frontmatter_section() {
 
     assert!(
         stdout.contains("Frontmatter Fields:"),
-        "creft add --help should contain 'Frontmatter Fields:' (Title Case); got: {stdout:?}"
+        "creft add --docs should contain 'Frontmatter Fields:' (Title Case); got: {stdout:?}"
     );
     assert!(
         !stdout.contains("FRONTMATTER FIELDS:"),
-        "creft add --help must not contain 'FRONTMATTER FIELDS:' (ALL CAPS); got: {stdout:?}"
+        "creft add --docs must not contain 'FRONTMATTER FIELDS:' (ALL CAPS); got: {stdout:?}"
     );
 }
 
-/// `creft doctor --help` contains an `Exit Codes:` section.
+/// `creft doctor --docs` contains an `Exit Codes:` section.
+///
+/// The `Exit Codes:` section is in the full reference (`--docs`),
+/// not the short help (`--help`).
 #[test]
-fn test_doctor_help_has_exit_codes() {
+fn test_doctor_docs_has_exit_codes() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["doctor", "--help"])
+        .args(["doctor", "--docs"])
         .assert()
         .success()
         .get_output()
@@ -515,16 +521,19 @@ fn test_doctor_help_has_exit_codes() {
 
     assert!(
         stdout.contains("Exit Codes:"),
-        "creft doctor --help should contain 'Exit Codes:' section; got: {stdout:?}"
+        "creft doctor --docs should contain 'Exit Codes:' section; got: {stdout:?}"
     );
 }
 
-/// `creft up --help` contains a `Supported Systems:` section.
+/// `creft up --docs` contains a `Supported Systems:` section.
+///
+/// The `Supported Systems:` section is in the full reference (`--docs`),
+/// not the short help (`--help`).
 #[test]
-fn test_up_help_has_supported_systems() {
+fn test_up_docs_has_supported_systems() {
     let dir = creft_env();
     let output = creft_with(&dir)
-        .args(["up", "--help"])
+        .args(["up", "--docs"])
         .assert()
         .success()
         .get_output()
@@ -534,7 +543,7 @@ fn test_up_help_has_supported_systems() {
 
     assert!(
         stdout.contains("Supported Systems:"),
-        "creft up --help should contain 'Supported Systems:' section; got: {stdout:?}"
+        "creft up --docs should contain 'Supported Systems:' section; got: {stdout:?}"
     );
 }
 

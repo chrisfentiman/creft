@@ -375,6 +375,176 @@ Examples:
   creft completions zsh > ~/.zfunc/_creft
   creft completions fish > ~/.config/fish/completions/creft.fish";
 
+// ── Short help constants ─────────────────────────────────────────────────────
+//
+// Each constant is the `long_about` section for the short (--help) page.
+// These are intentionally concise — one description, one example, one footer.
+// The full reference text is in the ADD_LONG_ABOUT etc. constants above.
+
+const ADD_SHORT_ABOUT: &str = "\
+Pipe the skill definition as markdown to stdin.
+
+Examples:
+  creft add <<'EOF'                          Save from stdin
+  creft add --force <<'EOF'                  Overwrite existing
+
+Run 'creft add --docs' for the full reference.";
+
+const LIST_SHORT_ABOUT: &str = "\
+Namespaces are collapsed by default. Drill in to see skills.
+
+Examples:
+  creft list                List all skills
+  creft list tavily         Skills in the 'tavily' namespace
+
+Run 'creft list --docs' for the full reference.";
+
+const SHOW_SHORT_ABOUT: &str = "\
+Shows frontmatter, docs, and code blocks.
+
+Example:
+  creft show gh issue-body
+
+Run 'creft show --docs' for the full reference.";
+
+const REMOVE_SHORT_ABOUT: &str = "\
+Removes the skill file. Empty namespace directories are cleaned up.
+
+Example:
+  creft remove gh issue-body
+
+Run 'creft remove --docs' for the full reference.";
+
+const UP_SHORT_ABOUT: &str = "\
+Detects AI coding systems and installs the appropriate instruction file.
+
+Examples:
+  creft up                  Auto-detect and install for all found systems
+  creft up claude-code      Install for Claude Code only
+
+Run 'creft up --docs' for the full reference.";
+
+const DOCTOR_SHORT_ABOUT: &str = "\
+Two modes: global check (no arguments) or skill-specific check.
+
+Examples:
+  creft doctor              Check your environment
+  creft doctor hello        Check the 'hello' skill
+
+Run 'creft doctor --docs' for the full reference.";
+
+const INIT_SHORT_ABOUT: &str = "\
+Creates a .creft/commands/ directory in the current directory.
+
+Example:
+  creft init
+
+Run 'creft init --docs' for the full reference.";
+
+const PLUGIN_SHORT_ABOUT: &str = "\
+Install a plugin globally, then activate specific commands in a project.
+
+Examples:
+  creft plugin install https://github.com/user/my-plugin
+  creft plugin list
+
+Run 'creft plugin --docs' for the full reference.";
+
+const PLUGIN_INSTALL_SHORT_ABOUT: &str = "\
+Plugin installs are always global. Activate with 'creft plugin activate'.
+
+Example:
+  creft plugin install https://github.com/user/my-plugin
+
+Run 'creft plugin install --docs' for the full reference.";
+
+const PLUGIN_UPDATE_SHORT_ABOUT: &str = "\
+Runs git pull on the plugin's cloned repository.
+
+Examples:
+  creft plugin update my-plugin    Update a specific plugin
+  creft plugin update              Update all installed plugins
+
+Run 'creft plugin update --docs' for the full reference.";
+
+const PLUGIN_UNINSTALL_SHORT_ABOUT: &str = "\
+Deletes the plugin directory and all its commands.
+
+Example:
+  creft plugin uninstall my-plugin
+
+Run 'creft plugin uninstall --docs' for the full reference.";
+
+const PLUGIN_ACTIVATE_SHORT_ABOUT: &str = "\
+Writes activation state to .creft/plugins/settings.json (local, default).
+
+Examples:
+  creft plugin activate my-plugin            Activate all commands
+  creft plugin activate my-plugin/fetch      Activate a single command
+
+Run 'creft plugin activate --docs' for the full reference.";
+
+const PLUGIN_DEACTIVATE_SHORT_ABOUT: &str = "\
+Removes activation state from the scope's settings.json.
+
+Examples:
+  creft plugin deactivate my-plugin           Deactivate all commands
+  creft plugin deactivate my-plugin/fetch     Deactivate a single command
+
+Run 'creft plugin deactivate --docs' for the full reference.";
+
+const PLUGIN_LIST_SHORT_ABOUT: &str = "\
+Shows all installed plugins, or commands in a specific plugin.
+
+Examples:
+  creft plugin list               Show all installed plugins
+  creft plugin list my-plugin     Show commands in my-plugin
+
+Run 'creft plugin list --docs' for the full reference.";
+
+const PLUGIN_SEARCH_SHORT_ABOUT: &str = "\
+Matches against command name, description, and tags.
+
+Example:
+  creft plugin search deploy
+
+Run 'creft plugin search --docs' for the full reference.";
+
+const SETTINGS_SHORT_ABOUT: &str = "\
+Subcommands: show, set
+
+Examples:
+  creft settings show
+  creft settings set shell zsh
+
+Run 'creft settings --docs' for the full reference.";
+
+const SETTINGS_SHOW_SHORT_ABOUT: &str = "\
+Prints all current configuration values.
+
+Example:
+  creft settings show
+
+Run 'creft settings show --docs' for the full reference.";
+
+const SETTINGS_SET_SHORT_ABOUT: &str = "\
+Sets a configuration key to the specified value.
+
+Examples:
+  creft settings set shell zsh
+  creft settings set shell none    Disable shell preference
+
+Run 'creft settings set --docs' for the full reference.";
+
+const COMPLETIONS_SHORT_ABOUT: &str = "\
+Supported shells: bash, zsh, fish
+
+Examples:
+  creft completions bash >> ~/.bashrc
+  creft completions zsh > ~/.zfunc/_creft
+
+Run 'creft completions --docs' for the full reference.";
+
 // ── Builtin entry list ──────────────────────────────────────────────────────
 
 /// A built-in command's listing metadata, used by the root listing.
@@ -465,11 +635,41 @@ pub(crate) enum BuiltinHelp {
     Completions,
 }
 
-/// Render detailed help output for a built-in command's `--help` page.
+/// Render the short help page for a built-in command (`--help`).
 ///
-/// Returns a fully formatted string. ANSI styling is controlled by
-/// yansi's global condition (set at startup via `style::init_color()`).
-pub(crate) fn render(which: BuiltinHelp) -> String {
+/// Returns 10-15 lines: one-line description, usage, a single example, and a
+/// footer directing the user to `--docs` for the full reference. ANSI styling
+/// is controlled by yansi's global condition (set at startup via
+/// `style::init_color()`).
+pub(crate) fn render_short(which: BuiltinHelp) -> String {
+    match which {
+        BuiltinHelp::Add => renderer::render_add_short(),
+        BuiltinHelp::List => renderer::render_list_short(),
+        BuiltinHelp::Show => renderer::render_show_short(),
+        BuiltinHelp::Remove => renderer::render_remove_short(),
+        BuiltinHelp::Plugin => renderer::render_plugin_short(),
+        BuiltinHelp::PluginInstall => renderer::render_plugin_install_short(),
+        BuiltinHelp::PluginUpdate => renderer::render_plugin_update_short(),
+        BuiltinHelp::PluginUninstall => renderer::render_plugin_uninstall_short(),
+        BuiltinHelp::PluginActivate => renderer::render_plugin_activate_short(),
+        BuiltinHelp::PluginDeactivate => renderer::render_plugin_deactivate_short(),
+        BuiltinHelp::PluginList => renderer::render_plugin_list_short(),
+        BuiltinHelp::PluginSearch => renderer::render_plugin_search_short(),
+        BuiltinHelp::Settings => renderer::render_settings_short(),
+        BuiltinHelp::SettingsShow => renderer::render_settings_show_short(),
+        BuiltinHelp::SettingsSet => renderer::render_settings_set_short(),
+        BuiltinHelp::Up => renderer::render_up_short(),
+        BuiltinHelp::Init => renderer::render_init_short(),
+        BuiltinHelp::Doctor => renderer::render_doctor_short(),
+        BuiltinHelp::Completions => renderer::render_completions_short(),
+    }
+}
+
+/// Render the full reference page for a built-in command (`--docs`).
+///
+/// Returns the complete help text that was previously shown by `--help`.
+/// ANSI styling is controlled by yansi's global condition.
+pub(crate) fn render_docs(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add(),
         BuiltinHelp::List => renderer::render_list(),
@@ -508,11 +708,16 @@ mod renderer {
     use yansi::Paint;
 
     use super::{
-        ADD_LONG_ABOUT, COMPLETIONS_LONG_ABOUT, DOCTOR_LONG_ABOUT, INIT_LONG_ABOUT,
-        LIST_LONG_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT,
-        PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_LIST_LONG_ABOUT, PLUGIN_LONG_ABOUT,
-        PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
-        REMOVE_LONG_ABOUT, SETTINGS_LONG_ABOUT, SHOW_LONG_ABOUT, UP_LONG_ABOUT,
+        ADD_LONG_ABOUT, ADD_SHORT_ABOUT, COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT,
+        DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT, INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT,
+        LIST_SHORT_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT,
+        PLUGIN_DEACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT,
+        PLUGIN_INSTALL_SHORT_ABOUT, PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT,
+        PLUGIN_LONG_ABOUT, PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
+        PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
+        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, SETTINGS_LONG_ABOUT,
+        SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT,
+        SHOW_SHORT_ABOUT, UP_LONG_ABOUT, UP_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -728,6 +933,180 @@ mod renderer {
             COMPLETIONS_LONG_ABOUT,
         )
     }
+
+    // ── Short-form renderers (--help) ────────────────────────────────────────
+
+    pub fn render_add_short() -> String {
+        page_with_options(
+            "Save a skill from stdin",
+            "creft add [OPTIONS]",
+            ADD_SHORT_ABOUT,
+            &[
+                ("--force", "Overwrite an existing skill without prompting"),
+                ("--no-validate", "Skip validation checks"),
+                ("--global, -g", "Save to global ~/.creft/ storage"),
+            ],
+        )
+    }
+
+    pub fn render_list_short() -> String {
+        page_with_options(
+            "List available skills",
+            "creft list [NAMESPACE...] [OPTIONS]",
+            LIST_SHORT_ABOUT,
+            &[
+                ("--tag <tag>", "Filter by tag"),
+                ("--all", "Flat list without namespace grouping"),
+            ],
+        )
+    }
+
+    pub fn render_show_short() -> String {
+        page_with_options(
+            "Show a skill's full definition",
+            "creft show <skill> [OPTIONS]",
+            SHOW_SHORT_ABOUT,
+            &[("--blocks", "Print only the executable code blocks")],
+        )
+    }
+
+    pub fn render_remove_short() -> String {
+        page_with_options(
+            "Delete a skill",
+            "creft remove <skill> [OPTIONS]",
+            REMOVE_SHORT_ABOUT,
+            &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_plugin_short() -> String {
+        page(
+            "Manage skill collections",
+            "creft plugin <subcommand> [OPTIONS]",
+            PLUGIN_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_install_short() -> String {
+        page(
+            "Install a plugin from a git repository",
+            "creft plugin install <source> [OPTIONS]",
+            PLUGIN_INSTALL_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_update_short() -> String {
+        page(
+            "Update installed plugins",
+            "creft plugin update [name]",
+            PLUGIN_UPDATE_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_uninstall_short() -> String {
+        page(
+            "Remove an installed plugin",
+            "creft plugin uninstall <name>",
+            PLUGIN_UNINSTALL_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_activate_short() -> String {
+        page_with_options(
+            "Make commands from an installed plugin available in a scope",
+            "creft plugin activate <target> [OPTIONS]",
+            PLUGIN_ACTIVATE_SHORT_ABOUT,
+            &[(
+                "--global, -g",
+                "Activate globally (~/.creft/plugins/settings.json)",
+            )],
+        )
+    }
+
+    pub fn render_plugin_deactivate_short() -> String {
+        page_with_options(
+            "Remove plugin commands from a scope",
+            "creft plugin deactivate <target> [OPTIONS]",
+            PLUGIN_DEACTIVATE_SHORT_ABOUT,
+            &[("--global, -g", "Deactivate from global scope")],
+        )
+    }
+
+    pub fn render_plugin_list_short() -> String {
+        page(
+            "List installed plugins or commands in a plugin",
+            "creft plugin list [name]",
+            PLUGIN_LIST_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_plugin_search_short() -> String {
+        page(
+            "Search for commands across installed plugins",
+            "creft plugin search <query...>",
+            PLUGIN_SEARCH_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_settings_short() -> String {
+        page(
+            "Manage settings",
+            "creft settings <subcommand>",
+            SETTINGS_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_settings_show_short() -> String {
+        page(
+            "Show current settings",
+            "creft settings show",
+            SETTINGS_SHOW_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_settings_set_short() -> String {
+        page(
+            "Set a configuration value",
+            "creft settings set <key> <value>",
+            SETTINGS_SET_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_up_short() -> String {
+        page_with_options(
+            "Install creft for your coding AI",
+            "creft up [system] [OPTIONS]",
+            UP_SHORT_ABOUT,
+            &[(
+                "--global, -g",
+                "Install globally (~/.claude/skills/creft/ etc.)",
+            )],
+        )
+    }
+
+    pub fn render_init_short() -> String {
+        page(
+            "Initialize local skill storage",
+            "creft init",
+            INIT_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_doctor_short() -> String {
+        page(
+            "Check environment and skill health",
+            "creft doctor [skill]",
+            DOCTOR_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_completions_short() -> String {
+        page(
+            "Generate shell completions",
+            "creft completions <shell>",
+            COMPLETIONS_SHORT_ABOUT,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -813,84 +1192,136 @@ mod tests {
     }
 
     #[test]
-    fn render_add_contains_usage_line() {
+    fn render_docs_add_contains_usage_line() {
         yansi::disable();
-        let output = render(BuiltinHelp::Add);
+        let output = render_docs(BuiltinHelp::Add);
         yansi::enable();
         assert!(
             output.contains("Usage: creft add"),
-            "render(Add) must contain 'Usage: creft add', got: {output:?}",
+            "render_docs(Add) must contain 'Usage: creft add', got: {output:?}",
         );
     }
 
     #[test]
-    fn render_show_contains_blocks_flag() {
+    fn render_docs_show_contains_blocks_flag() {
         yansi::disable();
-        let output = render(BuiltinHelp::Show);
+        let output = render_docs(BuiltinHelp::Show);
         yansi::enable();
         assert!(
             output.contains("--blocks"),
-            "render(Show) must document --blocks flag, got: {output:?}",
+            "render_docs(Show) must document --blocks flag, got: {output:?}",
         );
     }
 
+    const ALL_VARIANTS: &[BuiltinHelp] = &[
+        BuiltinHelp::Add,
+        BuiltinHelp::List,
+        BuiltinHelp::Show,
+        BuiltinHelp::Remove,
+        BuiltinHelp::Plugin,
+        BuiltinHelp::PluginInstall,
+        BuiltinHelp::PluginUpdate,
+        BuiltinHelp::PluginUninstall,
+        BuiltinHelp::PluginActivate,
+        BuiltinHelp::PluginDeactivate,
+        BuiltinHelp::PluginList,
+        BuiltinHelp::PluginSearch,
+        BuiltinHelp::Settings,
+        BuiltinHelp::SettingsShow,
+        BuiltinHelp::SettingsSet,
+        BuiltinHelp::Up,
+        BuiltinHelp::Init,
+        BuiltinHelp::Doctor,
+        BuiltinHelp::Completions,
+    ];
+
     #[test]
-    fn all_renders_contain_usage_line() {
+    fn all_render_docs_contain_usage_line() {
         yansi::disable();
-        let variants = [
-            BuiltinHelp::Add,
-            BuiltinHelp::List,
-            BuiltinHelp::Show,
-            BuiltinHelp::Remove,
-            BuiltinHelp::Plugin,
-            BuiltinHelp::PluginInstall,
-            BuiltinHelp::PluginUpdate,
-            BuiltinHelp::PluginUninstall,
-            BuiltinHelp::PluginActivate,
-            BuiltinHelp::PluginDeactivate,
-            BuiltinHelp::PluginList,
-            BuiltinHelp::PluginSearch,
-            BuiltinHelp::Settings,
-            BuiltinHelp::SettingsShow,
-            BuiltinHelp::SettingsSet,
-            BuiltinHelp::Up,
-            BuiltinHelp::Init,
-            BuiltinHelp::Doctor,
-            BuiltinHelp::Completions,
-        ];
-        for variant in variants {
-            let output = render(variant);
+        for &variant in ALL_VARIANTS {
+            let output = render_docs(variant);
             assert!(
                 output.contains("Usage:"),
-                "render({variant:?}) must contain a Usage: line, got: {output:?}",
+                "render_docs({variant:?}) must contain a Usage: line, got: {output:?}",
             );
         }
         yansi::enable();
     }
 
     #[test]
-    fn render_disabled_produces_no_ansi() {
+    fn all_render_short_contain_usage_line() {
         yansi::disable();
-        let output = render(BuiltinHelp::Add);
+        for &variant in ALL_VARIANTS {
+            let output = render_short(variant);
+            assert!(
+                output.contains("Usage:"),
+                "render_short({variant:?}) must contain a Usage: line, got: {output:?}",
+            );
+        }
+        yansi::enable();
+    }
+
+    #[test]
+    fn all_render_short_contain_docs_footer() {
+        yansi::disable();
+        for &variant in ALL_VARIANTS {
+            let output = render_short(variant);
+            assert!(
+                output.contains("--docs"),
+                "render_short({variant:?}) must contain '--docs' footer, got: {output:?}",
+            );
+        }
+        yansi::enable();
+    }
+
+    #[test]
+    fn all_render_short_under_20_lines() {
+        yansi::disable();
+        for &variant in ALL_VARIANTS {
+            let output = render_short(variant);
+            let line_count = output.lines().count();
+            assert!(
+                line_count <= 20,
+                "render_short({variant:?}) must be at most 20 lines, got {line_count} lines",
+            );
+        }
+        yansi::enable();
+    }
+
+    #[test]
+    fn render_docs_disabled_produces_no_ansi() {
+        yansi::disable();
+        let output = render_docs(BuiltinHelp::Add);
         yansi::enable();
         assert!(
             !output.contains("\x1b["),
-            "render with yansi disabled must not contain ANSI escapes",
+            "render_docs with yansi disabled must not contain ANSI escapes",
         );
     }
 
     #[test]
-    fn render_enabled_produces_ansi_bold_on_headers() {
+    fn render_short_disabled_produces_no_ansi() {
+        yansi::disable();
+        let output = render_short(BuiltinHelp::Add);
         yansi::enable();
-        let output = render(BuiltinHelp::Add);
+        assert!(
+            !output.contains("\x1b["),
+            "render_short with yansi disabled must not contain ANSI escapes",
+        );
+    }
+
+    #[test]
+    fn render_docs_enabled_produces_ansi_bold_on_headers() {
+        yansi::enable();
+        let output = render_docs(BuiltinHelp::Add);
         assert!(
             output.contains("\x1b["),
-            "render with yansi enabled must contain ANSI escapes on section headers",
+            "render_docs with yansi enabled must contain ANSI escapes on section headers",
         );
     }
 
     #[test]
-    fn no_output_contains_built_in_tag() {
+    fn no_docs_output_contains_built_in_tag() {
         yansi::disable();
         let variants = [
             BuiltinHelp::Add,
@@ -905,10 +1336,10 @@ mod tests {
             BuiltinHelp::Completions,
         ];
         for variant in variants {
-            let output = render(variant);
+            let output = render_docs(variant);
             assert!(
                 !output.contains("(built-in)"),
-                "render({variant:?}) must not contain '(built-in)', got: {output:?}",
+                "render_docs({variant:?}) must not contain '(built-in)', got: {output:?}",
             );
         }
         yansi::enable();

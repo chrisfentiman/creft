@@ -55,7 +55,11 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
     match cli::parse(&mut parser)? {
         Some(cli::Parsed::Command(cmd)) => execute(ctx, cmd),
         Some(cli::Parsed::Help(which)) => {
-            print!("{}", help::render(which));
+            print!("{}", help::render_short(which));
+            Ok(())
+        }
+        Some(cli::Parsed::Docs(which)) => {
+            print!("{}", help::render_docs(which));
             Ok(())
         }
         Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, false, vec![]),
