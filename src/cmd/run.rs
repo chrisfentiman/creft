@@ -3,11 +3,11 @@ use std::sync::atomic::AtomicBool;
 
 use yansi::Paint;
 
-use crate::cmd::skill::{LIST_DESC_MAX, format_skill_desc, truncate_desc};
+use crate::cmd::skill::{LIST_DESC_MAX, render_namespace_listing, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::settings::Settings;
-use crate::{model, runner, shell, store};
+use crate::{runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -172,54 +172,14 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
             .collect()
     };
 
-    let skill_count = skills.len();
-    let plural = if skill_count == 1 { "skill" } else { "skills" };
     let prefix_str = prefix.join(" ");
-    println!(
-        "{} \u{2014} {} {}",
-        prefix_str.as_str().bold(),
-        skill_count,
-        plural
-    );
-    println!();
-
     let entries = store::group_by_namespace(skills, prefix);
 
-    let max_name = entries
-        .iter()
-        .map(|e| match e {
-            model::NamespaceEntry::Skill(def, _) => def.name.len(),
-            model::NamespaceEntry::Namespace { name, .. } => name.len(),
-        })
-        .max()
-        .unwrap_or(0);
-
-    for entry in &entries {
-        match entry {
-            model::NamespaceEntry::Skill(def, source) => {
-                let desc = format_skill_desc(def, source, LIST_DESC_MAX);
-                let pad = " ".repeat(max_name - def.name.len());
-                println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
-            }
-            model::NamespaceEntry::Namespace {
-                name,
-                skill_count: count,
-                package,
-            } => {
-                let p = if *count == 1 { "skill" } else { "skills" };
-                let pkg_suffix = if package.is_some() { " [package]" } else { "" };
-                let pad = " ".repeat(max_name - name.len());
-                println!(
-                    "  {}{}  {} {}{}",
-                    name.as_str().bold(),
-                    pad,
-                    count,
-                    p,
-                    pkg_suffix,
-                );
-            }
-        }
+    if entries.is_empty() {
+        eprintln!("no commands found. use 'creft add' to create one.");
+        return Ok(());
     }
 
+    print!("{}", render_namespace_listing(&entries, prefix, &prefix_str));
     Ok(())
 }

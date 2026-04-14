@@ -997,14 +997,14 @@ fn test_namespace_help() {
 
     let stdout = String::from_utf8_lossy(&output);
 
-    // Header line: "tavily — 3 skills"
+    // New format: Skills: header + usage line with namespace name.
     assert!(
-        stdout.contains("tavily"),
-        "namespace help should show namespace name; got: {stdout:?}"
+        stdout.contains("Skills:"),
+        "namespace help should show Skills: header; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("3 skills"),
-        "namespace help header should show skill count; got: {stdout:?}"
+        stdout.contains("creft tavily <command>"),
+        "namespace help should show usage line with namespace name; got: {stdout:?}"
     );
 
     // Individual skills should be listed with descriptions.
