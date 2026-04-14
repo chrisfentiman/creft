@@ -1,15 +1,11 @@
-use std::borrow::Cow;
 use std::io::{IsTerminal, Read};
 
 use yansi::Paint;
 
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::wrap::{MAX_WIDTH, wrap_description};
 use crate::{frontmatter, help, markdown, model, store, style, validate};
-
-/// Maximum description characters shown in list output.
-/// Matches the visual width used by cargo's command listing.
-pub const LIST_DESC_MAX: usize = 60;
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_add(
@@ -188,9 +184,12 @@ pub fn cmd_list(
         println!();
 
         let max_name = flat.iter().map(|(d, _)| d.name.len()).max().unwrap_or(0);
+        let desc_col = 2 + max_name + 2;
+        let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
 
         for (def, source) in &flat {
-            let desc = format_skill_desc(def, source, LIST_DESC_MAX);
+            let raw_desc = format_skill_desc(def, source);
+            let desc = wrap_description(&raw_desc, desc_budget, desc_col);
             let pad = " ".repeat(max_name - def.name.len());
             println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
         }
@@ -369,21 +368,28 @@ fn count_visible_entries(entries: &[model::NamespaceEntry]) -> usize {
 /// align with that section's name column.
 fn render_global_flags(col_width: usize) -> String {
     use std::fmt::Write;
+    // The flags in this section share the same description column as the skill
+    // names above. Label column: 2 (indent) + col_width + 2 (gap).
+    let desc_col = 2 + col_width + 2;
+    let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
     let mut out = String::new();
+
     let pad = " ".repeat(col_width.saturating_sub("--dry-run".len()));
-    writeln!(
-        out,
-        "  --dry-run{}       Show rendered blocks, do not execute",
-        pad
-    )
-    .unwrap();
+    let dry_run_desc = wrap_description(
+        "Show rendered blocks, do not execute",
+        desc_budget,
+        desc_col,
+    );
+    writeln!(out, "  --dry-run{pad}  {dry_run_desc}").unwrap();
+
     let pad2 = " ".repeat(col_width.saturating_sub("--verbose, -v".len()));
-    writeln!(
-        out,
-        "  --verbose, -v{}   Show rendered blocks on stderr, then execute",
-        pad2
-    )
-    .unwrap();
+    let verbose_desc = wrap_description(
+        "Show rendered blocks on stderr, then execute",
+        desc_budget,
+        desc_col,
+    );
+    writeln!(out, "  --verbose, -v{pad2}  {verbose_desc}").unwrap();
+
     out
 }
 
@@ -465,6 +471,9 @@ fn render_skill_entries_limited(
         .max()
         .unwrap_or(0);
 
+    let desc_col = 2 + max_name + 2;
+    let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
+
     let mut out = String::new();
     let mut printed = 0;
     for entry in entries {
@@ -473,7 +482,7 @@ fn render_skill_entries_limited(
         }
         match entry {
             model::NamespaceEntry::Skill(def, source) => {
-                let desc = format_skill_desc(def, source, LIST_DESC_MAX);
+                let raw_desc = format_skill_desc(def, source);
                 let parts = def.name_parts();
                 let relative = parts
                     .get(prefix.len())
@@ -485,13 +494,15 @@ fn render_skill_entries_limited(
                 } else {
                     String::new()
                 };
+                let full_desc = format!("{raw_desc}{suffix}");
+                let desc = wrap_description(&full_desc, desc_budget, desc_col);
                 let label = if in_namespace {
                     def.name.split_whitespace().next_back().unwrap_or(&def.name)
                 } else {
                     &def.name
                 };
                 let pad = " ".repeat(max_name - label.len());
-                writeln!(out, "  {}{}  {desc}{suffix}", label.bold(), pad).unwrap();
+                writeln!(out, "  {}{}  {desc}", label.bold(), pad).unwrap();
                 printed += 1;
             }
             model::NamespaceEntry::Namespace {
@@ -578,34 +589,19 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
     Ok(())
 }
 
-/// Truncate a string to `max_len` characters, appending "..." if truncated.
-/// Operates on character count, not byte count (handles Unicode).
-pub fn truncate_desc(s: &str, max_len: usize) -> Cow<'_, str> {
-    if s.chars().count() <= max_len {
-        Cow::Borrowed(s)
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        Cow::Owned(format!("{}...", truncated.trim_end()))
-    }
-}
-
-/// Format the description column for a flat skill entry.
+/// Format the description column for a skill entry.
+///
+/// Returns the raw description string with optional package annotation.
+/// The caller is responsible for wrapping to fit the column layout.
 ///
 /// Scope annotations (`(local)` / `(global)`) are omitted — they are noise
 /// for discovery. Package provenance is preserved as `(pkg: <name>)` because
 /// it is actionable (users can uninstall or inspect package skills separately).
-/// The description is truncated to `max_desc_len` characters before appending
-/// any package annotation so the annotation is never truncated.
-pub fn format_skill_desc(
-    def: &model::CommandDef,
-    source: &model::SkillSource,
-    max_desc_len: usize,
-) -> String {
-    let desc = truncate_desc(&def.description, max_desc_len);
+pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -> String {
     match source {
-        model::SkillSource::Owned(_) => desc.into_owned(),
-        model::SkillSource::Package(pkg, _) => format!("{desc}  (pkg: {pkg})"),
-        model::SkillSource::Plugin(name) => format!("{desc}  (plugin: {name})"),
+        model::SkillSource::Owned(_) => def.description.clone(),
+        model::SkillSource::Package(pkg, _) => format!("{}  (pkg: {pkg})", def.description),
+        model::SkillSource::Plugin(name) => format!("{}  (plugin: {name})", def.description),
     }
 }
 

@@ -3,10 +3,11 @@ use std::sync::atomic::AtomicBool;
 
 use yansi::Paint;
 
-use crate::cmd::skill::{LIST_DESC_MAX, render_namespace_listing, truncate_desc};
+use crate::cmd::skill::render_namespace_listing;
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::settings::Settings;
+use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 use crate::{frontmatter, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
@@ -60,8 +61,11 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                         println!();
                         println!("{}", "Skills:".bold());
                         let max_name = display_names.iter().map(|n| n.len()).max().unwrap_or(0);
+                        let desc_col = 2 + max_name + 2;
+                        let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
                         for ((def, _source), display) in subcommands.iter().zip(&display_names) {
-                            let desc = truncate_desc(def.description.as_str(), LIST_DESC_MAX);
+                            let desc =
+                                wrap_description(def.description.as_str(), desc_budget, desc_col);
                             let pad = " ".repeat(max_name - display.len());
                             println!("  {}{}  {}", display.bold(), pad, desc);
                         }
@@ -113,8 +117,11 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                         println!();
                         println!("{}", "Skills:".bold());
                         let max_name = display_names.iter().map(|n| n.len()).max().unwrap_or(0);
+                        let desc_col = 2 + max_name + 2;
+                        let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
                         for ((def, _source), display) in subcommands.iter().zip(&display_names) {
-                            let desc = truncate_desc(def.description.as_str(), LIST_DESC_MAX);
+                            let desc =
+                                wrap_description(def.description.as_str(), desc_budget, desc_col);
                             let pad = " ".repeat(max_name - display.len());
                             println!("  {}{}  {}", display.bold(), pad, desc);
                         }
@@ -243,7 +250,7 @@ pub(crate) fn render_skill_docs(skill_name: &str, raw_content: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("{}\n", header_name.bold()));
     if !description.is_empty() {
-        out.push_str(&description);
+        out.push_str(&wrap_text(&description, MAX_WIDTH, 0));
         out.push('\n');
     }
     out.push('\n');
@@ -255,7 +262,12 @@ pub(crate) fn render_skill_docs(skill_name: &str, raw_content: &str) -> String {
     // Collapse runs of 3+ blank lines to 2.
     let collapsed = collapse_blank_lines(&stripped);
 
-    out.push_str(&collapsed);
+    // Wrap prose paragraphs while leaving pre-formatted (indented) and header
+    // lines unchanged.
+    out.push_str(&wrap_text(&collapsed, MAX_WIDTH, 0));
+    if !collapsed.is_empty() {
+        out.push('\n');
+    }
     out
 }
 

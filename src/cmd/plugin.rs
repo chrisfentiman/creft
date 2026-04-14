@@ -1,8 +1,8 @@
 use yansi::Paint;
 
-use crate::cmd::skill::{LIST_DESC_MAX, truncate_desc};
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::wrap::{MAX_WIDTH, wrap_description};
 use crate::{model, registry};
 
 pub fn cmd_plugin_install(ctx: &AppContext, source: &str) -> Result<(), CreftError> {
@@ -137,17 +137,14 @@ pub fn cmd_plugin_search(ctx: &AppContext, query: &[String]) -> Result<(), Creft
     }
 
     let max_name = matches.iter().map(|m| m.def.name.len()).max().unwrap_or(0);
+    let desc_col = 2 + max_name + 2;
+    let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
 
     for m in &matches {
-        let desc = truncate_desc(&m.def.description, LIST_DESC_MAX);
+        let raw = format!("{}  (plugin: {})", m.def.description, m.plugin_name);
+        let desc = wrap_description(&raw, desc_budget, desc_col);
         let pad = " ".repeat(max_name - m.def.name.len());
-        println!(
-            "  {}{}  {}  (plugin: {})",
-            m.def.name.as_str().bold(),
-            pad,
-            desc,
-            m.plugin_name
-        );
+        println!("  {}{}  {}", m.def.name.as_str().bold(), pad, desc);
     }
 
     Ok(())

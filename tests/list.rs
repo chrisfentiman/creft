@@ -519,16 +519,22 @@ fn test_list_deep_namespace() {
     );
 }
 
-// ── list output truncation and footer ─────────────────────────────────────────
+// ── list output wrapping ──────────────────────────────────────────────────────
 
-/// `creft list` with a skill that has a 100-char description shows "..." truncation.
+/// `creft list` with a long description wraps it across continuation lines
+/// instead of truncating with "...".
+///
+/// Skill name `long-desc-skill` (14 chars) gives a description column at
+/// `2 + 14 + 2 = 18`. The 80-column budget leaves 62 chars for the first
+/// line. A description of 100 chars with spaces must wrap — not truncate.
 #[test]
 fn test_list_long_description_truncated() {
     let dir = creft_env();
-    // 100-character description — over the 60-char display limit.
-    let long_desc = "a".repeat(100);
+    // Description is long enough to require wrapping (> 62 chars), uses spaces
+    // so wrap_description has word boundaries to break on.
+    let long_desc = "Deploy all services to the target environment and restart the load balancer with health checks";
     let markdown = format!(
-        "---\nname: truncated-skill\ndescription: {long_desc}\n---\n\n```bash\necho hi\n```\n"
+        "---\nname: long-desc-skill\ndescription: {long_desc}\n---\n\n```bash\necho hi\n```\n"
     );
 
     creft_with(&dir)
@@ -541,10 +547,11 @@ fn test_list_long_description_truncated() {
         .args(["list"])
         .assert()
         .success()
-        // The truncated output should contain "..." (ellipsis suffix).
-        .stdout(predicate::str::contains("..."))
-        // The full 100-char description must NOT appear verbatim.
-        .stdout(predicate::str::contains(long_desc).not());
+        // Wrapping must never produce "..." — that is truncation, not wrapping.
+        .stdout(predicate::str::contains("...").not())
+        // All words from the description must appear in full.
+        .stdout(predicate::str::contains("Deploy all services"))
+        .stdout(predicate::str::contains("health checks"));
 }
 
 /// `creft list` with a skill that has a short description shows it in full (no "...").

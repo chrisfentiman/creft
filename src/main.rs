@@ -17,6 +17,7 @@ mod shell;
 mod store;
 mod style;
 mod validate;
+mod wrap;
 mod yaml;
 
 use error::CreftError;
@@ -165,67 +166,4 @@ fn handle_help(ctx: &model::AppContext, rest: &[String]) -> Result<(), CreftErro
         }
     }
     cmd::skill::cmd_list(ctx, None, false, false, vec![])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::cmd::skill::truncate_desc;
-    #[allow(unused_imports)]
-    use pretty_assertions::{assert_eq, assert_ne};
-
-    #[test]
-    fn test_truncate_desc_empty_string() {
-        let result = truncate_desc("", 60);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_truncate_desc_at_max_not_truncated() {
-        let s = "a".repeat(60);
-        let result = truncate_desc(&s, 60);
-        assert_eq!(
-            result.as_ref(),
-            s.as_str(),
-            "should not truncate at exactly max_len"
-        );
-        // Must be borrowed, not owned — no allocation when no truncation needed.
-        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn test_truncate_desc_under_max_not_truncated() {
-        let s = "Short description";
-        let result = truncate_desc(s, 60);
-        assert_eq!(result.as_ref(), s);
-    }
-
-    #[test]
-    fn test_truncate_desc_over_max_truncated() {
-        let s = "a".repeat(100);
-        let result = truncate_desc(&s, 60);
-        assert!(
-            result.ends_with("..."),
-            "truncated string should end with '...'; got: {result:?}"
-        );
-        assert!(
-            result.chars().count() <= 60,
-            "truncated string should be at most max_len chars; got {} chars",
-            result.chars().count()
-        );
-    }
-
-    #[test]
-    fn test_truncate_desc_unicode() {
-        // 30 two-byte chars — should not truncate at max_len=60.
-        let s = "é".repeat(30);
-        let result = truncate_desc(&s, 60);
-        assert_eq!(result.as_ref(), s.as_str());
-    }
-
-    #[test]
-    fn truncate_desc_over_max_ends_with_ellipsis() {
-        let result = truncate_desc("hello world foo bar", 10);
-        assert!(result.ends_with("..."));
-        assert!(result.chars().count() <= 10);
-    }
 }

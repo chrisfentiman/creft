@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use yansi::Paint;
 
 use crate::error::CreftError;
+use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 
 /// Matches `{{name}}` and `{{name|default}}` placeholders in skill templates.
 pub(crate) static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -435,7 +436,7 @@ impl ParsedCommand {
     /// needed — the global condition handles enable/disable transparently.
     pub fn help_text(&self) -> String {
         // First line is the description only — user already typed the skill name.
-        let mut out = format!("{}\n", self.def.description);
+        let mut out = format!("{}\n", wrap_text(&self.def.description, MAX_WIDTH, 0));
 
         out.push('\n');
         let usage = self.usage_line();
@@ -448,7 +449,7 @@ impl ParsedCommand {
 
         if let Some(docs) = &self.docs {
             out.push('\n');
-            out.push_str(docs);
+            out.push_str(&wrap_text(docs, MAX_WIDTH, 0));
             out.push('\n');
         }
 
@@ -461,6 +462,8 @@ impl ParsedCommand {
                 .map(|a| a.name.len())
                 .max()
                 .unwrap_or(0);
+            let desc_col = 2 + max_name + 2;
+            let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
             for arg in &self.def.args {
                 let default_hint = arg
                     .default
@@ -476,12 +479,9 @@ impl ParsedCommand {
                     // so the line ends cleanly at the name rather than with trailing spaces.
                     out.push_str(&format!("  {}{pad}\n", arg.name.as_str().bold()));
                 } else {
-                    out.push_str(&format!(
-                        "  {}{pad}  {}{}\n",
-                        arg.name.as_str().bold(),
-                        arg.description,
-                        default_hint,
-                    ));
+                    let full_desc = format!("{}{}", arg.description, default_hint);
+                    let wrapped = wrap_description(&full_desc, desc_budget, desc_col);
+                    out.push_str(&format!("  {}{pad}  {wrapped}\n", arg.name.as_str().bold(),));
                 }
             }
         }
@@ -503,6 +503,8 @@ impl ParsedCommand {
                 })
                 .max()
                 .unwrap_or(0);
+            let flag_desc_col = 2 + max_flag + 2;
+            let flag_desc_budget = MAX_WIDTH.saturating_sub(flag_desc_col);
             for flag in &self.def.flags {
                 let short = flag
                     .short
@@ -523,12 +525,9 @@ impl ParsedCommand {
                     .unwrap_or_default();
                 // Column width computed from plain label length (not bold-wrapped).
                 let pad = " ".repeat(max_flag - label.len());
-                out.push_str(&format!(
-                    "  {}{pad}  {}{}\n",
-                    label.as_str().bold(),
-                    flag.description,
-                    default_hint,
-                ));
+                let full_desc = format!("{}{}", flag.description, default_hint);
+                let wrapped = wrap_description(&full_desc, flag_desc_budget, flag_desc_col);
+                out.push_str(&format!("  {}{pad}  {wrapped}\n", label.as_str().bold(),));
             }
         }
 

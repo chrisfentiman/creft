@@ -710,6 +710,8 @@ pub(crate) fn render_version() -> String {
 mod renderer {
     use yansi::Paint;
 
+    use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
+
     use super::{
         ADD_LONG_ABOUT, ADD_SHORT_ABOUT, COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT,
         DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT, INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT,
@@ -725,10 +727,8 @@ mod renderer {
 
     /// Format a help page with a short description, usage line, and long about.
     pub fn page(short_desc: &str, usage: &str, long_about: &str) -> String {
-        format!(
-            "{short_desc}\n\n{}{usage}\n\n{long_about}\n",
-            "Usage: ".bold(),
-        )
+        let wrapped = wrap_text(long_about, MAX_WIDTH, 0);
+        format!("{short_desc}\n\n{}{usage}\n\n{wrapped}\n", "Usage: ".bold(),)
     }
 
     /// Format a help page that includes a column-aligned Options section.
@@ -746,9 +746,12 @@ mod renderer {
                 .map(|(label, _)| label.len())
                 .max()
                 .unwrap_or(0);
+            let desc_col = 2 + max_label + 2;
+            let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
             for (label, desc) in options {
                 let pad = " ".repeat(max_label - label.len());
-                out.push_str(&format!("  {}{pad}  {desc}\n", label.bold()));
+                let wrapped = wrap_description(desc, desc_budget, desc_col);
+                out.push_str(&format!("  {}{pad}  {wrapped}\n", label.bold()));
             }
         }
         out
