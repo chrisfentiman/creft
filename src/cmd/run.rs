@@ -408,7 +408,10 @@ mod tests {
     fn executable_code_blocks_are_stripped() {
         let body = "Some prose.\n\n```bash\necho hello\n```\n\nMore prose.\n";
         let result = strip_code_blocks(body);
-        assert!(!result.contains("echo hello"), "bash block content must be removed");
+        assert!(
+            !result.contains("echo hello"),
+            "bash block content must be removed"
+        );
         assert!(!result.contains("```"), "fence delimiters must be removed");
         assert!(result.contains("Some prose."));
         assert!(result.contains("More prose."));
@@ -418,8 +421,14 @@ mod tests {
     fn docs_block_content_preserved_fence_stripped() {
         let body = "Before.\n\n```docs\nThis is documentation.\n```\n\nAfter.\n";
         let result = strip_code_blocks(body);
-        assert!(result.contains("This is documentation."), "docs block content must be kept");
-        assert!(!result.contains("```docs"), "docs opening fence must be stripped");
+        assert!(
+            result.contains("This is documentation."),
+            "docs block content must be kept"
+        );
+        assert!(
+            !result.contains("```docs"),
+            "docs opening fence must be stripped"
+        );
         assert!(!result.contains("```\n"), "closing fence must be stripped");
         assert!(result.contains("Before."));
         assert!(result.contains("After."));
@@ -441,8 +450,14 @@ mod tests {
         // A 4-backtick fence must be closed by 4 backticks, not 3.
         let body = "````python\ncode here\n````\n";
         let result = strip_code_blocks(body);
-        assert!(!result.contains("code here"), "4-backtick block content must be removed");
-        assert!(!result.contains("````"), "4-backtick fence delimiters must be removed");
+        assert!(
+            !result.contains("code here"),
+            "4-backtick block content must be removed"
+        );
+        assert!(
+            !result.contains("````"),
+            "4-backtick fence delimiters must be removed"
+        );
     }
 
     #[test]
@@ -450,38 +465,59 @@ mod tests {
         // A ``` line inside a ```` fence is not a closing delimiter.
         let body = "````bash\necho a\n```\nnot close\n````\n\nAfter.\n";
         let result = strip_code_blocks(body);
-        assert!(!result.contains("echo a"), "content inside outer fence must be dropped");
-        assert!(!result.contains("not close"), "inner ``` must not close the outer fence");
+        assert!(
+            !result.contains("echo a"),
+            "content inside outer fence must be dropped"
+        );
+        assert!(
+            !result.contains("not close"),
+            "inner ``` must not close the outer fence"
+        );
         assert!(result.contains("After."));
     }
 
     #[test]
     fn headers_in_prose_receive_bold_markers() {
-        yansi::disable();
+        yansi::enable();
         let body = "## Prerequisites\n\nSome text.\n";
         let result = strip_code_blocks(body);
-        // With yansi disabled the text passes through undecorated but still present.
-        assert!(result.contains("## Prerequisites"));
-        yansi::enable();
+        // When yansi is enabled, the header line must contain ANSI escape sequences.
+        assert!(
+            result.contains('\x1b'),
+            "bold ANSI escape sequences must be present when yansi is enabled"
+        );
+        assert!(
+            result.contains("## Prerequisites"),
+            "header text must be preserved"
+        );
     }
 
     #[test]
     fn frontmatter_replaced_with_name_description_header() {
         yansi::disable();
-        let raw = "---\nname: deploy-app\ndescription: Deploys the application.\n---\n\nSome docs.\n";
+        let raw =
+            "---\nname: deploy-app\ndescription: Deploys the application.\n---\n\nSome docs.\n";
         let result = plain(&render_skill_docs("deploy-app", raw));
         assert!(result.contains("deploy-app"), "name must appear in header");
-        assert!(result.contains("Deploys the application."), "description must appear");
-        assert!(result.contains("Some docs."), "body prose must be preserved");
-        assert!(!result.contains("---"), "frontmatter delimiters must not appear");
+        assert!(
+            result.contains("Deploys the application."),
+            "description must appear"
+        );
+        assert!(
+            result.contains("Some docs."),
+            "body prose must be preserved"
+        );
+        assert!(
+            !result.contains("---"),
+            "frontmatter delimiters must not appear"
+        );
         yansi::enable();
     }
 
     #[test]
     fn skill_with_only_frontmatter_and_code_produces_header_only() {
         yansi::disable();
-        let raw =
-            "---\nname: minimal\ndescription: Minimal skill.\n---\n\n```bash\necho hi\n```\n";
+        let raw = "---\nname: minimal\ndescription: Minimal skill.\n---\n\n```bash\necho hi\n```\n";
         let result = plain(&render_skill_docs("minimal", raw));
         assert!(result.contains("minimal"));
         assert!(result.contains("Minimal skill."));
@@ -521,7 +557,10 @@ mod tests {
         yansi::disable();
         let raw = "not valid frontmatter\n\nSome prose.\n";
         let result = plain(&render_skill_docs("fallback-name", raw));
-        assert!(result.contains("fallback-name"), "skill name must appear as fallback header");
+        assert!(
+            result.contains("fallback-name"),
+            "skill name must appear as fallback header"
+        );
         yansi::enable();
     }
 }
