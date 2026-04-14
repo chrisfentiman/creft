@@ -7,6 +7,8 @@ use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
 
 mod blocks;
+#[cfg(unix)]
+pub(crate) mod channel;
 mod pipe;
 #[cfg(unix)]
 mod signal;
@@ -503,6 +505,11 @@ fn execute_block(
         std::process::Stdio::inherit()
     };
 
+    // Create the side channel before spawning so the child's pipe ends are
+    // ready for inheritance via pre_exec/dup2.
+    #[cfg(unix)]
+    let mut side_channel = channel::SideChannel::new().map_err(CreftError::Io)?;
+
     let (mut child, _node_deps_dir) = spawn_block(
         block,
         &tmp_path,
@@ -513,7 +520,38 @@ fn execute_block(
         None, // single-block mode: no process group management
         #[cfg(unix)]
         false, // single-block mode: do not suppress SIGINT
+        #[cfg(unix)]
+        Some(&side_channel),
     )?;
+
+    // After spawn, close the parent's copies of the child's pipe ends.
+    // If the parent keeps them open, the control-pipe reader will never
+    // see EOF (the parent's write end keeps the pipe alive).
+    #[cfg(unix)]
+    side_channel.close_child_ends();
+
+    // Move the control reader into a background thread that drains it.
+    // This runs concurrently with stdout capture so neither side blocks.
+    #[cfg(unix)]
+    let reader_thread = {
+        use std::io::Read as _;
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let ctrl_reader = side_channel
+            .take_control_reader()
+            .expect("control reader taken exactly once per block");
+        // Drop the response writer — stage 1 has no bidirectional prompts.
+        // Dropping it closes the write end so any child blocked on fd 4 sees EOF.
+        let _response_writer = side_channel.take_response_writer();
+        std::thread::spawn(move || {
+            // SAFETY: ctrl_reader is valid and exclusively owned by this thread.
+            // Wrapping it as a File gives us buffered read via Read trait.
+            let mut file = unsafe { std::fs::File::from_raw_fd(ctrl_reader.into_raw_fd()) };
+            let mut buf = Vec::new();
+            // Drain until EOF (child exited and parent closed write end above).
+            let _ = file.read_to_end(&mut buf);
+            buf
+        })
+    };
 
     // When prev_output data must be written to the child's stdin, do it on a
     // background thread so that stdout draining (via wait_with_output) and
@@ -550,6 +588,16 @@ fn execute_block(
             .expect("stdin write thread panicked")
             .map_err(CreftError::Io)?;
     }
+
+    // Join the side-channel reader thread after the child has exited and
+    // stdout has been drained. The child's exit guarantees its fd 3 write
+    // end is closed; our close_child_ends() call above closed the parent's
+    // copy, so the reader thread will have seen EOF and returned by now.
+    // Stage 1: collected bytes are discarded (no rendering yet).
+    #[cfg(unix)]
+    let _ = reader_thread
+        .join()
+        .expect("side-channel reader thread panicked");
 
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
         // Print any output produced before the early exit so it is not lost.

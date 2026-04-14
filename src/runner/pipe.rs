@@ -1188,6 +1188,8 @@ pub(super) fn run_pipe_chain(
             pg,
             #[cfg(unix)]
             sigint_ignored,
+            #[cfg(unix)]
+            None, // pipe-chain side channel wiring is deferred to a future stage
         )
         .inspect_err(|_| {
             #[cfg(unix)]
