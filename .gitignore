@@ -17,3 +17,6 @@ target
 .creft/
 !.creft/commands/
 !.creft/catalog.json
+
+# Generated Cloudflare Worker (build artifact from creft deploy install-script)
+cloudflare/workers/dist/
