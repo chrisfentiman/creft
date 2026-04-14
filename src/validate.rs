@@ -76,12 +76,12 @@ pub(crate) const DESCRIPTION_WARN_LEN: usize = 80;
 
 /// Flag long names that creft intercepts before the skill's argument parser.
 ///
-/// If you add a filter here, update RESERVED_FLAG_NAMES in validate.rs.
+/// Keep in sync with the filter closure in `src/cmd/run.rs`.
 const RESERVED_FLAG_NAMES: &[&str] = &["help", "docs", "dry-run", "verbose", "version"];
 
 /// Flag short forms that creft intercepts before the skill's argument parser.
 ///
-/// If you add a filter here, update RESERVED_SHORT_FLAGS in validate.rs.
+/// Keep in sync with the filter closure in `src/cmd/run.rs`.
 const RESERVED_SHORT_FLAGS: &[char] = &['h', 'v', 'V'];
 
 /// Validate flag names, arg names, and short forms for conflicts and reserved names.
