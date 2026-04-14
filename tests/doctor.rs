@@ -182,10 +182,7 @@ fn test_doctor_namespace_runs_all_skills() {
         .assert()
         .success();
 
-    let output = creft_with(&dir)
-        .args(["doctor", "tools"])
-        .output()
-        .unwrap();
+    let output = creft_with(&dir).args(["doctor", "tools"]).output().unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Both skills should appear in the combined report output.
