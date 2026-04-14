@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use serde::{Deserialize, Serialize};
-
 use yansi::Paint;
 
 use crate::error::CreftError;
@@ -267,89 +265,55 @@ pub enum SkillSource {
 }
 
 /// Skill definition parsed from YAML frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CommandDef {
     pub name: String,
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<Arg>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Runtime features this command supports (e.g., "dry-run").
     /// When a feature is declared here and the corresponding runtime flag
     /// is passed, creft delegates handling to the command instead of
     /// implementing it generically.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supports: Vec<String>,
 }
 
 /// A positional argument declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Arg {
     pub name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// Whether this arg must be provided by the caller. Default: false.
     /// When false and no value is provided, the arg is not bound.
     /// Template substitution uses `{{name|default}}` if present,
     /// or errors on `{{name}}` with no default.
-    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
     /// Regex pattern for validation. Applied to the final value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
 }
 
 /// A named option declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Flag {
     pub name: String,
     /// Single-char short form (e.g., "v" for -v)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// "bool" (presence flag) or "string" (takes a value). Default: "string".
-    #[serde(
-        default = "default_flag_type",
-        skip_serializing_if = "is_default_flag_type"
-    )]
     pub r#type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// Regex pattern for validation (only for string flags).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
 }
 
-fn default_flag_type() -> String {
-    "string".into()
-}
-
-fn is_false(v: &bool) -> bool {
-    !v
-}
-
-fn is_default_flag_type(v: &str) -> bool {
-    v == "string"
-}
-
 /// An environment variable dependency declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EnvVar {
     pub name: String,
-    #[serde(default = "default_true")]
     pub required: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_provider() -> String {
@@ -360,23 +324,20 @@ fn default_provider() -> String {
 ///
 /// All fields are optional strings for forward-compatibility with unknown
 /// providers and future provider features.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmConfig {
     /// CLI tool to invoke. Defaults to `"claude"` when absent.
     /// Known providers have specific command patterns; unknown providers
     /// are invoked as literal command names.
-    #[serde(default = "default_provider")]
     pub provider: String,
 
     /// Model name passed to the provider CLI. Omitted from the command
     /// when empty (provider uses its own default).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
 
     /// Raw parameter string appended to the command. Split on whitespace
     /// before appending as individual arguments. This is the escape hatch
     /// for any provider flag creft doesn't model explicitly.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub params: String,
 }
 
@@ -760,7 +721,7 @@ mod tests {
 name: verbose
 description: verbose mode
 "#;
-        let flag: Flag = serde_yaml_ng::from_str(yaml).unwrap();
+        let flag: Flag = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(flag.r#type, "string");
     }
 
@@ -770,7 +731,7 @@ description: verbose mode
         let yaml = r#"
 name: MY_TOKEN
 "#;
-        let env_var: EnvVar = serde_yaml_ng::from_str(yaml).unwrap();
+        let env_var: EnvVar = crate::yaml::from_str(yaml).unwrap();
         assert!(env_var.required, "default required should be true");
     }
 
@@ -1269,7 +1230,7 @@ provider: openai
 model: gpt-4o
 params: "--max-tokens 1000"
 "#;
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "openai");
         assert_eq!(config.model, "gpt-4o");
         assert_eq!(config.params, "--max-tokens 1000");
@@ -1278,7 +1239,7 @@ params: "--max-tokens 1000"
     #[test]
     fn test_llm_config_deserialize_defaults() {
         let yaml = "{}";
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "claude");
         assert!(config.model.is_empty());
         assert!(config.params.is_empty());
@@ -1287,7 +1248,7 @@ params: "--max-tokens 1000"
     #[test]
     fn test_llm_config_deserialize_provider_only() {
         let yaml = "provider: gemini";
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "gemini");
         assert!(config.model.is_empty());
         assert!(config.params.is_empty());
@@ -1297,7 +1258,7 @@ params: "--max-tokens 1000"
     fn test_deserialize_ignores_pipe_field() {
         // YAML with pipe: true must deserialize without error. Field is silently ignored.
         let yaml = "name: hello\ndescription: test\npipe: true\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        let def: CommandDef = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(def.name, "hello");
     }
 
@@ -1305,7 +1266,7 @@ params: "--max-tokens 1000"
     fn test_deserialize_ignores_sequential_field() {
         // YAML with sequential: true must deserialize without error. Field is silently ignored.
         let yaml = "name: hello\ndescription: test\nsequential: true\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        let def: CommandDef = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(def.name, "hello");
     }
 

@@ -36,7 +36,7 @@ pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
     let body = after_open[body_start..].to_string();
 
     let def: CommandDef =
-        serde_yaml_ng::from_str(yaml).map_err(|e| CreftError::Frontmatter(e.to_string()))?;
+        crate::yaml::from_str(yaml).map_err(|e| CreftError::Frontmatter(e.to_string()))?;
 
     if def.name.is_empty() {
         return Err(CreftError::InvalidName("name cannot be empty".into()));
@@ -47,8 +47,7 @@ pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
 
 /// Serialize a CommandDef back to frontmatter + body markdown.
 pub fn serialize(def: &CommandDef, body: &str) -> Result<String, CreftError> {
-    let yaml =
-        serde_yaml_ng::to_string(def).map_err(|e| CreftError::Serialization(e.to_string()))?;
+    let yaml = crate::yaml::to_string(def);
     Ok(format!("---\n{}---\n{}", yaml, body))
 }
 

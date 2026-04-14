@@ -3,10 +3,6 @@
 //! Provides [`FromYaml`] and [`ToYaml`] traits with hand-written implementations
 //! for the six types creft parses from YAML. Uses `yaml-rust2` for parsing and
 //! writes YAML directly via string operations for emission.
-//!
-//! Production call sites are wired in stage 2 of the yaml-rust2 migration.
-//! Until then, all items are exercised by this module's own unit tests.
-#![allow(dead_code)]
 
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlLoader};

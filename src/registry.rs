@@ -10,17 +10,15 @@ use crate::model::{AppContext, CommandDef, ParsedCommand, Scope};
 use crate::store;
 
 /// Manifest for an installed skill package.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageManifest {
     pub name: String,
     pub version: String,
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub description: String,
-    #[serde(default)]
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub author: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub license: Option<String>,
 }
 
@@ -1194,7 +1192,7 @@ mod tests {
     #[test]
     fn test_manifest_full_fields() {
         let yaml = "name: k8s-tools\nversion: 0.1.0\ndescription: Kubernetes skills\nauthor: someone\nlicense: MIT\n";
-        let manifest: PackageManifest = serde_yaml_ng::from_str(yaml).unwrap();
+        let manifest: PackageManifest = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(manifest.name, "k8s-tools");
         assert_eq!(manifest.version, "0.1.0");
         assert_eq!(manifest.description, "Kubernetes skills");
@@ -1205,7 +1203,7 @@ mod tests {
     #[test]
     fn test_manifest_optional_fields_absent() {
         let yaml = "name: my-pkg\nversion: 1.0.0\ndescription: A package\n";
-        let manifest: PackageManifest = serde_yaml_ng::from_str(yaml).unwrap();
+        let manifest: PackageManifest = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(manifest.name, "my-pkg");
         assert!(manifest.author.is_none());
         assert!(manifest.license.is_none());
@@ -1214,21 +1212,21 @@ mod tests {
     #[test]
     fn test_manifest_missing_required_field_name() {
         let yaml = "version: 1.0.0\ndescription: A package\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_manifest_missing_required_field_version() {
         let yaml = "name: my-pkg\ndescription: A package\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_manifest_missing_required_field_description() {
         let yaml = "name: my-pkg\nversion: 1.0.0\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
