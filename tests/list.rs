@@ -1183,7 +1183,7 @@ fn test_list_has_skills_header() {
     );
 }
 
-/// `creft list <namespace>` drill-in prints "Skills in '<namespace>':" header.
+/// `creft list <namespace>` drill-in prints Skills: header, scoped usage, flags, and footer.
 #[test]
 fn test_list_drill_in_has_scoped_header() {
     let dir = creft_env();
@@ -1210,8 +1210,20 @@ fn test_list_drill_in_has_scoped_header() {
 
     let stdout = String::from_utf8_lossy(&output);
     assert!(
-        stdout.contains("Skills in 'tavily':"),
-        "drill-in should print scoped header; got: {stdout:?}"
+        stdout.contains("Skills:"),
+        "drill-in should print 'Skills:' header; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("creft tavily <command>"),
+        "drill-in should print scoped usage line; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "drill-in should print --dry-run flag; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("creft tavily <command> --help"),
+        "drill-in should print scoped footer; got: {stdout:?}"
     );
 }
 

@@ -208,10 +208,8 @@ pub fn cmd_list(
             eprintln!("no commands found. use 'creft add' to create one.");
             return Ok(());
         }
-        let header = format!("Skills in '{}':", prefix.join(" "));
-        println!("{}", header.as_str().bold());
-        println!();
-        print!("{}", render_skill_entries(&entries, &prefix));
+        let ns = prefix.join(" ");
+        print!("{}", render_namespace_listing(&entries, &prefix, &ns));
     }
 
     Ok(())
@@ -265,7 +263,6 @@ pub(crate) fn render_root_listing(
     // Skills: section.
     writeln!(out).unwrap();
     writeln!(out, "{}", "Skills:".bold()).unwrap();
-    writeln!(out).unwrap();
 
     let empty_prefix: &[&str] = &[];
     let total = count_visible_entries(entries);
@@ -295,6 +292,45 @@ pub(crate) fn render_root_listing(
     out.push_str(&render_global_flags(flags_col));
     writeln!(out).unwrap();
     writeln!(out, "See 'creft <command> --help' for details.").unwrap();
+    out
+}
+
+/// Render the namespace drill-in listing as a `String`.
+///
+/// Mirrors the structure of `render_root_listing` but scoped to a single namespace:
+/// `Skills:` header, usage line, skill entries with column alignment, global flags,
+/// and a footer pointing to per-command `--help`.
+pub(crate) fn render_namespace_listing(
+    entries: &[model::NamespaceEntry],
+    prefix: &[&str],
+    namespace: &str,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    writeln!(out, "{}", "Skills:".bold()).unwrap();
+    writeln!(
+        out,
+        "{}creft {} <command> [ARGS] [OPTIONS]",
+        "Usage: ".bold(),
+        namespace,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    let (skills_output, max_skill_name) = render_skill_entries_limited(entries, prefix, usize::MAX);
+    out.push_str(&skills_output);
+
+    writeln!(out).unwrap();
+    out.push_str(&render_global_flags(max_skill_name));
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "See 'creft {} <command> --help' for details.",
+        namespace,
+    )
+    .unwrap();
     out
 }
 
@@ -347,13 +383,6 @@ fn render_global_flags(col_width: usize) -> String {
     )
     .unwrap();
     out
-}
-
-/// Render skill entries for a namespace drill-in as a `String`.
-///
-/// No truncation is applied (equivalent to passing `usize::MAX` as the limit).
-fn render_skill_entries(entries: &[model::NamespaceEntry], prefix: &[&str]) -> String {
-    render_skill_entries_limited(entries, prefix, usize::MAX).0
 }
 
 /// Render skill entries up to `limit` as a `(String, max_name_width)` pair.
@@ -635,6 +664,63 @@ mod tests {
             output.contains("skill-199"),
             "all entries must be rendered when no limit is applied;\
              \ngot:\n{output}",
+        );
+    }
+
+    /// Namespace listing contains Skills: header, usage line, flags, and footer.
+    ///
+    /// These structural elements mirror the root listing so that the namespace
+    /// output feels like a natural subset rather than a bare dump.
+    #[test]
+    fn namespace_listing_contains_required_structural_elements() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(3);
+        let prefix: Vec<&str> = vec!["artifacts"];
+        let output = render_namespace_listing(&entries, &prefix, "artifacts");
+        yansi::enable();
+
+        assert!(
+            output.contains("Skills:"),
+            "namespace listing must contain 'Skills:' header;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("Usage:"),
+            "namespace listing must contain 'Usage:' line;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("--dry-run"),
+            "namespace listing must contain --dry-run flag;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("--verbose"),
+            "namespace listing must contain --verbose flag;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("--help"),
+            "namespace listing must contain --help footer;\ngot:\n{output}",
+        );
+    }
+
+    /// Namespace listing incorporates the namespace name in usage and footer lines.
+    ///
+    /// The caller-supplied namespace name must appear in the `Usage:` line and in
+    /// the `See 'creft ... --help'` footer so the user knows which namespace they
+    /// are viewing.
+    #[test]
+    fn namespace_listing_includes_namespace_name_in_usage_and_footer() {
+        yansi::disable();
+        let entries = synthetic_namespace_entries(2);
+        let prefix: Vec<&str> = vec!["my-ns"];
+        let output = render_namespace_listing(&entries, &prefix, "my-ns");
+        yansi::enable();
+
+        assert!(
+            output.contains("creft my-ns <command>"),
+            "usage line must reference the namespace name;\ngot:\n{output}",
+        );
+        assert!(
+            output.contains("creft my-ns <command> --help"),
+            "footer must reference the namespace name;\ngot:\n{output}",
         );
     }
 }
