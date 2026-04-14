@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 /// File descriptor number for the block → creft message channel.
 pub(super) const CONTROL_FD: i32 = 3;
@@ -330,11 +330,126 @@ pub(crate) fn spawn_reader(
         .expect("failed to spawn channel reader thread")
 }
 
+/// Handle a prompt request by rendering it to the terminal and collecting user
+/// input, then writing the response to the response pipe.
+///
+/// When `interactive` is `false` (pipe chain context or piped stdin), the
+/// response is written immediately with an empty value without prompting the
+/// user. This prevents the child from deadlocking on its `read <&4` call.
+///
+/// When `interactive` is `true`, the `TerminalWriter` lock is held for the
+/// entire prompt-and-read cycle so that no other thread writes to stderr
+/// between the prompt question and the user's answer.
+pub(crate) fn handle_prompt(
+    prompt: &ChannelMessage,
+    response_writer: &mut File,
+    writer: &Arc<TerminalWriter>,
+    interactive: bool,
+) {
+    let (id, question, choices) = match prompt {
+        ChannelMessage::Prompt {
+            id,
+            question,
+            choices,
+        } => (id.as_str(), question.as_str(), choices.as_str()),
+        // Only Prompt messages are valid inputs; callers must not pass other variants.
+        _ => return,
+    };
+
+    if !interactive {
+        // Non-interactive: write empty response and return immediately.
+        let response = format!("{{\"id\":\"{id}\",\"value\":\"\"}}\n");
+        let _ = response_writer.write_all(response.as_bytes());
+        let _ = response_writer.flush();
+        return;
+    }
+
+    // Interactive: hold the TerminalWriter lock for the whole prompt+read
+    // cycle so no concurrent block output appears between the prompt question
+    // and the user's typed answer.
+    let Ok(mut g) = writer.inner.lock() else {
+        // Mutex poisoned — fall back to empty response.
+        let response = format!("{{\"id\":\"{id}\",\"value\":\"\"}}\n");
+        let _ = response_writer.write_all(response.as_bytes());
+        let _ = response_writer.flush();
+        return;
+    };
+
+    // Clear any active status line before rendering the prompt.
+    if g.has_status {
+        let _ = write!(g.stderr, "\r{:width$}\r", "", width = 80);
+        g.has_status = false;
+    }
+
+    // Render the prompt question and choices to stderr.
+    if choices.is_empty() {
+        let _ = writeln!(g.stderr, "{question}: ");
+    } else {
+        let _ = writeln!(g.stderr, "{question} [{choices}]: ");
+    }
+    let _ = g.stderr.flush();
+
+    // Read the user's answer from stdin while still holding the lock.
+    let mut line = String::new();
+    let answer = match std::io::stdin().read_line(&mut line) {
+        Ok(_) => line.trim().to_owned(),
+        // stdin closed (Ctrl+D, closed pipe, cancelled) — empty response.
+        Err(_) => String::new(),
+    };
+
+    // Release the lock before writing to the response pipe — the write does
+    // not touch stderr and does not need the terminal lock.
+    drop(g);
+
+    // Escape the answer for JSON: backslash and double-quote need escaping.
+    let escaped = answer
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+
+    let response = format!("{{\"id\":\"{id}\",\"value\":\"{escaped}\"}}\n");
+    let _ = response_writer.write_all(response.as_bytes());
+    let _ = response_writer.flush();
+}
+
+/// Spawn a prompt handler thread that receives prompt requests from the reader
+/// thread and processes them sequentially.
+///
+/// Returns the join handle. The thread exits when `prompt_rx` is closed (the
+/// reader thread has exited after the child process exited).
+///
+/// Each received `ChannelMessage::Prompt` is forwarded to `handle_prompt`.
+/// Non-Prompt messages are ignored — the reader thread only sends Prompt
+/// variants over this channel.
+pub(crate) fn spawn_prompt_handler(
+    prompt_rx: mpsc::Receiver<ChannelMessage>,
+    response_writer: OwnedFd,
+    writer: Arc<TerminalWriter>,
+    interactive: bool,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("creft-prompt-handler".to_owned())
+        .spawn(move || {
+            // SAFETY: response_writer is valid and exclusively owned by this
+            // thread. Converting to File gives buffered write access.
+            let mut file = unsafe { File::from_raw_fd(response_writer.into_raw_fd()) };
+
+            for msg in prompt_rx {
+                handle_prompt(&msg, &mut file, &writer, interactive);
+            }
+            // prompt_rx is closed — reader thread has exited. Thread exits.
+        })
+        .expect("failed to spawn prompt handler thread")
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+    use std::sync::{Arc, mpsc};
 
     use pretty_assertions::assert_eq;
 
@@ -623,6 +738,93 @@ mod tests {
         assert!(!g.has_status, "print must clear has_status");
     }
 
+    // ---- handle_prompt ----
+
+    /// Non-interactive mode writes an empty response immediately.
+    #[test]
+    fn handle_prompt_non_interactive_writes_empty_response() {
+        // Use a raw pipe independent of SideChannel to avoid shared-fd ownership
+        // confusion: each end is exclusively owned by one binding.
+        let (resp_reader_fd, resp_writer_fd) = super::os_pipe().unwrap();
+        let mut resp_reader = unsafe { std::fs::File::from_raw_fd(resp_reader_fd.into_raw_fd()) };
+        let mut resp_writer = unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) };
+        let writer = Arc::new(super::TerminalWriter::new());
+
+        let msg = super::ChannelMessage::Prompt {
+            id: "p1".to_owned(),
+            question: "Continue?".to_owned(),
+            choices: "yes,no".to_owned(),
+        };
+
+        super::handle_prompt(&msg, &mut resp_writer, &writer, false);
+
+        // Drop the writer to close the write end so read_to_string sees EOF.
+        drop(resp_writer);
+
+        let mut buf = String::new();
+        resp_reader.read_to_string(&mut buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
+        assert_eq!(parsed["id"], "p1");
+        assert_eq!(parsed["value"], "");
+    }
+
+    /// Non-interactive handle_prompt response is valid JSON with the correct id.
+    #[test]
+    fn handle_prompt_non_interactive_response_is_valid_json() {
+        let (resp_reader_fd, resp_writer_fd) = super::os_pipe().unwrap();
+        let mut resp_reader = unsafe { std::fs::File::from_raw_fd(resp_reader_fd.into_raw_fd()) };
+        let mut resp_writer = unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) };
+        let writer = Arc::new(super::TerminalWriter::new());
+
+        let msg = super::ChannelMessage::Prompt {
+            id: "unique-id-42".to_owned(),
+            question: "Deploy?".to_owned(),
+            choices: "".to_owned(),
+        };
+
+        super::handle_prompt(&msg, &mut resp_writer, &writer, false);
+        drop(resp_writer);
+
+        let mut buf = String::new();
+        resp_reader.read_to_string(&mut buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
+        assert_eq!(parsed["id"], "unique-id-42");
+        assert_eq!(parsed["value"], "");
+    }
+
+    // ---- spawn_prompt_handler ----
+
+    /// spawn_prompt_handler writes empty responses and exits when the channel closes.
+    #[test]
+    fn spawn_prompt_handler_exits_when_channel_closes() {
+        let (resp_reader_fd, resp_writer_fd) = super::os_pipe().unwrap();
+        let mut resp_reader = unsafe { std::fs::File::from_raw_fd(resp_reader_fd.into_raw_fd()) };
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        let (tx, rx) = mpsc::channel::<super::ChannelMessage>();
+
+        let handle = super::spawn_prompt_handler(rx, resp_writer_fd, writer, false);
+
+        // Send a prompt then close the sender to signal the handler to exit.
+        tx.send(super::ChannelMessage::Prompt {
+            id: "ph-test".to_owned(),
+            question: "Continue?".to_owned(),
+            choices: "yes,no".to_owned(),
+        })
+        .unwrap();
+        drop(tx);
+
+        handle.join().expect("prompt handler thread must not panic");
+
+        // The handler also closed resp_writer_fd when it exited, so the read
+        // end sees EOF and read_to_string returns.
+        let mut buf = String::new();
+        resp_reader.read_to_string(&mut buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
+        assert_eq!(parsed["id"], "ph-test");
+        assert_eq!(parsed["value"], "");
+    }
+
     // ---- spawn_reader integration ----
 
     /// A bash block writing a print message to fd 3 via the preamble produces
@@ -633,8 +835,6 @@ mod tests {
     /// child process exits successfully.
     #[test]
     fn spawn_reader_drains_print_message_cleanly() {
-        use std::sync::Arc;
-
         let mut ch = SideChannel::new().unwrap();
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
@@ -683,8 +883,6 @@ mod tests {
     /// and the reader thread exits cleanly.
     #[test]
     fn spawn_reader_ignores_unknown_message_type() {
-        use std::sync::Arc;
-
         let mut ch = SideChannel::new().unwrap();
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
@@ -730,8 +928,6 @@ mod tests {
     /// cleanly when the pipe reaches EOF.
     #[test]
     fn spawn_reader_exits_on_eof_with_no_messages() {
-        use std::sync::Arc;
-
         let mut ch = SideChannel::new().unwrap();
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
@@ -770,5 +966,70 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(status.success());
         handle.join().expect("reader thread must not panic");
+    }
+
+    /// A bash block that sends a prompt message via fd 3 in non-interactive mode
+    /// receives an empty response on fd 4 and does not deadlock.
+    ///
+    /// This wires spawn_reader (with prompt_tx) and spawn_prompt_handler together
+    /// to verify the full prompt forwarding path in a non-interactive context.
+    #[test]
+    fn prompt_non_interactive_round_trip_does_not_deadlock() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        // Bash script: send a prompt message to fd 3, read the response from
+        // fd 4, and echo the response value to stdout.
+        let script = r#"
+printf '{"type":"prompt","id":"t1","question":"Continue?","choices":"yes,no"}\n' >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c");
+        cmd.arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            cmd.pre_exec(move || {
+                if libc::dup2(ctrl_w_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if ctrl_w_fd != 3 {
+                    libc::close(ctrl_w_fd);
+                }
+                if libc::dup2(resp_r_fd, 4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if resp_r_fd != 4 {
+                    libc::close(resp_r_fd);
+                }
+                Ok(())
+            });
+        }
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        let (prompt_tx, prompt_rx) = mpsc::channel::<super::ChannelMessage>();
+
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, Arc::clone(&writer), Some(prompt_tx), None);
+        let prompt_handle = super::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, false);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+        prompt_handle.join().expect("prompt handler must not panic");
+
+        // The bash script writes the raw response JSON to stdout.
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "t1");
+        assert_eq!(parsed["value"], "");
     }
 }

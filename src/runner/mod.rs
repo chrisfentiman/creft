@@ -562,20 +562,39 @@ fn execute_block(
     // Spawn the side-channel reader thread that parses NDJSON from fd 3
     // and renders print/status messages to the terminal via stderr.
     // Runs concurrently with stdout capture so neither pipe blocks.
+    //
+    // Interactive prompts are only valid when the child's stdin is the
+    // terminal (stdin_data is None). If stdin is piped, creft is using
+    // the child's stdin for data — interactive reading from the same
+    // terminal is not possible.
     #[cfg(unix)]
-    let reader_thread = {
-        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+    let (reader_thread, prompt_thread) = {
         let ctrl_reader = side_channel
             .take_control_reader()
             .expect("control reader taken exactly once per block");
-        // Take the response writer so the reader can send empty prompt
-        // responses (stage 3 non-interactive fallback). Converting to File
-        // here so spawn_reader owns it for the thread lifetime.
-        let resp_writer = side_channel
+        let resp_writer_fd = side_channel
             .take_response_writer()
-            .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
+            .expect("response writer taken exactly once per block");
         let writer = std::sync::Arc::new(channel::TerminalWriter::new());
-        channel::spawn_reader(ctrl_reader, writer, None, resp_writer)
+
+        // Set up a channel so the reader thread can forward prompt messages
+        // to the prompt handler thread.
+        let (prompt_tx, prompt_rx) = std::sync::mpsc::channel::<channel::ChannelMessage>();
+
+        // Interactive prompts require an unpiped stdin (terminal access).
+        let interactive = stdin_data.is_none();
+
+        let reader = channel::spawn_reader(
+            ctrl_reader,
+            std::sync::Arc::clone(&writer),
+            Some(prompt_tx),
+            // The reader does not write responses directly — the prompt
+            // handler thread owns the response writer.
+            None,
+        );
+        let prompter =
+            channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
+        (reader, prompter)
     };
 
     // When prev_output data must be written to the child's stdin, do it on a
@@ -617,12 +636,21 @@ fn execute_block(
     // Join the reader thread after the child has exited and stdout has been
     // drained. The child's exit closes its fd 3 write end; close_child_ends()
     // above closed the parent's copy, so the reader will have seen EOF.
+    // When the reader exits it drops prompt_tx, which closes the mpsc channel
+    // and causes the prompt handler thread to exit.
     // Joining here ensures all side-channel messages are rendered before
     // the function returns.
     #[cfg(unix)]
-    reader_thread
-        .join()
-        .expect("side-channel reader thread panicked");
+    {
+        reader_thread
+            .join()
+            .expect("side-channel reader thread panicked");
+        // Join the prompt handler after the reader: the reader exits first
+        // (closes prompt_tx), which signals the prompt handler to finish.
+        prompt_thread
+            .join()
+            .expect("side-channel prompt handler thread panicked");
+    }
 
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
         // Print any output produced before the early exit so it is not lost.
