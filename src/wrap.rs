@@ -88,7 +88,6 @@ pub fn wrap_description(
     let mut out = String::new();
     let mut current_budget = first_line_budget;
     let mut current_len = 0usize;
-    let mut first_line = true;
     let mut line_started = false;
 
     for word in &words {
@@ -96,25 +95,14 @@ pub fn wrap_description(
 
         if !line_started {
             // First word on this line.
-            if current_budget == 0 || (!first_line && word_len > current_budget) {
+            if current_budget == 0 || word_len > current_budget {
                 // No budget or word exceeds budget: start continuation.
-                if first_line {
-                    // Push the word onto a new continuation line.
-                    out.push('\n');
-                    out.push_str(&cont_str);
-                    out.push_str(word);
-                    current_len = word_len;
-                    line_started = true;
-                    first_line = false;
-                    current_budget = MAX_WIDTH.saturating_sub(continuation_indent);
-                } else {
-                    out.push('\n');
-                    out.push_str(&cont_str);
-                    out.push_str(word);
-                    current_len = word_len;
-                    line_started = true;
-                    current_budget = MAX_WIDTH.saturating_sub(continuation_indent);
-                }
+                out.push('\n');
+                out.push_str(&cont_str);
+                out.push_str(word);
+                current_len = word_len;
+                line_started = true;
+                current_budget = MAX_WIDTH.saturating_sub(continuation_indent);
             } else {
                 // Fits: place word directly (first-line has no leading spaces).
                 out.push_str(word);
@@ -134,7 +122,6 @@ pub fn wrap_description(
                 out.push_str(&cont_str);
                 out.push_str(word);
                 current_len = word_len;
-                first_line = false;
                 current_budget = MAX_WIDTH.saturating_sub(continuation_indent);
             }
         }
@@ -169,11 +156,7 @@ fn wrap_words(text: &str, width: usize, indent: usize, indent_str: &str) -> Stri
                 out.push_str(indent_str);
             }
             out.push_str(word);
-            current_len = if first_line {
-                word_len
-            } else {
-                indent + word_len
-            };
+            current_len = word_len;
             first_on_line = false;
         } else {
             let needed = 1 + word_len;
@@ -186,7 +169,7 @@ fn wrap_words(text: &str, width: usize, indent: usize, indent_str: &str) -> Stri
                 first_line = false;
                 out.push_str(indent_str);
                 out.push_str(word);
-                current_len = indent + word_len;
+                current_len = word_len;
             }
         }
     }
@@ -349,6 +332,68 @@ mod tests {
                 line.trim_end(),
                 "line must not have trailing whitespace: {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn wrap_description_first_word_exceeds_first_line_budget_goes_to_continuation() {
+        // budget = 3, first word "Deploy" = 6 chars — must start on continuation line.
+        let result = wrap_description("Deploy all services to target", 3, 20);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.len() >= 2,
+            "must wrap to at least two lines; got: {result:?}"
+        );
+        // First line is empty (nothing fits in 3 columns for a 6-char word).
+        assert_eq!(
+            lines[0], "",
+            "first line must be empty; got: {:?}",
+            lines[0]
+        );
+        // First continuation line starts with 20 spaces then "Deploy".
+        assert!(
+            lines[1].starts_with(&" ".repeat(20)),
+            "continuation must start with 20 spaces; got: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].trim_start().starts_with("Deploy"),
+            "first continuation line must begin with 'Deploy'; got: {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn wrap_text_indent_continuation_wraps_at_width_minus_indent() {
+        // width = 20, indent = 5: content budget on continuation lines = 15 chars.
+        // "hello world extra bits" — first line uses full 20 cols, continuation uses 15.
+        let s = "hello worldextra bitsmore";
+        let result = wrap_text(s, 20, 5);
+        for (i, line) in result.lines().enumerate() {
+            if i == 0 {
+                assert!(
+                    line.len() <= 20,
+                    "first line must be ≤ 20 chars; got {}: {line:?}",
+                    line.len()
+                );
+            } else {
+                assert!(
+                    line.len() <= 20,
+                    "continuation line must be ≤ 20 total chars (5 indent + 15 content); got {}: {line:?}",
+                    line.len()
+                );
+                assert!(
+                    line.starts_with("     "),
+                    "continuation line must start with 5 spaces; got: {line:?}"
+                );
+                // Content portion alone must not exceed width - indent = 15.
+                let content = line.trim_start();
+                assert!(
+                    content.len() <= 15,
+                    "content on continuation line must be ≤ 15 chars; got {}: {content:?}",
+                    content.len()
+                );
+            }
         }
     }
 
