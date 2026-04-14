@@ -333,7 +333,6 @@ pub(crate) fn interpreter(lang: &str) -> &str {
         "python3" => "python3",
         "node" | "javascript" | "js" => "node",
         "typescript" | "ts" => "npx tsx",
-        "ruby" | "rb" => "ruby",
         "perl" => "perl",
         other => other,
     }
@@ -346,7 +345,6 @@ pub(crate) fn extension(lang: &str) -> &str {
         "python" | "python3" => "py",
         "node" | "javascript" | "js" => "js",
         "typescript" | "ts" => "ts",
-        "ruby" | "rb" => "rb",
         "perl" => "pl",
         other => other,
     }
@@ -1534,13 +1532,11 @@ mod tests {
         assert_eq!(extension("js"), "js");
         assert_eq!(extension("typescript"), "ts");
         assert_eq!(extension("ts"), "ts");
-        assert_eq!(extension("ruby"), "rb");
-        assert_eq!(extension("rb"), "rb");
         assert_eq!(extension("perl"), "pl");
         assert_eq!(extension("unknown"), "unknown");
     }
 
-    // ---- interpreter mapping for ts/ruby/perl ----
+    // ---- interpreter mapping for ts/perl ----
 
     #[rstest]
     #[case::sh("sh", "sh")]
@@ -1550,8 +1546,6 @@ mod tests {
     #[case::js("js", "node")]
     #[case::typescript("typescript", "npx tsx")]
     #[case::ts("ts", "npx tsx")]
-    #[case::ruby("ruby", "ruby")]
-    #[case::rb("rb", "ruby")]
     #[case::perl("perl", "perl")]
     fn interpreter_maps_lang_to_executable(#[case] lang: &str, #[case] expected: &str) {
         assert_eq!(interpreter(lang), expected);

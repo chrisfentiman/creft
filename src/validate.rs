@@ -532,7 +532,6 @@ fn check_syntax(block: &CodeBlock, block_index: usize, errors: &mut Vec<Validati
         "bash" | "sh" | "zsh" => check_shell_syntax(block, block_index, errors),
         "python" | "python3" => check_python_syntax(block, block_index, errors),
         "node" | "javascript" | "js" => check_node_syntax(block, block_index, errors),
-        "ruby" | "rb" => check_ruby_syntax(block, block_index, errors),
         _ => {} // Unknown language — skip silently
     }
 }
@@ -775,78 +774,6 @@ fn parse_node_errors(stderr: &str, block_index: usize, errors: &mut Vec<Validati
             lang: Some("node".to_string()),
             message,
             line: line_num,
-        });
-    }
-}
-
-/// Run `ruby -c <tempfile>`.
-///
-/// If `ruby` is not on PATH the check is silently skipped.
-fn check_ruby_syntax(
-    block: &CodeBlock,
-    block_index: usize,
-    errors: &mut Vec<ValidationDiagnostic>,
-) {
-    if doctor::which_path("ruby").is_none() {
-        return;
-    }
-
-    let sanitized = sanitize_placeholders(&block.code);
-
-    let mut tmp = match tempfile::Builder::new().suffix(".rb").tempfile() {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    if tmp.write_all(sanitized.as_bytes()).is_err() {
-        return;
-    }
-    let _ = tmp.flush();
-
-    let output = match Command::new("ruby")
-        .arg("-c")
-        .arg(tmp.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        parse_ruby_errors(&stderr, block_index, errors);
-    }
-}
-
-/// Parse `ruby -c` stderr into diagnostics.
-///
-/// Format: `<file>:N: <message>`
-fn parse_ruby_errors(stderr: &str, block_index: usize, errors: &mut Vec<ValidationDiagnostic>) {
-    static RUBY_ERR_RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r":(\d+): (.+)$").unwrap());
-
-    let mut found_any = false;
-    for line in stderr.lines() {
-        if let Some(caps) = RUBY_ERR_RE.captures(line) {
-            let lineno: usize = caps[1].parse().unwrap_or(0);
-            let msg = caps[2].trim().to_string();
-            errors.push(ValidationDiagnostic {
-                block_index: Some(block_index),
-                lang: Some("ruby".to_string()),
-                message: msg,
-                line: if lineno > 0 { Some(lineno) } else { None },
-            });
-            found_any = true;
-        }
-    }
-
-    if !found_any && !stderr.trim().is_empty() {
-        errors.push(ValidationDiagnostic {
-            block_index: Some(block_index),
-            lang: Some("ruby".to_string()),
-            message: stderr.trim().to_string(),
-            line: None,
         });
     }
 }
@@ -1868,36 +1795,6 @@ mod tests {
         );
     }
 
-    // ── ruby syntax checking ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_valid_ruby_no_errors() {
-        if crate::doctor::which_path("ruby").is_none() {
-            return;
-        }
-        let def = make_def(vec![], vec![]);
-        let block = make_block("ruby", "puts 'hello'\n");
-        let result = validate_skill(&def, &[block], None);
-        assert!(
-            result.errors.is_empty(),
-            "valid ruby should produce no errors"
-        );
-    }
-
-    #[test]
-    fn test_invalid_ruby_produces_error() {
-        if crate::doctor::which_path("ruby").is_none() {
-            return;
-        }
-        let def = make_def(vec![], vec![]);
-        let block = make_block("ruby", "def broken\n  puts 'no end'\n");
-        let result = validate_skill(&def, &[block], None);
-        assert!(
-            !result.errors.is_empty(),
-            "invalid ruby should produce at least one error"
-        );
-    }
-
     #[test]
     fn test_parse_shell_errors_lineno_zero_becomes_none() {
         // Line numbers of 0 are meaningless; they must be normalized to None.
@@ -1922,34 +1819,6 @@ mod tests {
             "/tmp/foo.sh: line 1: syntax error near unexpected token",
             0,
             "bash",
-            &mut errors,
-        );
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].line, Some(1), "line 1 should become Some(1)");
-    }
-
-    #[test]
-    fn test_parse_ruby_errors_lineno_zero_becomes_none() {
-        // Line numbers of 0 are meaningless; they must be normalized to None.
-        let mut errors = Vec::new();
-        parse_ruby_errors(
-            "/tmp/foo.rb:0: syntax error, unexpected end-of-input",
-            0,
-            &mut errors,
-        );
-        assert_eq!(errors.len(), 1);
-        assert_eq!(
-            errors[0].line, None,
-            "line 0 should become None, not Some(0)"
-        );
-    }
-
-    #[test]
-    fn test_parse_ruby_errors_lineno_one_becomes_some() {
-        let mut errors = Vec::new();
-        parse_ruby_errors(
-            "/tmp/foo.rb:1: syntax error, unexpected end-of-input",
-            0,
             &mut errors,
         );
         assert_eq!(errors.len(), 1);
@@ -2015,22 +1884,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ruby_errors_structured_plus_fallback_exclusive() {
-        // When structured parsing matches at least one line, the raw-stderr
-        // fallback must not fire — only one diagnostic for a single error.
-        let mut errors = Vec::new();
-        let stderr = "/tmp/foo.rb:5: syntax error, unexpected end-of-input\nsome other junk";
-        parse_ruby_errors(stderr, 0, &mut errors);
-        assert_eq!(
-            errors.len(),
-            1,
-            "structured match must suppress fallback; got {:?}",
-            errors
-        );
-        assert_eq!(errors[0].line, Some(5));
-    }
-
-    #[test]
     fn test_is_clean_false_with_warnings_only() {
         // is_clean requires both errors AND warnings to be empty.
         let result = ValidationResult {
@@ -2076,29 +1929,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_ruby_errors_fallback_on_unparseable_stderr() {
-        // Unrecognized stderr format must emit one fallback diagnostic.
-        let mut errors = Vec::new();
-        parse_ruby_errors("unexpected ruby error format", 0, &mut errors);
-        assert_eq!(
-            errors.len(),
-            1,
-            "unparseable stderr must produce 1 fallback diagnostic"
-        );
-        assert!(errors[0].message.contains("unexpected ruby error format"));
-    }
 
-    #[test]
-    fn test_parse_ruby_errors_no_fallback_on_empty_stderr() {
-        // Empty stderr must produce no diagnostics.
-        let mut errors = Vec::new();
-        parse_ruby_errors("", 0, &mut errors);
-        assert!(
-            errors.is_empty(),
-            "empty stderr must produce no diagnostics"
-        );
-    }
 
     #[test]
     fn test_shellcheck_produces_warnings_for_known_issue() {

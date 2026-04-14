@@ -499,7 +499,6 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.push(python_result);
 
     results.push(check_interpreter("node"));
-    results.push(check_interpreter("ruby"));
     results.push(check_interpreter("git"));
 
     results.push(check_optional_tool("shellcheck", "used for shell linting"));
@@ -796,7 +795,6 @@ fn interpreter_for_lang(lang: &str) -> Option<&'static str> {
         "python" | "python3" => Some("python3"),
         "node" | "js" | "javascript" => Some("node"),
         "typescript" | "ts" => Some("npx"),
-        "ruby" | "rb" => Some("ruby"),
         "perl" => Some("perl"),
         _ => None,
     }
@@ -1950,8 +1948,6 @@ mod tests {
     #[case::javascript("javascript", Some("node"))]
     #[case::typescript("typescript", Some("npx"))]
     #[case::ts("ts", Some("npx"))]
-    #[case::ruby("ruby", Some("ruby"))]
-    #[case::rb("rb", Some("ruby"))]
     #[case::perl("perl", Some("perl"))]
     #[case::unknown("unknown", None)]
     fn interpreter_for_lang_maps_correctly(#[case] lang: &str, #[case] expected: Option<&str>) {

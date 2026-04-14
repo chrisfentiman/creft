@@ -161,7 +161,6 @@ Each fenced code block in the skill body is an executable step. The language tag
 | `python`, `python3` | `python3` | With deps: `uv run --with` |
 | `node`, `javascript`, `js` | `node` | With deps: `npm install` + `NODE_PATH` |
 | `typescript`, `ts` | `npx tsx` | Requires `npx` and `tsx` |
-| `ruby`, `rb` | `ruby` | |
 | `perl` | `perl` | |
 | `llm` | Provider CLI | See [LLM Blocks](#llm-blocks) |
 | `docs` | Not executed | Shown only in `--help` output |
@@ -350,7 +349,7 @@ Creft validates skills at save time. Use `--force` to skip all checks, or `--no-
 
 Validation runs:
 
-- **Syntax:** `bash -n` for shell blocks, `python3 -c "import ast; ast.parse(...)"` for Python, `node --check` for Node, `ruby -c` for Ruby.
+- **Syntax:** `bash -n` for shell blocks, `python3 -c "import ast; ast.parse(...)"` for Python, `node --check` for Node.
 - **Shellcheck:** Warnings (not errors) for shell blocks that pass syntax. Placeholders are replaced with valid tokens before shellcheck runs.
 - **Command availability:** Shell blocks are scanned for `creft <name>` invocations; referenced skills are checked for existence.
 - **Dependency resolution:** Python and Node packages declared in `# deps:` comments are checked against their package registries via HTTP. Shell commands are checked for presence on PATH.

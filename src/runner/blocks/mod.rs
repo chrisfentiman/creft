@@ -11,7 +11,6 @@ use super::channel::{CONTROL_FD, RESPONSE_FD, SideChannel};
 mod llm;
 mod node;
 mod python;
-mod ruby;
 mod shell;
 
 /// Trait for language-specific block command building.
@@ -40,7 +39,6 @@ pub(super) fn runner_for(lang: &str) -> Box<dyn BlockRunner> {
         "bash" | "sh" | "zsh" => Box::new(shell::ShellRunner),
         "python" | "python3" => Box::new(python::PythonRunner),
         "node" | "javascript" | "js" => Box::new(node::NodeRunner),
-        "ruby" | "rb" => Box::new(ruby::RubyRunner),
         "llm" => Box::new(llm::LlmRunner),
         // Unknown language: fall back to ShellRunner which uses interpreter()
         // to resolve the command name (returns the lang tag verbatim for unknowns).
@@ -102,8 +100,6 @@ mod tests {
     #[case::node("node", "node")]
     #[case::javascript("javascript", "node")]
     #[case::js("js", "node")]
-    #[case::ruby("ruby", "ruby")]
-    #[case::rb("rb", "ruby")]
     #[case::unknown("mylangtag", "mylangtag")]
     fn runner_for_dispatches_to_expected_program(#[case] lang: &str, #[case] expected: &str) {
         assert_eq!(program_for(lang), expected);

@@ -83,7 +83,7 @@ Code Blocks:
     99    Early successful return -- stop the pipeline, creft exits 0
     100+  Error, stop the pipeline and propagate the exit code
 
-  Interpreters: bash, python, node, zsh, ruby, docs (not executed -- shown in --help)
+  Interpreters: bash, python, node, zsh, docs (not executed -- shown in --help)
 
   LLM Blocks:
     Use ```llm to send prompts to AI providers as pipeline steps. Add a YAML
@@ -121,7 +121,7 @@ Storage:
   Use --global to always save to ~/.creft/.
 
 Validation:
-  Checks syntax (bash -n, python ast, node --check, ruby -c),
+  Checks syntax (bash -n, python ast, node --check),
   shellcheck warnings, command availability, dependency resolution,
   and sub-skill references. Use --force to skip all checks,
   or --no-validate to skip validation only (keeps overwrite check).";
@@ -214,7 +214,7 @@ Exit Codes:
   2    Skill not found (skill check mode)
 
 Global Check:
-  Checks interpreters (bash, python3, node, ruby), tools (git, shellcheck,
+  Checks interpreters (bash, python3, node), tools (git, shellcheck,
   uv, npm), AI providers (claude, gemini, codex, ollama -- all optional),
   storage directories, and installed package manifests.
 

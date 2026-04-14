@@ -246,7 +246,6 @@ mod tests {
     /// Languages with no preamble return None.
     #[rstest]
     #[case::llm("llm")]
-    #[case::ruby("ruby")]
     #[case::cobol("cobol")]
     #[case::empty("")]
     fn unsupported_language_returns_none(#[case] lang: &str) {
