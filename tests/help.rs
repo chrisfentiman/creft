@@ -271,14 +271,14 @@ fn test_skill_help_matches_clap_format() {
         "FLAGS: must not appear in clap-style help; got: {stdout:?}"
     );
 
-    // Tags: section (not TAGS:)
+    // Tags are search metadata for `creft list --tag` — not rendered in --help.
     assert!(
-        stdout.contains("Tags:"),
-        "skill --help should use 'Tags:' not 'TAGS:'; got: {stdout:?}"
+        !stdout.contains("Tags:"),
+        "Tags: must not appear in skill --help; got: {stdout:?}"
     );
     assert!(
         !stdout.contains("TAGS:"),
-        "TAGS: must not appear in clap-style help; got: {stdout:?}"
+        "TAGS: must not appear in skill --help; got: {stdout:?}"
     );
 }
 

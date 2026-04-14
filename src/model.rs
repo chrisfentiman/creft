@@ -465,6 +465,7 @@ impl ParsedCommand {
                 let default_hint = arg
                     .default
                     .as_ref()
+                    .filter(|d| !d.is_empty())
                     .map(|d| format!(" [default: {}]", d))
                     .unwrap_or_default();
                 // Column width is computed from plain name length to preserve alignment
@@ -517,6 +518,7 @@ impl ParsedCommand {
                 let default_hint = flag
                     .default
                     .as_ref()
+                    .filter(|d| !d.is_empty())
                     .map(|d| format!(" [default: {}]", d))
                     .unwrap_or_default();
                 // Column width computed from plain label length (not bold-wrapped).
@@ -540,14 +542,6 @@ impl ParsedCommand {
                 };
                 out.push_str(&format!("  {}  {}\n", var.name, req));
             }
-        }
-
-        if !self.def.tags.is_empty() {
-            out.push_str(&format!(
-                "\n{} {}\n",
-                "Tags:".bold(),
-                self.def.tags.join(", ")
-            ));
         }
 
         out
@@ -655,9 +649,46 @@ mod tests {
         assert!(help.contains("repo"));
         assert!(help.contains("Environment:"));
         assert!(help.contains("GITHUB_TOKEN"));
-        assert!(help.contains("Tags:"));
-        assert!(!help.contains("TAGS:"));
-        assert!(help.contains("github, api"));
+        // Tags are search metadata for `creft list --tag` — not rendered in --help.
+        assert!(!help.contains("Tags:"));
+        assert!(!help.contains("github, api"));
+    }
+
+    #[test]
+    fn help_text_hides_empty_default() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "deploy".into(),
+                description: "deploy a service".into(),
+                args: vec![Arg {
+                    name: "env".into(),
+                    description: "target environment".into(),
+                    default: Some(String::new()),
+                    required: false,
+                    validation: None,
+                }],
+                flags: vec![Flag {
+                    name: "region".into(),
+                    description: "cloud region".into(),
+                    short: None,
+                    default: Some(String::new()),
+                    r#type: "string".into(),
+                    validation: None,
+                }],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![],
+        };
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
+        assert!(
+            !help.contains("[default: ]"),
+            "empty default must not appear"
+        );
     }
 
     #[test]
@@ -1186,9 +1217,10 @@ name: MY_TOKEN
             help.contains("\x1b[1mEnvironment:\x1b[0m"),
             "Environment: header should be bold; got:\n{help}"
         );
+        // Tags are not rendered in --help output.
         assert!(
-            help.contains("\x1b[1mTags:\x1b[0m"),
-            "Tags: header should be bold; got:\n{help}"
+            !help.contains("\x1b[1mTags:\x1b[0m"),
+            "Tags: must not appear in --help; got:\n{help}"
         );
     }
 
@@ -1258,18 +1290,27 @@ name: MY_TOKEN
         yansi::enable();
         let ansi_out = cmd.help_text();
 
-        // Key identifiers present in both.
+        // Key identifiers present in both. Tags are excluded — they are search
+        // metadata and are not rendered in --help output.
         for needle in &[
             "Arguments:",
             "Options:",
             "Environment:",
-            "Tags:",
             "repo",
             "GITHUB_TOKEN",
         ] {
             assert!(plain.contains(needle), "plain output missing {needle}");
             assert!(ansi_out.contains(needle), "ansi output missing {needle}");
         }
+        // Tags must not appear in either rendering.
+        assert!(
+            !plain.contains("Tags:"),
+            "plain output must not contain Tags:"
+        );
+        assert!(
+            !ansi_out.contains("Tags:"),
+            "ansi output must not contain Tags:"
+        );
     }
 
     // ── LlmConfig deserialization ─────────────────────────────────────────────

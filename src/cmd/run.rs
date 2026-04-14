@@ -41,20 +41,27 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
                         .filter(|(def, _)| !def.is_hidden())
                         .collect();
                     if !subcommands.is_empty() {
-                        println!();
-                        println!("{}", "Subcommands:".bold());
-                        let max_name = subcommands
+                        // Strip the parent namespace prefix from each child name so
+                        // that `ask add` displays as just `add` under the `ask` help.
+                        let prefix_strip = format!("{} ", name);
+                        let display_names: Vec<&str> = subcommands
                             .iter()
-                            .map(|(def, _)| def.name.len())
-                            .max()
-                            .unwrap_or(0);
-                        for (def, _source) in &subcommands {
+                            .map(|(def, _)| {
+                                def.name
+                                    .strip_prefix(prefix_strip.as_str())
+                                    .unwrap_or(def.name.as_str())
+                            })
+                            .collect();
+                        println!();
+                        println!("{}", "Skills:".bold());
+                        let max_name = display_names.iter().map(|n| n.len()).max().unwrap_or(0);
+                        for ((def, _source), display) in subcommands.iter().zip(&display_names) {
                             let desc = truncate_desc(def.description.as_str(), LIST_DESC_MAX);
-                            let pad = " ".repeat(max_name - def.name.len());
-                            println!("  {}{}  {}", def.name.as_str().bold(), pad, desc);
+                            let pad = " ".repeat(max_name - display.len());
+                            println!("  {}{}  {}", display.bold(), pad, desc);
                         }
                         println!();
-                        println!("Run 'creft <subcommand> --help' for more information.");
+                        println!("Run 'creft {} <skill> --help' for more information.", name);
                     }
                 }
                 return Ok(());

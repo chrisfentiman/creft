@@ -524,14 +524,15 @@ fn test_help_shows_subcommands_when_parent_and_child_exist() {
         .success();
 
     // Requesting help on the parent skill should show both the skill description
-    // and a Subcommands section listing the child.
+    // and a Skills section listing the child without the parent prefix.
     creft_with(&dir)
         .args(["test", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Run project tests"))
-        .stdout(predicate::str::contains("Subcommands:"))
-        .stdout(predicate::str::contains("test mutants"))
+        .stdout(predicate::str::contains("Skills:"))
+        // "test mutants" must NOT appear — the prefix "test " is stripped.
+        .stdout(predicate::str::contains("mutants"))
         .stdout(predicate::str::contains("Run mutation testing"));
 }
 

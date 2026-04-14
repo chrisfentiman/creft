@@ -1136,13 +1136,18 @@ fn help_subcommand_listing_suppresses_hidden_subcommands() {
 
     let stdout = String::from_utf8_lossy(&output);
 
+    // Under the `hooks` namespace, child skills display without the parent prefix.
     assert!(
-        stdout.contains("hooks deploy"),
-        "visible subcommand should appear in --help subcommand listing; got: {stdout:?}"
+        stdout.contains("deploy"),
+        "visible subcommand should appear in --help skill listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("hooks deploy"),
+        "parent prefix must be stripped from child skill names; got: {stdout:?}"
     );
     assert!(
         !stdout.contains("hooks _guard"),
-        "hidden subcommand must be suppressed from --help subcommand listing; got: {stdout:?}"
+        "hidden subcommand must be suppressed from --help skill listing; got: {stdout:?}"
     );
     assert!(
         !stdout.contains("_guard"),
