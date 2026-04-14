@@ -184,6 +184,13 @@ pub(crate) fn spawn_block(
     for (k, v) in &env_pairs {
         cmd.env(k, v);
     }
+    // Advertise the side channel fd numbers as env vars so languages without
+    // a preamble (or power users) can open the fds manually.
+    #[cfg(unix)]
+    if side_channel.is_some() {
+        cmd.env("CREFT_CONTROL_FD", CONTROL_FD.to_string());
+        cmd.env("CREFT_RESPONSE_FD", RESPONSE_FD.to_string());
+    }
     cmd.stdin(stdin_cfg);
     cmd.stdout(stdout_cfg);
     cmd.stderr(std::process::Stdio::piped());

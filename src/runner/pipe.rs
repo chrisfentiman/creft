@@ -6,7 +6,9 @@ use crate::model::{CodeBlock, ParsedCommand};
 
 use super::blocks::spawn_block;
 use super::substitute::substitute;
-use super::{EARLY_EXIT, RunContext, exit_code_of, make_execution_error, prepare_block_script};
+use super::{
+    EARLY_EXIT, RunContext, exit_code_of, make_execution_error, preamble, prepare_block_script,
+};
 
 #[cfg(unix)]
 use super::signal::PipeSignalGuard;
@@ -348,7 +350,9 @@ pub(super) fn sponge_stage(
 
         // prepare_block_script creates a temp file; LLM runners ignore it (prompt
         // is delivered via stdin), but it must exist for the trait signature.
-        let tmp = match prepare_block_script(block, &expanded) {
+        // Sponge stages run LLM blocks — preamble injection is out of scope for
+        // sponge (no pre_exec hook available without fork). Pass None.
+        let tmp = match prepare_block_script(block, &expanded, None) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
@@ -991,7 +995,8 @@ pub(super) fn run_pipe_chain(
         } else {
             // In pipe mode, no "prev" template arg (output is on stdin).
             let expanded = substitute(&block.code, bound_refs, &block.lang)?;
-            let tmp = prepare_block_script(block, &expanded)?;
+            let pre = preamble::for_language(&block.lang);
+            let tmp = prepare_block_script(block, &expanded, pre.as_deref())?;
             temp_files.push(Some(tmp));
         }
     }

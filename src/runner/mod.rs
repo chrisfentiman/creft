@@ -10,6 +10,7 @@ mod blocks;
 #[cfg(unix)]
 pub(crate) mod channel;
 mod pipe;
+mod preamble;
 #[cfg(unix)]
 mod signal;
 mod substitute;
@@ -353,10 +354,16 @@ pub(crate) fn extension(lang: &str) -> &str {
 
 /// Create a temporary script file for a code block.
 ///
+/// When `preamble` is `Some`, the preamble is written before `expanded_code`.
+/// If `expanded_code` starts with a shebang (`#!`), the shebang line is
+/// written first and the preamble follows it — so the kernel's script loader
+/// sees the interpreter directive at byte 0.
+///
 /// Returns the temp file handle (must be kept alive until the child exits).
 pub(crate) fn prepare_block_script(
     block: &CodeBlock,
     expanded_code: &str,
+    preamble: Option<&str>,
 ) -> Result<tempfile::NamedTempFile, CreftError> {
     let ext = extension(&block.lang);
     let mut tmp = tempfile::Builder::new()
@@ -365,8 +372,29 @@ pub(crate) fn prepare_block_script(
         .tempfile()
         .map_err(CreftError::Io)?;
 
-    tmp.write_all(expanded_code.as_bytes())
-        .map_err(CreftError::Io)?;
+    if let Some(pre) = preamble {
+        // If the script opens with a shebang, the kernel requires it at
+        // byte 0. Split the shebang off, write it, then inject the preamble
+        // before the rest of the user code.
+        if expanded_code.starts_with("#!") {
+            let (shebang_line, rest) = expanded_code
+                .split_once('\n')
+                .unwrap_or((expanded_code, ""));
+            tmp.write_all(shebang_line.as_bytes())
+                .map_err(CreftError::Io)?;
+            tmp.write_all(b"\n").map_err(CreftError::Io)?;
+            tmp.write_all(pre.as_bytes()).map_err(CreftError::Io)?;
+            tmp.write_all(rest.as_bytes()).map_err(CreftError::Io)?;
+        } else {
+            tmp.write_all(pre.as_bytes()).map_err(CreftError::Io)?;
+            tmp.write_all(expanded_code.as_bytes())
+                .map_err(CreftError::Io)?;
+        }
+    } else {
+        tmp.write_all(expanded_code.as_bytes())
+            .map_err(CreftError::Io)?;
+    }
+
     tmp.flush().map_err(CreftError::Io)?;
 
     Ok(tmp)
@@ -496,7 +524,8 @@ fn execute_block(
         return Err(CreftError::EarlyExit);
     }
 
-    let tmp = prepare_block_script(block, code)?;
+    let pre = preamble::for_language(&block.lang);
+    let tmp = prepare_block_script(block, code, pre.as_deref())?;
     let tmp_path = tmp.path().to_path_buf();
 
     let stdin_cfg = if stdin_data.is_some() {
@@ -1971,5 +2000,89 @@ mod tests {
         let pairs = vec![("format".to_string(), String::new())];
         let result = bound_pairs_to_env(&pairs);
         assert_eq!(result, vec![("FORMAT".to_string(), String::new())]);
+    }
+
+    // ---- prepare_block_script ----
+
+    fn bash_block() -> CodeBlock {
+        CodeBlock {
+            lang: "bash".into(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        }
+    }
+
+    /// With no preamble, the file contains exactly the expanded code.
+    #[test]
+    fn prepare_block_script_none_preamble_writes_code_only() {
+        let block = bash_block();
+        let code = "echo hello\n";
+        let tmp = prepare_block_script(&block, code, None).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, code);
+    }
+
+    /// With a preamble, the preamble is written before the code.
+    #[test]
+    fn prepare_block_script_some_preamble_prepends_preamble() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "echo hello\n";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "# preamble\necho hello\n");
+    }
+
+    /// When the code starts with a shebang, the shebang is placed first,
+    /// then the preamble, then the remainder of the code.
+    #[test]
+    fn prepare_block_script_shebang_placed_before_preamble() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "#!/bin/bash\necho hello\n";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "#!/bin/bash\n# preamble\necho hello\n");
+    }
+
+    /// A shebang-only script (no trailing newline after shebang) is handled
+    /// without panicking — remainder is empty.
+    #[test]
+    fn prepare_block_script_shebang_only_no_panic() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "#!/bin/bash";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "#!/bin/bash\n# preamble\n");
+    }
+
+    /// Without a preamble, a shebang-prefixed code is written unchanged.
+    #[test]
+    fn prepare_block_script_shebang_without_preamble_unchanged() {
+        let block = bash_block();
+        let code = "#!/bin/bash\necho hi\n";
+        let tmp = prepare_block_script(&block, code, None).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, code);
+    }
+
+    /// The file extension matches the block's language.
+    #[test]
+    fn prepare_block_script_file_has_correct_extension() {
+        let block = CodeBlock {
+            lang: "python".into(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        let tmp = prepare_block_script(&block, "print('hi')\n", None).unwrap();
+        assert!(
+            tmp.path().extension().map(|e| e == "py").unwrap_or(false),
+            "python blocks must produce .py temp files"
+        );
     }
 }
