@@ -4,6 +4,7 @@ mod helpers;
 
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
+use pretty_assertions::assert_eq;
 
 /// `creft settings` with no settings file prints one line per known key
 /// in the default format.
