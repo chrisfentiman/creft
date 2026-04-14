@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::CreftError;
 
+/// The `_creft session start` skill content, maintained as a standalone markdown file.
+/// Written to `.creft/commands/_creft/session/start.md` during `creft up`.
+const SESSION_SKILL_CONTENT: &str = include_str!("../docs/skills/session-start.md");
+
 /// Supported coding AI systems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum System {
@@ -483,6 +487,58 @@ fn install_gemini(
     Ok((path, CREFT_INSTRUCTIONS.to_string()))
 }
 
+/// Ensure the `_creft session start` skill exists on disk at the expected location.
+///
+/// Creates or updates the file if the content has changed. The skill is written
+/// to the `.creft/commands/_creft/session/start.md` path within the target scope:
+/// - Project-level: inside `project_dir`
+/// - Global: inside `~/.creft/`
+///
+/// Returns the path to the written skill file.
+///
+/// # Errors
+///
+/// Returns an error if `global` is `true` and no home directory is available,
+/// or if the file cannot be created or written.
+// Called from cmd_up during hook-based harness installation (Stage 2).
+#[allow(dead_code)]
+pub fn ensure_session_skill(
+    ctx: &crate::model::AppContext,
+    project_dir: &Path,
+    global: bool,
+) -> Result<PathBuf, CreftError> {
+    let root = if global {
+        ctx.home_dir
+            .as_deref()
+            .ok_or_else(|| {
+                CreftError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "could not determine home directory. Set HOME (or USERPROFILE on Windows).",
+                ))
+            })?
+            .join(".creft")
+    } else {
+        project_dir.join(".creft")
+    };
+
+    let skill_path = root.join("commands/_creft/session/start.md");
+
+    if let Some(parent) = skill_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Skip the write if the content is already current — avoids unnecessary git noise.
+    if skill_path.exists() {
+        let existing = std::fs::read_to_string(&skill_path)?;
+        if existing == SESSION_SKILL_CONTENT {
+            return Ok(skill_path);
+        }
+    }
+
+    std::fs::write(&skill_path, SESSION_SKILL_CONTENT)?;
+    Ok(skill_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,5 +990,138 @@ mod tests {
         let result = replace_creft_section(existing, new_content);
         assert!(result.contains("new stuff"));
         assert!(!result.contains("old stuff"));
+    }
+
+    // ── ensure_session_skill ──────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_session_skill_creates_file_at_project_path() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_no_home(dir.path());
+        let path = ensure_session_skill(&ctx, dir.path(), false).unwrap();
+
+        assert_eq!(
+            path,
+            dir.path().join(".creft/commands/_creft/session/start.md")
+        );
+        assert!(path.exists(), "skill file must be created");
+    }
+
+    #[test]
+    fn ensure_session_skill_writes_correct_content() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_no_home(dir.path());
+        let path = ensure_session_skill(&ctx, dir.path(), false).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, SESSION_SKILL_CONTENT);
+    }
+
+    #[test]
+    fn ensure_session_skill_content_has_valid_frontmatter() {
+        // The skill must have name and description fields so creft can parse it.
+        assert!(
+            SESSION_SKILL_CONTENT.contains("name: _creft session start"),
+            "skill must declare name: _creft session start"
+        );
+        assert!(
+            SESSION_SKILL_CONTENT.contains("description:"),
+            "skill must have a description field"
+        );
+    }
+
+    #[test]
+    fn ensure_session_skill_content_includes_creft_reference() {
+        // Agents must be able to discover and run skills from the session context.
+        assert!(
+            SESSION_SKILL_CONTENT.contains("creft list"),
+            "skill output must include discovery command"
+        );
+        assert!(
+            SESSION_SKILL_CONTENT.contains("creft add"),
+            "skill output must include creation command"
+        );
+        assert!(
+            SESSION_SKILL_CONTENT.contains("creft show"),
+            "skill output must include show command"
+        );
+    }
+
+    #[test]
+    fn ensure_session_skill_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_no_home(dir.path());
+
+        let path1 = ensure_session_skill(&ctx, dir.path(), false).unwrap();
+        let mtime1 = std::fs::metadata(&path1).unwrap().modified().unwrap();
+
+        // A brief pause is needed on filesystems with 1-second mtime resolution
+        // to detect whether the second call modified the file.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let path2 = ensure_session_skill(&ctx, dir.path(), false).unwrap();
+        let mtime2 = std::fs::metadata(&path2).unwrap().modified().unwrap();
+
+        assert_eq!(path1, path2, "path must be the same on both calls");
+        assert_eq!(
+            mtime1, mtime2,
+            "file must not be rewritten when content is already current"
+        );
+    }
+
+    #[test]
+    fn ensure_session_skill_updates_stale_content() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_no_home(dir.path());
+        let skill_path = dir.path().join(".creft/commands/_creft/session/start.md");
+
+        // Pre-write outdated content.
+        std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill_path,
+            "---\nname: _creft session start\n---\nold content\n",
+        )
+        .unwrap();
+
+        ensure_session_skill(&ctx, dir.path(), false).unwrap();
+
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert_eq!(
+            content, SESSION_SKILL_CONTENT,
+            "stale skill content must be replaced with current content"
+        );
+    }
+
+    #[test]
+    fn ensure_session_skill_global_writes_to_home_creft() {
+        let home_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let ctx = ctx_with_home(home_dir.path());
+
+        let path = ensure_session_skill(&ctx, project_dir.path(), true).unwrap();
+
+        assert_eq!(
+            path,
+            home_dir
+                .path()
+                .join(".creft/commands/_creft/session/start.md")
+        );
+        assert!(path.exists(), "global skill file must be created");
+    }
+
+    #[test]
+    fn ensure_session_skill_global_no_home_errors() {
+        let project_dir = TempDir::new().unwrap();
+        let ctx = crate::model::AppContext {
+            home_dir: None,
+            creft_home: None,
+            cwd: project_dir.path().to_path_buf(),
+        };
+
+        let result = ensure_session_skill(&ctx, project_dir.path(), true);
+        assert!(
+            result.is_err(),
+            "global ensure_session_skill with no home dir must error"
+        );
     }
 }
