@@ -612,6 +612,7 @@ fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     use super::*;
 
@@ -674,75 +675,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn completions_docs_returns_docs_variant() {
-        let result = parse_args(&["completions", "--docs"]).unwrap().unwrap();
+    #[rstest]
+    #[case::completions("completions", crate::help::BuiltinHelp::Completions)]
+    #[case::add("add", crate::help::BuiltinHelp::Add)]
+    #[case::list("list", crate::help::BuiltinHelp::List)]
+    #[case::doctor("doctor", crate::help::BuiltinHelp::Doctor)]
+    #[case::plugin("plugin", crate::help::BuiltinHelp::Plugin)]
+    #[case::settings("settings", crate::help::BuiltinHelp::Settings)]
+    #[case::up("up", crate::help::BuiltinHelp::Up)]
+    #[case::init("init", crate::help::BuiltinHelp::Init)]
+    fn docs_flag_returns_docs_variant(
+        #[case] cmd: &str,
+        #[case] expected: crate::help::BuiltinHelp,
+    ) {
+        let result = parse_args(&[cmd, "--docs"]).unwrap().unwrap();
         assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Completions)),
-            "completions --docs must return Parsed::Docs(Completions); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn add_docs_returns_docs_variant() {
-        let result = parse_args(&["add", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Add)),
-            "add --docs must return Parsed::Docs(Add); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn list_docs_returns_docs_variant() {
-        let result = parse_args(&["list", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::List)),
-            "list --docs must return Parsed::Docs(List); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn doctor_docs_returns_docs_variant() {
-        let result = parse_args(&["doctor", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Doctor)),
-            "doctor --docs must return Parsed::Docs(Doctor); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn plugin_docs_returns_docs_variant() {
-        let result = parse_args(&["plugin", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Plugin)),
-            "plugin --docs must return Parsed::Docs(Plugin); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn settings_docs_returns_docs_variant() {
-        let result = parse_args(&["settings", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Settings)),
-            "settings --docs must return Parsed::Docs(Settings); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn up_docs_returns_docs_variant() {
-        let result = parse_args(&["up", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Up)),
-            "up --docs must return Parsed::Docs(Up); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn init_docs_returns_docs_variant() {
-        let result = parse_args(&["init", "--docs"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Init)),
-            "init --docs must return Parsed::Docs(Init); got: {result:?}",
+            matches!(result, Parsed::Docs(ref v) if *v == expected),
+            "{cmd} --docs must return Parsed::Docs({expected:?}); got: {result:?}",
         );
     }
 
