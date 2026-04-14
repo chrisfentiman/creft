@@ -344,7 +344,7 @@ fn test_llm_block_exit_99_early_return() {
 
 /// Data flows from bash through an LLM sponge stage to a downstream bash block via true pipe.
 ///
-/// Regression guard: the sponge must relay provider output through the os_pipe to the
+/// Regression guard: the sponge must relay provider output through the pipe to the
 /// downstream block — not via env vars or sequential stdin injection.
 #[test]
 fn test_llm_sponge_pipe_streams_to_downstream() {

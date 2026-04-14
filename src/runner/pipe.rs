@@ -117,13 +117,13 @@ fn dup_pipe_stdout(stdout: &PipeStdout) -> std::io::Result<DupedPipeReader> {
 /// A stdout handle from a pipe chain stage.
 ///
 /// Normal blocks produce a `ChildStdout`; sponge stages produce a
-/// `PipeReader` from an `os_pipe::pipe()` pair. Both can be converted to
+/// `PipeReader` from a `std::io::pipe()` pair. Both can be converted to
 /// `Stdio` for the next block's stdin, and both implement `Read` for the
 /// relay thread.
 pub(super) enum PipeStdout {
     Child(std::process::ChildStdout),
     #[cfg(unix)]
-    Pipe(os_pipe::PipeReader),
+    Pipe(std::io::PipeReader),
 }
 
 impl PipeStdout {
@@ -262,7 +262,7 @@ fn should_cancel_sponge(
 #[cfg(unix)]
 pub(super) fn sponge_stage(
     upstream: Option<PipeStdout>,
-    pipe_writer: os_pipe::PipeWriter,
+    pipe_writer: std::io::PipeWriter,
     block: &CodeBlock,
     bound_refs: Vec<(String, String)>,
     ctx: RunContext,
@@ -970,7 +970,7 @@ fn wait_pipe_children_fallback(
 /// Blocks that return `true` from `needs_sponge()` participate as sponge stages:
 /// each sponge thread reads all upstream output, performs template substitution,
 /// spawns the block's process, and relays the process's stdout to the next block
-/// via an `os_pipe` pair.
+/// via a `std::io::pipe()` pair.
 ///
 /// Returns Ok(()) if the last block exits successfully. Earlier blocks dying
 /// from SIGPIPE when the downstream consumer exits early is normal pipeline
@@ -1043,7 +1043,7 @@ pub(super) fn run_pipe_chain(
 
         #[cfg(unix)]
         if block.needs_sponge() {
-            let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(CreftError::Io)?;
+            let (pipe_reader, pipe_writer) = std::io::pipe().map_err(CreftError::Io)?;
 
             let upstream = prev_stdout.take();
             let is_pgid_creator = i == 0;
@@ -1436,7 +1436,7 @@ mod tests {
     #[test]
     fn test_dup_pipe_stdout_returns_readable_fd() {
         use std::io::Write as _;
-        let (pipe_reader, mut pipe_writer) = os_pipe::pipe().expect("pipe creation must succeed");
+        let (pipe_reader, mut pipe_writer) = std::io::pipe().expect("pipe creation must succeed");
         let pipe_stdout = PipeStdout::Pipe(pipe_reader);
 
         // Dup before consuming the original.
