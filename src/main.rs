@@ -17,6 +17,7 @@ mod shell;
 mod store;
 mod style;
 mod validate;
+mod yaml;
 
 use error::CreftError;
 
