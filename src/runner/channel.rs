@@ -576,6 +576,7 @@ mod tests {
     use std::sync::{Arc, mpsc};
 
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     use super::SideChannel;
 
@@ -759,63 +760,37 @@ mod tests {
         }
     }
 
-    /// A well-formed status message deserializes to the Status variant.
-    ///
-    /// Backward compatibility: messages without a `progress` field must
-    /// still deserialize — `serde(default)` makes the field optional.
-    #[test]
-    fn channel_message_status_deserializes() {
-        let json = r#"{"type":"status","message":"Loading..."}"#;
+    /// A well-formed status message deserializes to the Status variant with the
+    /// correct message and progress field. The `no_progress` case proves backward
+    /// compatibility: JSON without a `progress` field must still deserialize
+    /// because `serde(default)` makes the field optional.
+    #[rstest]
+    #[case::no_progress(r#"{"type":"status","message":"Loading..."}"#, "Loading...", None)]
+    #[case::progress_50(
+        r#"{"type":"status","message":"Downloading...","progress":50}"#,
+        "Downloading...",
+        Some(50)
+    )]
+    #[case::progress_zero(
+        r#"{"type":"status","message":"Starting...","progress":0}"#,
+        "Starting...",
+        Some(0)
+    )]
+    #[case::progress_hundred(
+        r#"{"type":"status","message":"Done","progress":100}"#,
+        "Done",
+        Some(100)
+    )]
+    fn channel_message_status_deserializes(
+        #[case] json: &str,
+        #[case] expected_message: &str,
+        #[case] expected_progress: Option<u8>,
+    ) {
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::Status { message, progress } => {
-                assert_eq!(message, "Loading...");
-                assert_eq!(
-                    progress, None,
-                    "absent progress field must deserialize to None"
-                );
-            }
-            other => panic!("expected Status, got {other:?}"),
-        }
-    }
-
-    /// Status message with progress 50 deserializes to Some(50).
-    #[test]
-    fn channel_message_status_with_progress_deserializes() {
-        let json = r#"{"type":"status","message":"Downloading...","progress":50}"#;
-        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            super::ChannelMessage::Status { message, progress } => {
-                assert_eq!(message, "Downloading...");
-                assert_eq!(progress, Some(50));
-            }
-            other => panic!("expected Status, got {other:?}"),
-        }
-    }
-
-    /// Status message with progress 0 deserializes to Some(0).
-    #[test]
-    fn channel_message_status_with_progress_zero_deserializes() {
-        let json = r#"{"type":"status","message":"Starting...","progress":0}"#;
-        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            super::ChannelMessage::Status { message, progress } => {
-                assert_eq!(message, "Starting...");
-                assert_eq!(progress, Some(0));
-            }
-            other => panic!("expected Status, got {other:?}"),
-        }
-    }
-
-    /// Status message with progress 100 deserializes to Some(100).
-    #[test]
-    fn channel_message_status_with_progress_hundred_deserializes() {
-        let json = r#"{"type":"status","message":"Done","progress":100}"#;
-        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            super::ChannelMessage::Status { message, progress } => {
-                assert_eq!(message, "Done");
-                assert_eq!(progress, Some(100));
+                assert_eq!(message, expected_message);
+                assert_eq!(progress, expected_progress);
             }
             other => panic!("expected Status, got {other:?}"),
         }
