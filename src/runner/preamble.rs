@@ -115,6 +115,7 @@ function creft_prompt(question, choices) {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     use super::for_language;
 
@@ -136,20 +137,6 @@ mod tests {
         );
     }
 
-    /// sh alias resolves to the bash preamble.
-    #[test]
-    fn sh_alias_returns_preamble() {
-        let p = for_language("sh");
-        assert!(p.is_some(), "sh must have a preamble");
-    }
-
-    /// zsh alias resolves to the bash preamble.
-    #[test]
-    fn zsh_alias_returns_preamble() {
-        let p = for_language("zsh");
-        assert!(p.is_some(), "zsh must have a preamble");
-    }
-
     /// Python preamble contains the def form of all three functions.
     #[test]
     fn python_preamble_contains_all_functions() {
@@ -166,13 +153,6 @@ mod tests {
             p.contains("def creft_prompt"),
             "python preamble missing def creft_prompt"
         );
-    }
-
-    /// python3 alias resolves to the python preamble.
-    #[test]
-    fn python3_alias_returns_preamble() {
-        let p = for_language("python3");
-        assert!(p.is_some(), "python3 must have a preamble");
     }
 
     /// Node preamble contains the function form of all three functions.
@@ -193,33 +173,28 @@ mod tests {
         );
     }
 
-    /// javascript and js aliases resolve to the node preamble.
-    #[test]
-    fn javascript_and_js_aliases_return_preamble() {
+    /// Language aliases that are not the canonical name still resolve to a preamble.
+    #[rstest]
+    #[case::sh("sh")]
+    #[case::zsh("zsh")]
+    #[case::python3("python3")]
+    #[case::javascript("javascript")]
+    #[case::js("js")]
+    fn alias_resolves_to_preamble(#[case] lang: &str) {
         assert!(
-            for_language("javascript").is_some(),
-            "javascript must have a preamble"
+            for_language(lang).is_some(),
+            "{lang} must resolve to a preamble"
         );
-        assert!(for_language("js").is_some(), "js must have a preamble");
     }
 
-    /// llm blocks have no preamble — LLM runner does not execute user scripts.
-    #[test]
-    fn llm_returns_none() {
-        assert_eq!(for_language("llm"), None);
-    }
-
-    /// ruby has no preamble in stage 2.
-    #[test]
-    fn ruby_returns_none() {
-        assert_eq!(for_language("ruby"), None);
-    }
-
-    /// Unknown languages have no preamble.
-    #[test]
-    fn unknown_language_returns_none() {
-        assert_eq!(for_language("cobol"), None);
-        assert_eq!(for_language(""), None);
+    /// Languages with no preamble return None.
+    #[rstest]
+    #[case::llm("llm")]
+    #[case::ruby("ruby")]
+    #[case::cobol("cobol")]
+    #[case::empty("")]
+    fn unsupported_language_returns_none(#[case] lang: &str) {
+        assert_eq!(for_language(lang), None, "{lang} must return None");
     }
 
     /// Every preamble ends with a newline so user code starts on a fresh line.

@@ -27,15 +27,15 @@ pub(crate) struct SideChannel {
     control_reader: Option<OwnedFd>,
     /// Write end of the control pipe (child writes via fd 3).
     /// Held here only to keep it alive until `pre_exec` dups it.
-    /// Dropped after spawn to close the parent's copy.
-    control_writer: OwnedFd,
+    /// `Option` because `close_child_ends` moves it out on drop.
+    control_writer: Option<OwnedFd>,
     /// Write end of the response pipe (parent writes prompt responses).
     /// `Option` because `take_response_writer` moves it out.
     response_writer: Option<OwnedFd>,
     /// Read end of the response pipe (child reads via fd 4).
     /// Held here only to keep it alive until `pre_exec` dups it.
-    /// Dropped after spawn to close the parent's copy.
-    response_reader: OwnedFd,
+    /// `Option` because `close_child_ends` moves it out on drop.
+    response_reader: Option<OwnedFd>,
 }
 
 impl SideChannel {
@@ -45,20 +45,26 @@ impl SideChannel {
         let (resp_r, resp_w) = os_pipe()?;
         Ok(Self {
             control_reader: Some(ctrl_r),
-            control_writer: ctrl_w,
+            control_writer: Some(ctrl_w),
             response_writer: Some(resp_w),
-            response_reader: resp_r,
+            response_reader: Some(resp_r),
         })
     }
 
     /// Raw fd values the child process needs for `dup2` in `pre_exec`.
     ///
-    /// Returns `(control_write_fd, response_read_fd)` — the child's
-    /// ends of the two pipes.
+    /// Returns `(control_write_fd, response_read_fd)` — the child's ends
+    /// of the two pipes. Panics if called after `close_child_ends`.
     pub(crate) fn child_fds(&self) -> (i32, i32) {
         (
-            self.control_writer.as_raw_fd(),
-            self.response_reader.as_raw_fd(),
+            self.control_writer
+                .as_ref()
+                .expect("child_fds called after close_child_ends")
+                .as_raw_fd(),
+            self.response_reader
+                .as_ref()
+                .expect("child_fds called after close_child_ends")
+                .as_raw_fd(),
         )
     }
 
@@ -85,32 +91,14 @@ impl SideChannel {
     /// of the write end keeps the pipe alive), and the parent's reads
     /// on the control pipe may block (the parent's copy of the write
     /// end prevents EOF on the control reader).
+    ///
+    /// Idempotent — safe to call more than once.
     pub(crate) fn close_child_ends(&mut self) {
-        // Drop by replacing with a placeholder then immediately dropping.
-        // We reconstruct a dummy fd pointing to /dev/null is unnecessary —
-        // simply moving out of the fields and dropping achieves the close.
-        // Use a private helper to consume the fields.
-        drop_fd(&mut self.control_writer);
-        drop_fd(&mut self.response_reader);
+        // `.take()` moves the OwnedFd out of the Option; the returned value
+        // is immediately dropped, which closes the file descriptor.
+        drop(self.control_writer.take());
+        drop(self.response_reader.take());
     }
-}
-
-/// Drop the fd held in `slot` by swapping in a fresh dummy.
-///
-/// `OwnedFd` does not implement `Default`, so we open /dev/null as a
-/// harmless placeholder that gets immediately dropped.  The OS reclaims
-/// both file descriptions on close.
-fn drop_fd(slot: &mut OwnedFd) {
-    // SAFETY: open(2) with O_RDONLY on /dev/null always succeeds on any
-    // POSIX system and returns a valid file descriptor.  We immediately
-    // wrap it in OwnedFd so it is closed on drop.  The old fd in `slot`
-    // is closed when the old value is dropped by `std::mem::replace`.
-    let devnull = unsafe {
-        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        OwnedFd::from_raw_fd(fd)
-    };
-    let _old = std::mem::replace(slot, devnull);
-    // `_old` drops here, closing the original fd.
 }
 
 /// Create a POSIX pipe and return `(read_end, write_end)` as `OwnedFd`s.
@@ -302,13 +290,17 @@ pub(crate) fn spawn_reader(
                     ChannelMessage::Status { message } => {
                         writer.status(&message);
                     }
-                    ChannelMessage::Prompt { id, question, .. } => {
+                    ChannelMessage::Prompt {
+                        id,
+                        question,
+                        choices,
+                    } => {
                         if let Some(tx) = &prompt_tx {
                             // Stage 4: forward to the prompt handler thread.
                             let _ = tx.send(ChannelMessage::Prompt {
                                 id,
                                 question,
-                                choices: String::new(),
+                                choices,
                             });
                         } else {
                             // Stage 3 / pipe-chain context: log the question and
@@ -460,9 +452,9 @@ mod tests {
     fn new_produces_four_distinct_fds() {
         let ch = SideChannel::new().unwrap();
         let ctrl_r = ch.control_reader.as_ref().unwrap().as_raw_fd();
-        let ctrl_w = ch.control_writer.as_raw_fd();
+        let ctrl_w = ch.control_writer.as_ref().unwrap().as_raw_fd();
         let resp_w = ch.response_writer.as_ref().unwrap().as_raw_fd();
-        let resp_r = ch.response_reader.as_raw_fd();
+        let resp_r = ch.response_reader.as_ref().unwrap().as_raw_fd();
 
         let fds = [ctrl_r, ctrl_w, resp_w, resp_r];
         let unique: std::collections::HashSet<i32> = fds.iter().copied().collect();
@@ -478,8 +470,8 @@ mod tests {
     fn child_fds_returns_correct_ends() {
         let ch = SideChannel::new().unwrap();
         let (cfd, rfd) = ch.child_fds();
-        assert_eq!(cfd, ch.control_writer.as_raw_fd());
-        assert_eq!(rfd, ch.response_reader.as_raw_fd());
+        assert_eq!(cfd, ch.control_writer.as_ref().unwrap().as_raw_fd());
+        assert_eq!(rfd, ch.response_reader.as_ref().unwrap().as_raw_fd());
     }
 
     /// take_control_reader moves the fd out; subsequent calls return None.
