@@ -44,6 +44,15 @@ fn main() {
 }
 
 fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError> {
+    // Hidden internal commands dispatched before skill resolution.
+    // The `_creft` prefix is reserved for built-in infrastructure; no user skill
+    // can shadow these because native dispatch wins before the skill runner runs.
+    // Unknown `_creft` subcommands fall through to skill resolution below.
+    if args.len() >= 2 && args[0] == "_creft" && args[1] == "welcome" {
+        let force = args.iter().any(|a| a == "--force");
+        return cmd::welcome::cmd_welcome(ctx, force);
+    }
+
     // `creft help <args...>`: user skills take priority over built-in subcommand
     // names. Resolve as skill first; fall back to namespace help; then show root.
     if args.first().map(String::as_str) == Some("help") {

@@ -5,3 +5,4 @@ pub mod run;
 pub mod settings;
 pub mod setup;
 pub mod skill;
+pub mod welcome;
