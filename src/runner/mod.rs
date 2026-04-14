@@ -582,8 +582,7 @@ fn execute_block(
         // Interactive prompts require an unpiped stdin (terminal access).
         let interactive = stdin_data.is_none();
 
-        let exit_signal: channel::ExitSignal =
-            Arc::new(std::sync::Mutex::new(None));
+        let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
         let reader = channel::spawn_reader(
             ctrl_reader,
             std::sync::Arc::clone(&writer),

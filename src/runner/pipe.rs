@@ -1404,9 +1404,7 @@ pub(super) fn run_pipe_chain(
     // must not read until the writer has exited.
     #[cfg(unix)]
     for (block_idx, signal) in exit_signals.iter().enumerate() {
-        let exit_code = *signal
-            .lock()
-            .expect("exit signal lock poisoned");
+        let exit_code = *signal.lock().expect("exit signal lock poisoned");
         if let Some(code) = exit_code {
             if code == 0 {
                 if !early_exit {

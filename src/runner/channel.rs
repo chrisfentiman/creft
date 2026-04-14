@@ -1351,8 +1351,13 @@ printf '%s' "$_resp"
         let writer = Arc::new(super::TerminalWriter::new());
         let (prompt_tx, prompt_rx) = mpsc::channel::<super::ChannelMessage>();
 
-        let reader_handle =
-            super::spawn_reader(ctrl_reader, Arc::clone(&writer), Some(prompt_tx), None, None);
+        let reader_handle = super::spawn_reader(
+            ctrl_reader,
+            Arc::clone(&writer),
+            Some(prompt_tx),
+            None,
+            None,
+        );
         let prompt_handle = super::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, false);
 
         let output = child.wait_with_output().unwrap();
@@ -1412,7 +1417,11 @@ printf '%s' "$_resp"
             *slot = Some(42);
         }
         let value = *signal.lock().unwrap();
-        assert_eq!(value, Some(42), "ExitSignal round-trip must preserve the code");
+        assert_eq!(
+            value,
+            Some(42),
+            "ExitSignal round-trip must preserve the code"
+        );
     }
 
     // ---- CappedTerm ----

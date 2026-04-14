@@ -1929,8 +1929,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn test_shellcheck_produces_warnings_for_known_issue() {
         // Verify shellcheck integration end-to-end: a pattern that is NOT in our

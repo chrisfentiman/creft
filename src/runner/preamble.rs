@@ -1,8 +1,9 @@
 /// Generate the preamble for a given language.
 ///
-/// Returns `None` for languages that don't have a preamble (llm, ruby,
-/// unknown languages). The preamble defines `creft_print`, `creft_status`,
-/// and `creft_prompt` as callable functions in the target language.
+/// Returns `None` for languages that don't have a preamble (llm, unknown
+/// languages). The preamble defines `creft_print`, `creft_status`,
+/// `creft_prompt`, and `creft_exit` as callable functions in the target
+/// language.
 ///
 /// The preamble assumes fd 3 (write, block → creft) and fd 4 (read,
 /// creft → block) are open. If they aren't (non-unix fallback, or something
@@ -170,7 +171,10 @@ mod tests {
     #[test]
     fn bash_preamble_contains_all_functions() {
         let p = for_language("bash").expect("bash must have a preamble");
-        assert!(p.contains("creft_print"), "bash preamble missing creft_print");
+        assert!(
+            p.contains("creft_print"),
+            "bash preamble missing creft_print"
+        );
         assert!(
             p.contains("creft_status"),
             "bash preamble missing creft_status"
@@ -179,10 +183,7 @@ mod tests {
             p.contains("creft_prompt"),
             "bash preamble missing creft_prompt"
         );
-        assert!(
-            p.contains("creft_exit"),
-            "bash preamble missing creft_exit"
-        );
+        assert!(p.contains("creft_exit"), "bash preamble missing creft_exit");
     }
 
     /// Python preamble contains the def form of all public functions.
