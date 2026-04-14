@@ -74,6 +74,247 @@ impl std::fmt::Display for ValidationDiagnostic {
 /// Descriptions longer than this degrade `creft list` output.
 pub(crate) const DESCRIPTION_WARN_LEN: usize = 80;
 
+/// Flag long names that creft intercepts before the skill's argument parser.
+///
+/// If you add a filter here, update RESERVED_FLAG_NAMES in validate.rs.
+const RESERVED_FLAG_NAMES: &[&str] = &["help", "docs", "dry-run", "verbose", "version"];
+
+/// Flag short forms that creft intercepts before the skill's argument parser.
+///
+/// If you add a filter here, update RESERVED_SHORT_FLAGS in validate.rs.
+const RESERVED_SHORT_FLAGS: &[char] = &['h', 'v', 'V'];
+
+/// Validate flag names, arg names, and short forms for conflicts and reserved names.
+///
+/// All findings are hard errors because they represent conditions that guarantee
+/// the declared flag or arg is unreachable at runtime.
+fn check_frontmatter_names(def: &CommandDef, errors: &mut Vec<ValidationDiagnostic>) {
+    // Stage 2: character and format validation runs before conflict detection so
+    // that a malformed name does not generate a spurious duplicate error as well.
+    for flag in &def.flags {
+        validate_flag_name_format(&flag.name, errors);
+        if let Some(short) = &flag.short {
+            validate_short_format(short, errors);
+        }
+    }
+    for arg in &def.args {
+        validate_arg_name_format(&arg.name, errors);
+    }
+
+    // Stage 1: reserved name checks.
+    for flag in &def.flags {
+        if RESERVED_FLAG_NAMES.contains(&flag.name.as_str()) {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!(
+                    "flag '{}' is reserved by creft and cannot be declared",
+                    flag.name
+                ),
+                line: None,
+            });
+        }
+        // Only check valid single-char shorts; malformed ones were already
+        // flagged in the format pass above.
+        if let Some(short) = &flag.short
+            && let Some(ch) = short.chars().next()
+            && short.len() == 1
+            && RESERVED_SHORT_FLAGS.contains(&ch)
+        {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!(
+                    "flag short form '{}' is reserved by creft and cannot be declared",
+                    short
+                ),
+                line: None,
+            });
+        }
+    }
+
+    // Stage 1: duplicate detection.
+    let mut seen_flag_names: HashSet<&str> = HashSet::new();
+    for flag in &def.flags {
+        if !seen_flag_names.insert(flag.name.as_str()) {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!("duplicate flag name '{}'", flag.name),
+                line: None,
+            });
+        }
+    }
+
+    let mut seen_shorts: HashSet<char> = HashSet::new();
+    for flag in &def.flags {
+        if let Some(short) = &flag.short
+            && let Some(ch) = short.chars().next()
+            && short.chars().count() == 1
+            && !seen_shorts.insert(ch)
+        {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!("duplicate flag short form '{}'", short),
+                line: None,
+            });
+        }
+    }
+
+    let mut seen_arg_names: HashSet<&str> = HashSet::new();
+    for arg in &def.args {
+        if !seen_arg_names.insert(arg.name.as_str()) {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!("duplicate arg name '{}'", arg.name),
+                line: None,
+            });
+        }
+    }
+
+    // Stage 1: flag-arg name conflict.
+    let flag_names: HashSet<&str> = def.flags.iter().map(|f| f.name.as_str()).collect();
+    for arg in &def.args {
+        if flag_names.contains(arg.name.as_str()) {
+            errors.push(ValidationDiagnostic {
+                block_index: None,
+                lang: None,
+                message: format!("flag '{}' conflicts with arg '{}'", arg.name, arg.name),
+                line: None,
+            });
+        }
+    }
+}
+
+/// Validate that a flag name uses only allowed characters and starts correctly.
+///
+/// Valid: `[a-zA-Z_][a-zA-Z0-9_-]*`. Empty names and names starting with a digit
+/// are rejected because lexopt cannot parse them as `--flag` tokens.
+fn validate_flag_name_format(name: &str, errors: &mut Vec<ValidationDiagnostic>) {
+    if name.is_empty() {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: "flag name cannot be empty".into(),
+            line: None,
+        });
+        return;
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "flag name '{}' must start with a letter or underscore (expected [a-zA-Z_][a-zA-Z0-9_-]*)",
+                name
+            ),
+            line: None,
+        });
+        return;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "flag name '{}' contains invalid characters (expected [a-zA-Z_][a-zA-Z0-9_-]*)",
+                name
+            ),
+            line: None,
+        });
+    }
+}
+
+/// Validate that an arg name uses only allowed characters and starts correctly.
+///
+/// Same character rules as flag names — args appear as template placeholders
+/// and must survive hyphen-to-underscore conversion without ambiguity.
+fn validate_arg_name_format(name: &str, errors: &mut Vec<ValidationDiagnostic>) {
+    if name.is_empty() {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: "arg name cannot be empty".into(),
+            line: None,
+        });
+        return;
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "arg name '{}' must start with a letter or underscore (expected [a-zA-Z_][a-zA-Z0-9_-]*)",
+                name
+            ),
+            line: None,
+        });
+        return;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "arg name '{}' contains invalid characters (expected [a-zA-Z_][a-zA-Z0-9_-]*)",
+                name
+            ),
+            line: None,
+        });
+    }
+}
+
+/// Validate that a flag short form is a single ASCII letter.
+///
+/// Digits are excluded because lexopt interprets `-1` as a negative number
+/// argument rather than a flag. Multi-char values are not valid short forms.
+fn validate_short_format(short: &str, errors: &mut Vec<ValidationDiagnostic>) {
+    if short.is_empty() {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: "flag short form cannot be empty".into(),
+            line: None,
+        });
+        return;
+    }
+    let mut chars = short.chars();
+    let ch = chars.next().unwrap();
+    if chars.next().is_some() {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "flag short form must be a single ASCII letter, got '{}'",
+                short
+            ),
+            line: None,
+        });
+        return;
+    }
+    if !ch.is_ascii_alphabetic() {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: format!(
+                "flag short form must be a single ASCII letter, got '{}'",
+                short
+            ),
+            line: None,
+        });
+    }
+}
+
 /// Validate a parsed skill's code blocks.
 ///
 /// Returns a `ValidationResult` with errors (blocking) and warnings (advisory).
@@ -88,6 +329,10 @@ pub fn validate_skill(
 ) -> ValidationResult {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
+
+    // Frontmatter name checks run first — they are more fundamental than
+    // block-level problems and give the author the most actionable feedback.
+    check_frontmatter_names(def, &mut errors);
 
     // Skill-level check: description length.
     if def.description.len() > DESCRIPTION_WARN_LEN {
@@ -899,6 +1144,7 @@ mod tests {
     use crate::model::{Arg, Flag};
     #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
+    use rstest::rstest;
 
     fn make_def(args: Vec<&str>, flags: Vec<&str>) -> CommandDef {
         CommandDef {
@@ -1005,8 +1251,8 @@ mod tests {
 
     #[test]
     fn test_placeholder_flags_recognized() {
-        let def = make_def(vec![], vec!["format", "verbose"]);
-        let block = make_block("bash", "echo {{format}} {{verbose}}");
+        let def = make_def(vec![], vec!["format", "style"]);
+        let block = make_block("bash", "echo {{format}} {{style}}");
         let result = validate_skill(&def, &[block], None);
         assert!(result.is_clean(), "flags should be in declared set");
     }
@@ -1282,7 +1528,8 @@ mod tests {
 
     #[test]
     fn multiple_hyphenated_flags_each_emit_a_warning() {
-        let def = make_def(vec![], vec!["output-format", "dry-run"]);
+        // Uses non-reserved hyphenated flag names to test env var hint emission.
+        let def = make_def(vec![], vec!["output-format", "output-path"]);
         let block = make_block("bash", "echo hello\n");
         let result = validate_skill(&def, &[block], None);
         assert!(result.errors.is_empty());
@@ -1301,7 +1548,7 @@ mod tests {
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("dry-run") && m.contains("DRY_RUN"))
+                .any(|m| m.contains("output-path") && m.contains("OUTPUT_PATH"))
         );
     }
 
@@ -2181,6 +2428,316 @@ mod tests {
             !has_prev_warning,
             "{{{{prev}}}} in block 2 should not produce a warning, got: {:?}",
             result.warnings
+        );
+    }
+
+    // ── frontmatter name validation: Stage 1 reserved names ──────────────────
+
+    fn make_flag(name: &str, short: Option<&str>) -> Flag {
+        Flag {
+            name: name.into(),
+            short: short.map(Into::into),
+            description: String::new(),
+            r#type: "string".into(),
+            default: None,
+            validation: None,
+        }
+    }
+
+    fn make_def_with_flags(flags: Vec<Flag>) -> CommandDef {
+        CommandDef {
+            name: "test".into(),
+            description: "test command".into(),
+            args: vec![],
+            flags,
+            env: vec![],
+            tags: vec![],
+            supports: vec![],
+        }
+    }
+
+    fn make_def_with_flags_and_args(flags: Vec<Flag>, args: Vec<&str>) -> CommandDef {
+        CommandDef {
+            name: "test".into(),
+            description: "test command".into(),
+            args: args
+                .into_iter()
+                .map(|n| Arg {
+                    name: n.into(),
+                    description: String::new(),
+                    default: None,
+                    required: false,
+                    validation: None,
+                })
+                .collect(),
+            flags,
+            env: vec![],
+            tags: vec![],
+            supports: vec![],
+        }
+    }
+
+    #[rstest]
+    #[case::help("help")]
+    #[case::dry_run("dry-run")]
+    #[case::verbose("verbose")]
+    #[case::docs("docs")]
+    #[case::version("version")]
+    fn reserved_flag_name_produces_error(#[case] name: &str) {
+        let def = make_def_with_flags(vec![make_flag(name, None)]);
+        let result = validate_skill(&def, &[], None);
+        let msg = result
+            .errors
+            .iter()
+            .find(|e| e.message.contains("reserved"))
+            .map(|e| e.message.as_str())
+            .unwrap_or("(no reserved error found)");
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("reserved")),
+            "expected 'reserved' error for flag '{name}', got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::h("h")]
+    #[case::v("v")]
+    #[case::cap_v("V")]
+    fn reserved_short_flag_produces_error(#[case] short: &str) {
+        let def = make_def_with_flags(vec![make_flag("output", Some(short))]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("reserved")),
+            "expected 'reserved' error for short flag '{short}', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_flag_long_names_produce_error() {
+        let def = make_def_with_flags(vec![make_flag("output", None), make_flag("output", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("duplicate")),
+            "expected 'duplicate' error for repeated flag name, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_flag_short_forms_produce_error() {
+        let def = make_def_with_flags(vec![
+            make_flag("output", Some("o")),
+            make_flag("other", Some("o")),
+        ]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("duplicate")),
+            "expected 'duplicate' error for repeated short form, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_arg_names_produce_error() {
+        let def = make_def(vec!["repo", "repo"], vec![]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("duplicate")),
+            "expected 'duplicate' error for repeated arg name, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flag_and_arg_sharing_name_produce_conflict_error() {
+        let def = make_def_with_flags_and_args(vec![make_flag("output", None)], vec!["output"]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("conflict")),
+            "expected 'conflict' error for flag/arg name collision, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn valid_flag_and_short_passes_cleanly() {
+        let def = make_def_with_flags(vec![make_flag("output", Some("o"))]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors for valid flag, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn no_flags_no_args_passes_cleanly() {
+        let def = make_def(vec![], vec![]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors for empty flags/args, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ── frontmatter name validation: Stage 2 format checks ───────────────────
+
+    #[test]
+    fn valid_flag_name_output_passes() {
+        let def = make_def_with_flags(vec![make_flag("output", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors for flag 'output', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_flag_name_produces_error() {
+        let def = make_def_with_flags(vec![make_flag("", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("empty")),
+            "expected 'empty' error for blank flag name, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flag_name_with_space_produces_invalid_chars_error() {
+        let def = make_def_with_flags(vec![make_flag("foo bar", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("invalid characters")),
+            "expected 'invalid characters' error for 'foo bar', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flag_name_with_slash_produces_invalid_chars_error() {
+        let def = make_def_with_flags(vec![make_flag("foo/bar", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("invalid characters")),
+            "expected 'invalid characters' error for 'foo/bar', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flag_name_starting_with_digit_produces_error() {
+        let def = make_def_with_flags(vec![make_flag("3things", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("must start with")),
+            "expected start-with error for '3things', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_arg_name_produces_error() {
+        let def = make_def(vec![""], vec![]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("empty")),
+            "expected 'empty' error for blank arg name, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn arg_name_with_space_produces_invalid_chars_error() {
+        let def = make_def(vec!["my arg"], vec![]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("invalid characters")),
+            "expected 'invalid characters' error for 'my arg', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn multichar_short_form_produces_error() {
+        let def = make_def_with_flags(vec![make_flag("output", Some("ab"))]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("single ASCII letter")),
+            "expected 'single ASCII letter' error for short 'ab', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn digit_short_form_produces_error() {
+        let def = make_def_with_flags(vec![make_flag("output", Some("3"))]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("single ASCII letter")),
+            "expected 'single ASCII letter' error for short '3', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_short_form_produces_error() {
+        let def = make_def_with_flags(vec![make_flag("output", Some(""))]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("empty")),
+            "expected 'empty' error for blank short form, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dry_run_is_caught_by_reserved_not_char_check() {
+        // "dry-run" contains a hyphen which is valid — the reserved check fires,
+        // not the character check.
+        let def = make_def_with_flags(vec![make_flag("dry-run", None)]);
+        let result = validate_skill(&def, &[], None);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("reserved")),
+            "expected 'reserved' error for 'dry-run', got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // Must not also produce an invalid-characters error for 'dry-run'.
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("invalid characters") && e.message.contains("dry-run")),
+            "should not produce 'invalid characters' error for 'dry-run' (valid chars)"
         );
     }
 }

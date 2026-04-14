@@ -17,6 +17,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
 
     // Filter out meta-flags before resolving command name so they are not
     // mistakenly matched as part of the command name or passed as remaining args.
+    // If you add a filter here, update RESERVED_FLAG_NAMES in validate.rs.
     let filtered: Vec<String> = args
         .iter()
         .filter(|a| {
