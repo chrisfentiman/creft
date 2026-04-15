@@ -223,7 +223,16 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     }
 
     // --verbose only (render done above) or no flags: execute normally.
-    runner::run(&cmd, &remaining, &run_ctx)
+    let result = runner::run(&cmd, &remaining, &run_ctx);
+
+    // When a skill's block exits non-zero, the runner is quiet (the child
+    // already wrote to stderr). Print a creft-level summary so the caller
+    // knows which skill failed and with what code.
+    if let Err(CreftError::ExecutionFailed { code, .. }) = &result {
+        eprintln!("error: '{}' exited with code {}", name, code);
+    }
+
+    result
 }
 
 /// Render skill documentation from the raw markdown file content.

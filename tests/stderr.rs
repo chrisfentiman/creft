@@ -289,6 +289,107 @@ fn verbose_shows_stderr_from_pipe_chain_blocks() {
     );
 }
 
+// ── skill name in failure message ─────────────────────────────────────────────
+
+/// When a skill exits non-zero, creft prints `error: '<name>' exited with code N`
+/// to stderr so the caller knows which skill failed and with what code.
+#[test]
+fn nonzero_exit_prints_skill_name_and_code() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: fail-with-code\n",
+            "description: exits non-zero\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 42\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir).args(["fail-with-code"]).output().unwrap();
+
+    assert!(!output.status.success(), "skill must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: 'fail-with-code' exited with code 42"),
+        "stderr must contain skill name and exit code; got: {stderr:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "exit code must propagate unchanged"
+    );
+}
+
+/// When a pipe-chain skill exits non-zero, the skill name (not block index)
+/// appears in the error message.
+#[test]
+fn nonzero_exit_in_pipe_chain_prints_skill_name() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-fail\n",
+            "description: pipe chain where last block fails\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo hello\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "exit 3\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir).args(["pipe-fail"]).output().unwrap();
+
+    assert!(!output.status.success(), "pipe chain must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: 'pipe-fail' exited with code 3"),
+        "stderr must name the skill, not a block index; got: {stderr:?}"
+    );
+}
+
+/// A skill that uses exit 99 (early exit / creft_exit) must complete
+/// successfully and produce no error message on stderr.
+#[test]
+fn exit_99_early_exit_is_silent() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: early-exit-silent\n",
+            "description: stops early via exit 99\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["early-exit-silent"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("error:").not());
+}
+
 // ── stdout is unaffected ───────────────────────────────────────────────────────
 
 /// Capturing stderr must not interfere with stdout: block output still reaches
