@@ -24,8 +24,10 @@ fn should_shell_escape(lang: &str) -> bool {
 ///
 /// # Edge cases
 ///
-/// - Empty string: produces `''` under escaping. This is the correct shell
-///   representation of an empty argument and makes intent unambiguous.
+/// - Empty string: expands to nothing (the placeholder disappears). An
+///   unset optional arg or a `default: ""` frontmatter entry signals "no
+///   value"; wrapping it in `''` would inject a spurious empty-string
+///   argument into the shell command at the call site.
 /// - `{{prev}}` (previous block output) is in the `args` slice and IS escaped
 ///   for shell blocks, since it may contain user-influenced content.
 pub(crate) fn substitute(
@@ -41,7 +43,7 @@ pub(crate) fn substitute(
         let default_val = caps.get(2).map(|m| m.as_str());
 
         if let Some((_, val)) = args.iter().find(|(n, _)| *n == name) {
-            if escape {
+            if escape && !val.is_empty() {
                 shell_escape::escape((*val).into()).to_string()
             } else {
                 val.to_string()
@@ -163,9 +165,11 @@ mod tests {
 
     #[test]
     fn test_shell_escape_empty_string() {
-        // Empty string -> '' (documented behavior change: unambiguous empty arg)
+        // Empty string -> nothing. A `default: ""` or unset optional arg signals
+        // "no value"; injecting `''` would pass a spurious empty argument to the
+        // shell command at the call site.
         let result = substitute("echo {{name}}", &[("name", "")], "bash").unwrap();
-        assert_eq!(result, "echo ''");
+        assert_eq!(result, "echo ");
     }
 
     #[test]
