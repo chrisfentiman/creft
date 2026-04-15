@@ -198,8 +198,8 @@ fn test_three_token_command_still_resolves_when_four_token_sibling_exists() {
 
 /// A skill with `required: false` and a template default `{{count|5}}` runs
 /// Optional arg omitted — parse_and_bind binds it to "". The bound "" takes
-/// precedence over the template default, so `{{count|5}}` resolves to the
-/// shell-escaped empty string, not "5".
+/// precedence over the template default, so `{{count|5}}` expands to nothing,
+/// not "5" and not `''`.
 #[test]
 fn test_optional_arg_with_template_default_omitted() {
     let dir = creft_env();
@@ -217,7 +217,7 @@ fn test_optional_arg_with_template_default_omitted() {
         .args(["opt-count"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("count=''"));
+        .stdout(predicate::str::contains("count="));
 }
 
 /// Same skill as above, but the arg is provided — the provided value is used,
@@ -243,14 +243,14 @@ fn test_optional_arg_with_template_default_provided() {
 }
 
 /// A skill with `required: false`, no frontmatter default, and a bare `{{name}}`
-/// template resolves to empty string when the arg is omitted. parse_and_bind
-/// now binds optional args to "" so `{{name}}` substitutes as the shell-escaped
-/// empty string rather than erroring.
+/// template resolves to nothing when the arg is omitted. parse_and_bind binds
+/// optional args to "" so `{{name}}` expands to an empty substitution rather
+/// than erroring or injecting `''`.
 #[test]
 fn test_optional_arg_no_default_anywhere_errors() {
     let dir = creft_env();
 
-    // Template uses {{name}} with no `|default` — resolves to '' when omitted.
+    // Template uses {{name}} with no `|default` — expands to nothing when omitted.
     let markdown = "---\nname: opt-nodefault\ndescription: needs a name\nargs:\n  - name: name\n    description: a name\n    required: false\n---\n\n```bash\necho \"hello {{name}}\"\n```\n";
 
     creft_with(&dir)
@@ -259,12 +259,12 @@ fn test_optional_arg_no_default_anywhere_errors() {
         .assert()
         .success();
 
-    // Invoke without the arg — succeeds, resolves to empty string.
+    // Invoke without the arg — succeeds, placeholder disappears.
     creft_with(&dir)
         .args(["opt-nodefault"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("hello ''"));
+        .stdout(predicate::str::contains("hello "));
 }
 
 // ── pipe intermediate output suppression tests ────────────────────────────────
@@ -1905,15 +1905,15 @@ fn test_verbose_without_args_shows_empty_defaults() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Stderr shows the block with the empty-substituted (shell-escaped) value.
+    // Stderr shows the block with the empty-substituted value.
     assert!(
         stderr.contains("=== block 1 (bash) ==="),
         "stderr should contain block header; got: {stderr:?}"
     );
-    // Empty string substitution produces '' in bash mode.
+    // Empty string substitution expands to nothing — placeholder disappears.
     assert!(
-        stderr.contains("thing=''"),
-        "stderr should show empty substitution as ''; got: {stderr:?}"
+        stderr.contains("thing="),
+        "stderr should show empty substitution as nothing; got: {stderr:?}"
     );
 }
 

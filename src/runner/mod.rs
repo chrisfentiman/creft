@@ -1241,9 +1241,8 @@ mod tests {
     #[test]
     fn test_optional_arg_template_default_fires() {
         // When parse_and_bind binds an optional arg to "", the bound "" takes
-        // precedence and {{count|5}} resolves to '' (shell-escaped empty string),
-        // not "5". The template default only fires when the key is absent from
-        // pairs entirely.
+        // precedence and {{count|5}} resolves to "" (nothing), not "5". The
+        // template default only fires when the key is absent from pairs entirely.
         let cmd = make_cmd(
             vec![Arg {
                 name: "count".into(),
@@ -1262,13 +1261,13 @@ mod tests {
             .collect();
         // count is bound to "" by parse_and_bind — template default does not fire
         let result = substitute("echo {{count|5}}", &bound_refs, "bash").unwrap();
-        assert_eq!(result, "echo ''");
+        assert_eq!(result, "echo ");
     }
 
     #[test]
     fn test_optional_arg_no_default_template_errors() {
-        // With the new behavior, required: false + no default → arg bound to ""
-        // by parse_and_bind. So {{name}} resolves to '' (empty string), not an error.
+        // required: false + no default → arg bound to "" by parse_and_bind.
+        // {{name}} resolves to nothing (placeholder disappears), not `''`.
         let cmd = make_cmd(
             vec![Arg {
                 name: "name".into(),
@@ -1287,8 +1286,8 @@ mod tests {
             .collect();
         let result = substitute("echo {{name}}", &bound_refs, "bash").unwrap();
         assert_eq!(
-            result, "echo ''",
-            "optional arg with no default should resolve to empty string"
+            result, "echo ",
+            "optional arg with no value should expand to nothing, not ''"
         );
     }
 
@@ -1469,7 +1468,7 @@ mod tests {
     #[test]
     fn test_optional_flag_no_default_binds_empty() {
         // string flag with required: false (implied by flag type), no default, not provided
-        // → bound to "" so {{flagname}} resolves to empty string rather than erroring
+        // → bound to "" so {{flagname}} expands to nothing rather than injecting `''`
         let cmd = make_cmd(
             vec![],
             vec![Flag {
@@ -1489,8 +1488,8 @@ mod tests {
             .collect();
         let result = substitute("output {{format}}", &bound_refs, "bash").unwrap();
         assert_eq!(
-            result, "output ''",
-            "unset string flag should substitute as empty string"
+            result, "output ",
+            "unset string flag should expand to nothing, not ''"
         );
     }
 
