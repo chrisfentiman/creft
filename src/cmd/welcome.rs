@@ -251,8 +251,11 @@ fn build_reveal_frame(reveal_col: usize) -> String {
 fn build_underline_frame(sweep_col: usize, logo_width: usize) -> String {
     let mut out = String::with_capacity(512);
 
-    // Move down past the logo to the underline row.
-    let _ = write!(out, "\x1b[{}B", LOGO.len());
+    // Move down past the logo to the underline row, then reset to column 0.
+    // The cursor-down sequence preserves the current column, so without \r each
+    // subsequent frame would start writing at an accumulated column offset,
+    // scattering underline characters across the screen.
+    let _ = write!(out, "\x1b[{}B\r", LOGO.len());
 
     // Overwrite the full underline row: colored chars up to sweep_col, spaces beyond.
     for i in 0..logo_width {
