@@ -254,4 +254,4 @@ check_path() {
 install_creft
 
 # Show welcome on first install
-creft _creft welcome 2>/dev/null || true
+creft _creft welcome || true
