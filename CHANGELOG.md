@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/chrisfentiman/creft/compare/creft-v0.3.0...creft-v0.3.1) (2026-04-15)
+
+
+### Bug Fixes
+
+* **runner:** print error message when a skill exits non-zero ([#52](https://github.com/chrisfentiman/creft/issues/52)) ([9b57f4a](https://github.com/chrisfentiman/creft/commit/9b57f4a09c87751c4913923681bd38612d527b43))
+* **substitute:** empty string defaults resolve to empty, not '' ([#51](https://github.com/chrisfentiman/creft/issues/51)) ([0eaec1d](https://github.com/chrisfentiman/creft/commit/0eaec1d2c9ec4a5f8880bf3ea90d1f161f184dcd))
+
 ## [0.3.0](https://github.com/chrisfentiman/creft/compare/creft-v0.2.8...creft-v0.3.0) (2026-04-15)
 
 
