@@ -39,13 +39,13 @@ export default {
     }
 
     // Log every install script delivery to Analytics Engine.
-    // Guard with env.INSTALLS check so the worker runs cleanly under `wrangler dev`
+    // Guard with env.CREFT_ANALYTICS check so the worker runs cleanly under `wrangler dev`
     // where the Analytics Engine binding is not available.
     const source = url.searchParams.get("source") || "organic";
     const version = route.type === "versioned" ? route.version : "latest";
 
-    if (env.INSTALLS) {
-      env.INSTALLS.writeDataPoint({
+    if (env.CREFT_ANALYTICS) {
+      env.CREFT_ANALYTICS.writeDataPoint({
         blobs: [source, version, url.pathname],
         doubles: [1],
         indexes: [source],

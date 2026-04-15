@@ -208,9 +208,8 @@ install_creft() {
     install_dir="${CREFT_INSTALL_DIR:-$HOME/.local/bin}"
 
     # Set up temp dir with cleanup trap
-    tmp_dir=""
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    trap 'rm -rf "${tmp_dir:-}"' EXIT
 
     local tarball
     tarball="${tmp_dir}/${tarball_name}"
