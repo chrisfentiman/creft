@@ -9,6 +9,9 @@ on:
       - 'cloudflare/workers/creft-run.js'
       - 'cloudflare/wrangler.jsonc'
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
