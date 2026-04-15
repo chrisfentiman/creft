@@ -179,7 +179,7 @@ verify_checksum() {
 # --- Install ---
 
 install_creft() {
-    local version tag target tarball_name tarball_url checksum_url install_dir tmp_dir
+    local version tag target tarball_name tarball_url checksum_url install_dir
 
     # Resolve version
     if [ -n "${CREFT_VERSION:-}" ]; then
@@ -207,12 +207,12 @@ install_creft() {
 
     install_dir="${CREFT_INSTALL_DIR:-$HOME/.local/bin}"
 
-    # Set up temp dir with cleanup trap
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "${tmp_dir:-}"' EXIT
+    # Set up temp dir — declared at script scope so the EXIT trap can reference it
+    _creft_tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "${_creft_tmp_dir:-}"' EXIT
 
     local tarball
-    tarball="${tmp_dir}/${tarball_name}"
+    tarball="${_creft_tmp_dir}/${tarball_name}"
 
     info "downloading creft ${version} for ${target}..."
     download_to_file "$tarball_url" "$tarball" || error "failed to download creft ${version} for ${target}"
@@ -221,15 +221,18 @@ install_creft() {
     verify_checksum "$tarball" "$checksum_url"
 
     info "extracting..."
-    tar -xzf "$tarball" -C "$tmp_dir" || error "failed to extract archive"
+    tar -xzf "$tarball" -C "$_creft_tmp_dir" || error "failed to extract archive"
 
     mkdir -p "$install_dir"
-    cp "${tmp_dir}/creft" "${install_dir}/creft"
+    cp "${_creft_tmp_dir}/creft" "${install_dir}/creft"
     chmod +x "${install_dir}/creft"
 
     info "creft ${version} installed to ${install_dir}/creft"
 
     check_path "$install_dir"
+
+    # Show welcome on first install — use full path since install_dir may not be on PATH yet
+    "${install_dir}/creft" _creft welcome || true
 }
 
 # --- PATH check ---
@@ -251,6 +254,3 @@ check_path() {
 # --- Entry point ---
 
 install_creft
-
-# Show welcome on first install
-creft _creft welcome || true
