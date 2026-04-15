@@ -15,14 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./workbench/action
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Install creft
-        run: cargo install --path .
 
       - name: Deploy install script
         env:
