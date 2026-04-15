@@ -109,7 +109,7 @@ fn parse_llm_block(content: String) -> CodeBlock {
                     llm_parse_error: None,
                 }
             } else {
-                match serde_yaml_ng::from_str::<LlmConfig>(&yaml_section) {
+                match crate::yaml::from_str::<LlmConfig>(&yaml_section) {
                     Ok(config) => CodeBlock {
                         lang: "llm".to_string(),
                         code: prompt,

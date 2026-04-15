@@ -95,6 +95,13 @@ pub enum CreftError {
     #[error("validation failed")]
     ValidationErrors(Vec<crate::validate::ValidationDiagnostic>),
 
+    #[error("settings error: {0}")]
+    SettingsError(String),
+
+    /// A CLI argument parsing error (unknown flag, wrong value type, etc.).
+    #[error("{0}")]
+    CliParse(String),
+
     /// A block exited with code 99: stop the pipeline and return success.
     ///
     /// This variant is an internal signal used by the runner. It is never
@@ -114,7 +121,8 @@ impl CreftError {
             Self::CommandNotFound(_)
             | Self::PackageNotFound(_)
             | Self::ActivationNotFound { .. }
-            | Self::PluginNotInCatalog { .. } => 2,
+            | Self::PluginNotInCatalog { .. }
+            | Self::CliParse(_) => 2,
             Self::MissingArg(_) | Self::MissingEnvVar(_) | Self::ValidationFailed { .. } => 3,
             Self::ExecutionFailed { code, .. } => *code,
             Self::ExecutionSignaled { signal, .. } => 128 + signal,
@@ -160,6 +168,16 @@ pub fn enrich_io_error(e: std::io::Error, context: &str) -> CreftError {
         return CreftError::InterpreterNotFound(format!("{context}. Run 'creft doctor' to check."));
     }
     CreftError::Io(e)
+}
+
+impl From<crate::cli::CliError> for CreftError {
+    fn from(e: crate::cli::CliError) -> Self {
+        match e {
+            crate::cli::CliError::UnknownCommand(name) => CreftError::CommandNotFound(name),
+            crate::cli::CliError::MissingArg(name) => CreftError::MissingArg(name),
+            crate::cli::CliError::Usage(msg) => CreftError::CliParse(msg),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Tests for `creft add`, `creft rm`, and validation behavior.
+//! Tests for `creft add`, `creft remove`, and validation behavior.
 
 mod helpers;
 
@@ -196,63 +196,6 @@ fn test_add_skip_validation_flag(#[case] flag: &str, #[case] skill_name: &str) {
         .stderr(predicate::str::contains(format!("added: {skill_name}")));
 }
 
-/// Piped `creft edit` with a syntax error in the new content is rejected.
-/// Lives here (not in edit.rs) because it tests validation behavior.
-#[test]
-fn test_edit_piped_validates() {
-    if !tool_available("bash") {
-        println!("bash not available — skipping test_edit_piped_validates");
-        return;
-    }
-    let dir = creft_env();
-
-    // First add a valid skill.
-    let valid_markdown =
-        "---\nname: edit-target\ndescription: to be edited\n---\n\n```bash\necho original\n```\n";
-    creft_with(&dir)
-        .args(["add"])
-        .write_stdin(valid_markdown)
-        .assert()
-        .success();
-
-    // Now pipe broken content via edit — should be rejected.
-    let broken_markdown = "---\nname: edit-target\ndescription: broken edit\n---\n\n```bash\nif true; then\n  echo broken\n```\n";
-    creft_with(&dir)
-        .args(["edit", "edit-target"])
-        .write_stdin(broken_markdown)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("error:"));
-}
-
-/// Piped `creft edit --no-validate` accepts broken content.
-/// Lives here (not in edit.rs) because it tests validation behavior.
-#[test]
-fn test_edit_piped_no_validate() {
-    if !tool_available("bash") {
-        println!("bash not available — skipping test_edit_piped_no_validate");
-        return;
-    }
-    let dir = creft_env();
-
-    // First add a valid skill.
-    let valid_markdown = "---\nname: edit-novalidate-target\ndescription: to be edited\n---\n\n```bash\necho original\n```\n";
-    creft_with(&dir)
-        .args(["add"])
-        .write_stdin(valid_markdown)
-        .assert()
-        .success();
-
-    // Now pipe broken content via edit --no-validate — should succeed.
-    let broken_markdown = "---\nname: edit-novalidate-target\ndescription: broken edit\n---\n\n```bash\nif true; then\n  echo broken\n```\n";
-    creft_with(&dir)
-        .args(["edit", "edit-novalidate-target", "--no-validate"])
-        .write_stdin(broken_markdown)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("edited: edit-novalidate-target"));
-}
-
 /// A skill block whose language interpreter is not available is accepted silently.
 /// We simulate this by using a fictional language tag that maps to no checker.
 #[test]
@@ -380,7 +323,7 @@ fn test_add_force_skips_description_warning() {
 
 // ── error case tests ──────────────────────────────────────────────────────────
 
-/// Trying to add a command named after a reserved built-in is rejected.
+/// Trying to add a skill named after a reserved built-in is rejected.
 #[test]
 fn test_reserved_name_rejected() {
     let dir = creft_env();
@@ -394,9 +337,9 @@ fn test_reserved_name_rejected() {
         .stderr(predicate::str::contains("reserved"));
 }
 
-// ── rm tests ──────────────────────────────────────────────────────────────────
+// ── remove tests ──────────────────────────────────────────────────────────────
 
-/// Adding a command and then removing it succeeds. After removal, list is empty.
+/// Adding a skill and then removing it succeeds. After removal, list is empty.
 #[test]
 fn test_rm_command() {
     let dir = creft_env();
@@ -407,22 +350,27 @@ fn test_rm_command() {
         .assert()
         .success();
 
-    creft_with(&dir).args(["rm", "hello"]).assert().success();
+    creft_with(&dir)
+        .args(["remove", "hello"])
+        .assert()
+        .success();
 
-    // After removal the list is empty.
+    // After removal the list has no skills — Commands: section still appears,
+    // but the Skills: section is omitted and nothing appears on stderr.
     creft_with(&dir)
         .args(["list"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("no commands found"));
+        .stdout(predicate::str::contains("Commands:"))
+        .stderr(predicate::str::is_empty());
 }
 
-/// `creft rm nonexistent` exits with code 2 (CommandNotFound).
+/// `creft remove nonexistent` exits with code 2 (CommandNotFound).
 #[test]
 fn test_rm_not_found() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["rm", "nonexistent"])
+        .args(["remove", "nonexistent"])
         .assert()
         .failure()
         .code(2);

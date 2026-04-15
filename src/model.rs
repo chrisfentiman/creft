@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use serde::{Deserialize, Serialize};
+use yansi::Paint;
 
 use crate::error::CreftError;
-use crate::style::bold;
+use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 
 /// Matches `{{name}}` and `{{name|default}}` placeholders in skill templates.
 pub(crate) static PLACEHOLDER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -182,6 +182,11 @@ impl AppContext {
             .join("settings.json"))
     }
 
+    /// Path to the global settings file (`~/.creft/settings.json`).
+    pub fn settings_path(&self) -> Result<std::path::PathBuf, CreftError> {
+        Ok(self.resolve_root(Scope::Global)?.join("settings.json"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)
@@ -261,89 +266,55 @@ pub enum SkillSource {
 }
 
 /// Skill definition parsed from YAML frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CommandDef {
     pub name: String,
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<Arg>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<Flag>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Runtime features this command supports (e.g., "dry-run").
     /// When a feature is declared here and the corresponding runtime flag
     /// is passed, creft delegates handling to the command instead of
     /// implementing it generically.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supports: Vec<String>,
 }
 
 /// A positional argument declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Arg {
     pub name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// Whether this arg must be provided by the caller. Default: false.
     /// When false and no value is provided, the arg is not bound.
     /// Template substitution uses `{{name|default}}` if present,
     /// or errors on `{{name}}` with no default.
-    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
     /// Regex pattern for validation. Applied to the final value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
 }
 
 /// A named option declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Flag {
     pub name: String,
     /// Single-char short form (e.g., "v" for -v)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// "bool" (presence flag) or "string" (takes a value). Default: "string".
-    #[serde(
-        default = "default_flag_type",
-        skip_serializing_if = "is_default_flag_type"
-    )]
     pub r#type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// Regex pattern for validation (only for string flags).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
 }
 
-fn default_flag_type() -> String {
-    "string".into()
-}
-
-fn is_false(v: &bool) -> bool {
-    !v
-}
-
-fn is_default_flag_type(v: &str) -> bool {
-    v == "string"
-}
-
 /// An environment variable dependency declared in skill frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EnvVar {
     pub name: String,
-    #[serde(default = "default_true")]
     pub required: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_provider() -> String {
@@ -354,23 +325,20 @@ fn default_provider() -> String {
 ///
 /// All fields are optional strings for forward-compatibility with unknown
 /// providers and future provider features.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmConfig {
     /// CLI tool to invoke. Defaults to `"claude"` when absent.
     /// Known providers have specific command patterns; unknown providers
     /// are invoked as literal command names.
-    #[serde(default = "default_provider")]
     pub provider: String,
 
     /// Model name passed to the provider CLI. Omitted from the command
     /// when empty (provider uses its own default).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
 
     /// Raw parameter string appended to the command. Split on whitespace
     /// before appending as individual arguments. This is the escape hatch
     /// for any provider flag creft doesn't model explicitly.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub params: String,
 }
 
@@ -461,27 +429,32 @@ impl ParsedCommand {
         usage
     }
 
-    /// Render the full help text for this skill, optionally with ANSI bold formatting.
-    pub fn help_text(&self, ansi: bool) -> String {
+    /// Render the full help text for this skill with ANSI bold formatting.
+    ///
+    /// Whether ANSI escapes are emitted is controlled by yansi's global condition,
+    /// set at startup via `style::init_color()`. No `ansi: bool` parameter is
+    /// needed — the global condition handles enable/disable transparently.
+    pub fn help_text(&self) -> String {
         // First line is the description only — user already typed the skill name.
-        let mut out = format!("{}\n", self.def.description);
+        let mut out = format!("{}\n", wrap_text(&self.def.description, MAX_WIDTH, 0));
 
         out.push('\n');
         let usage = self.usage_line();
-        let (usage_label, usage_rest) = usage
-            .strip_prefix("Usage:")
-            .map(|rest| ("Usage:", rest))
-            .unwrap_or(("", usage.as_str()));
-        out.push_str(&format!("{}{}\n", bold(usage_label, ansi), usage_rest));
+        // Always starts with "Usage:" — bold the label, keep the rest plain.
+        if let Some(rest) = usage.strip_prefix("Usage:") {
+            out.push_str(&format!("{}{}\n", "Usage:".bold(), rest));
+        } else {
+            out.push_str(&format!("{}\n", usage));
+        }
 
         if let Some(docs) = &self.docs {
             out.push('\n');
-            out.push_str(docs);
+            out.push_str(&wrap_text(docs, MAX_WIDTH, 0));
             out.push('\n');
         }
 
         if !self.def.args.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Arguments:", ansi)));
+            out.push_str(&format!("\n{}\n", "Arguments:".bold()));
             let max_name = self
                 .def
                 .args
@@ -489,26 +462,32 @@ impl ParsedCommand {
                 .map(|a| a.name.len())
                 .max()
                 .unwrap_or(0);
+            let desc_col = 2 + max_name + 2;
+            let desc_budget = MAX_WIDTH.saturating_sub(desc_col);
             for arg in &self.def.args {
                 let default_hint = arg
                     .default
                     .as_ref()
+                    .filter(|d| !d.is_empty())
                     .map(|d| format!(" [default: {}]", d))
                     .unwrap_or_default();
                 // Column width is computed from plain name length to preserve alignment
                 // when ANSI escapes are present (they inflate byte count but not display width).
                 let pad = " ".repeat(max_name - arg.name.len());
-                out.push_str(&format!(
-                    "  {}{pad}  {}{}\n",
-                    bold(&arg.name, ansi),
-                    arg.description,
-                    default_hint,
-                ));
+                if arg.description.is_empty() && default_hint.is_empty() {
+                    // No description or default: omit the description column entirely
+                    // so the line ends cleanly at the name rather than with trailing spaces.
+                    out.push_str(&format!("  {}{pad}\n", arg.name.as_str().bold()));
+                } else {
+                    let full_desc = format!("{}{}", arg.description, default_hint);
+                    let wrapped = wrap_description(&full_desc, desc_budget, desc_col);
+                    out.push_str(&format!("  {}{pad}  {wrapped}\n", arg.name.as_str().bold(),));
+                }
             }
         }
 
         if !self.def.flags.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Options:", ansi)));
+            out.push_str(&format!("\n{}\n", "Options:".bold()));
             let max_flag = self
                 .def
                 .flags
@@ -524,6 +503,8 @@ impl ParsedCommand {
                 })
                 .max()
                 .unwrap_or(0);
+            let flag_desc_col = 2 + max_flag + 2;
+            let flag_desc_budget = MAX_WIDTH.saturating_sub(flag_desc_col);
             for flag in &self.def.flags {
                 let short = flag
                     .short
@@ -539,21 +520,19 @@ impl ParsedCommand {
                 let default_hint = flag
                     .default
                     .as_ref()
+                    .filter(|d| !d.is_empty())
                     .map(|d| format!(" [default: {}]", d))
                     .unwrap_or_default();
                 // Column width computed from plain label length (not bold-wrapped).
                 let pad = " ".repeat(max_flag - label.len());
-                out.push_str(&format!(
-                    "  {}{pad}  {}{}\n",
-                    bold(&label, ansi),
-                    flag.description,
-                    default_hint,
-                ));
+                let full_desc = format!("{}{}", flag.description, default_hint);
+                let wrapped = wrap_description(&full_desc, flag_desc_budget, flag_desc_col);
+                out.push_str(&format!("  {}{pad}  {wrapped}\n", label.as_str().bold(),));
             }
         }
 
         if !self.def.env.is_empty() {
-            out.push_str(&format!("\n{}\n", bold("Environment:", ansi)));
+            out.push_str(&format!("\n{}\n", "Environment:".bold()));
             for var in &self.def.env {
                 let req = if var.required {
                     "(required)"
@@ -562,14 +541,6 @@ impl ParsedCommand {
                 };
                 out.push_str(&format!("  {}  {}\n", var.name, req));
             }
-        }
-
-        if !self.def.tags.is_empty() {
-            out.push_str(&format!(
-                "\n{} {}\n",
-                bold("Tags:", ansi),
-                self.def.tags.join(", ")
-            ));
         }
 
         out
@@ -663,7 +634,9 @@ mod tests {
             docs: Some("Fetches the body as raw markdown.".into()),
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
         // First line is description only — no "name — " prefix
         assert!(help.starts_with("Fetch issue body\n"));
         assert!(!help.contains("gh issue-body —"));
@@ -675,9 +648,46 @@ mod tests {
         assert!(help.contains("repo"));
         assert!(help.contains("Environment:"));
         assert!(help.contains("GITHUB_TOKEN"));
-        assert!(help.contains("Tags:"));
-        assert!(!help.contains("TAGS:"));
-        assert!(help.contains("github, api"));
+        // Tags are search metadata for `creft list --tag` — not rendered in --help.
+        assert!(!help.contains("Tags:"));
+        assert!(!help.contains("github, api"));
+    }
+
+    #[test]
+    fn help_text_hides_empty_default() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "deploy".into(),
+                description: "deploy a service".into(),
+                args: vec![Arg {
+                    name: "env".into(),
+                    description: "target environment".into(),
+                    default: Some(String::new()),
+                    required: false,
+                    validation: None,
+                }],
+                flags: vec![Flag {
+                    name: "region".into(),
+                    description: "cloud region".into(),
+                    short: None,
+                    default: Some(String::new()),
+                    r#type: "string".into(),
+                    validation: None,
+                }],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![],
+        };
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
+        assert!(
+            !help.contains("[default: ]"),
+            "empty default must not appear"
+        );
     }
 
     #[test]
@@ -747,7 +757,7 @@ mod tests {
 name: verbose
 description: verbose mode
 "#;
-        let flag: Flag = serde_yaml_ng::from_str(yaml).unwrap();
+        let flag: Flag = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(flag.r#type, "string");
     }
 
@@ -757,7 +767,7 @@ description: verbose mode
         let yaml = r#"
 name: MY_TOKEN
 "#;
-        let env_var: EnvVar = serde_yaml_ng::from_str(yaml).unwrap();
+        let env_var: EnvVar = crate::yaml::from_str(yaml).unwrap();
         assert!(env_var.required, "default required should be true");
     }
 
@@ -785,7 +795,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             !help.contains("<value>"),
             "bool flag should not have <value> hint"
@@ -819,7 +830,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("<value>"),
             "string flag should have <value> hint"
@@ -848,7 +860,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(help.contains("OPTIONAL_TOKEN"));
         assert!(help.contains("(optional)"));
         assert!(!help.contains("(required)"));
@@ -878,11 +891,57 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(help.contains("count"));
         // Default format uses square brackets to match clap convention
         assert!(help.contains("[default: 10]"));
         assert!(!help.contains("(default: 10)"));
+    }
+
+    /// Arg with no description and no default renders as `  name` with no trailing spaces.
+    ///
+    /// When a skill author omits the description field, the arg line must end cleanly
+    /// at the name rather than leaving a dangling two-space separator column that
+    /// makes the output look ragged compared to built-in help.
+    #[test]
+    fn test_help_text_arg_without_description_has_no_trailing_spaces() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "greet".into(),
+                description: "Greet someone".into(),
+                args: vec![Arg {
+                    name: "who".into(),
+                    description: String::new(),
+                    default: None,
+                    required: false,
+                    validation: None,
+                }],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![],
+        };
+        yansi::disable();
+        let help = cmd.help_text();
+        yansi::enable();
+        assert!(help.contains("Arguments:"));
+        assert!(
+            help.contains("  who\n"),
+            "arg line must end at the name with no trailing spaces; got:\n{help}"
+        );
+        // No description separator should appear when there is nothing to describe.
+        let arg_line = help
+            .lines()
+            .find(|l| l.trim_start().starts_with("who"))
+            .unwrap_or("");
+        assert!(
+            !arg_line.ends_with("  "),
+            "arg line must not have trailing spaces; got: {arg_line:?}",
+        );
     }
 
     // ── help_text: usage line construction ───────────────────────────────────
@@ -908,7 +967,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("<REPO>"),
             "required arg should appear as <REPO> in usage line; got:\n{help}"
@@ -936,7 +996,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("[COUNT]"),
             "optional arg should appear as [COUNT] in usage line; got:\n{help}"
@@ -965,7 +1026,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         // Flags produce [OPTIONS] in the usage line
         assert!(
             help.contains("[OPTIONS]"),
@@ -988,7 +1050,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         assert!(
             help.contains("Usage: creft ping\n"),
             "minimal skill usage line should have no [OPTIONS] or arg placeholders; got:\n{help}"
@@ -1014,7 +1077,8 @@ name: MY_TOKEN
             docs: None,
             blocks: vec![],
         };
-        let help = cmd.help_text(false);
+        yansi::disable();
+        let help = cmd.help_text();
         let first_line = help.lines().next().unwrap_or("");
         assert_eq!(
             first_line, "Does something useful",
@@ -1134,7 +1198,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_section_headers_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("\x1b[1mUsage:\x1b[0m"),
             "Usage: header should be bold; got:\n{help}"
@@ -1151,16 +1216,18 @@ name: MY_TOKEN
             help.contains("\x1b[1mEnvironment:\x1b[0m"),
             "Environment: header should be bold; got:\n{help}"
         );
+        // Tags are not rendered in --help output.
         assert!(
-            help.contains("\x1b[1mTags:\x1b[0m"),
-            "Tags: header should be bold; got:\n{help}"
+            !help.contains("\x1b[1mTags:\x1b[0m"),
+            "Tags: must not appear in --help; got:\n{help}"
         );
     }
 
     #[test]
     fn test_help_text_ansi_arg_names_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("\x1b[1mrepo\x1b[0m"),
             "arg name 'repo' should be bold; got:\n{help}"
@@ -1174,7 +1241,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_flag_labels_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         // Flag label "-v, --verbose" should be bold.
         assert!(
             help.contains("\x1b[1m-v, --verbose\x1b[0m"),
@@ -1185,7 +1253,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_description_not_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             !help.contains("\x1b[1mFetch issue body"),
             "description text must not be bold; got:\n{help}"
@@ -1199,7 +1268,8 @@ name: MY_TOKEN
     #[test]
     fn test_help_text_ansi_default_hints_not_bold() {
         let cmd = make_full_cmd();
-        let help = cmd.help_text(true);
+        yansi::enable();
+        let help = cmd.help_text();
         assert!(
             help.contains("[default: 42]"),
             "default hint should appear in output; got:\n{help}"
@@ -1214,21 +1284,32 @@ name: MY_TOKEN
     fn test_help_text_plain_and_ansi_same_structure() {
         // Both plain and ANSI outputs should contain the same sections and content.
         let cmd = make_full_cmd();
-        let plain = cmd.help_text(false);
-        let ansi_out = cmd.help_text(true);
+        yansi::disable();
+        let plain = cmd.help_text();
+        yansi::enable();
+        let ansi_out = cmd.help_text();
 
-        // Key identifiers present in both.
+        // Key identifiers present in both. Tags are excluded — they are search
+        // metadata and are not rendered in --help output.
         for needle in &[
             "Arguments:",
             "Options:",
             "Environment:",
-            "Tags:",
             "repo",
             "GITHUB_TOKEN",
         ] {
             assert!(plain.contains(needle), "plain output missing {needle}");
             assert!(ansi_out.contains(needle), "ansi output missing {needle}");
         }
+        // Tags must not appear in either rendering.
+        assert!(
+            !plain.contains("Tags:"),
+            "plain output must not contain Tags:"
+        );
+        assert!(
+            !ansi_out.contains("Tags:"),
+            "ansi output must not contain Tags:"
+        );
     }
 
     // ── LlmConfig deserialization ─────────────────────────────────────────────
@@ -1240,7 +1321,7 @@ provider: openai
 model: gpt-4o
 params: "--max-tokens 1000"
 "#;
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "openai");
         assert_eq!(config.model, "gpt-4o");
         assert_eq!(config.params, "--max-tokens 1000");
@@ -1249,7 +1330,7 @@ params: "--max-tokens 1000"
     #[test]
     fn test_llm_config_deserialize_defaults() {
         let yaml = "{}";
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "claude");
         assert!(config.model.is_empty());
         assert!(config.params.is_empty());
@@ -1258,7 +1339,7 @@ params: "--max-tokens 1000"
     #[test]
     fn test_llm_config_deserialize_provider_only() {
         let yaml = "provider: gemini";
-        let config: LlmConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: LlmConfig = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.provider, "gemini");
         assert!(config.model.is_empty());
         assert!(config.params.is_empty());
@@ -1268,7 +1349,7 @@ params: "--max-tokens 1000"
     fn test_deserialize_ignores_pipe_field() {
         // YAML with pipe: true must deserialize without error. Field is silently ignored.
         let yaml = "name: hello\ndescription: test\npipe: true\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        let def: CommandDef = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(def.name, "hello");
     }
 
@@ -1276,7 +1357,7 @@ params: "--max-tokens 1000"
     fn test_deserialize_ignores_sequential_field() {
         // YAML with sequential: true must deserialize without error. Field is silently ignored.
         let yaml = "name: hello\ndescription: test\nsequential: true\n";
-        let def: CommandDef = serde_yaml_ng::from_str(yaml).unwrap();
+        let def: CommandDef = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(def.name, "hello");
     }
 

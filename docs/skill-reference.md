@@ -29,7 +29,7 @@ echo "Hello, {{who}}!"
 
 Spaces create namespaces: `"gh issue-body"` registers as `creft gh issue-body`. The name maps to a filesystem path: `"gh issue-body"` stores as `.creft/commands/gh/issue-body.md`.
 
-Names cannot match any built-in creft subcommand: `add`, `list`, `show`, `edit`, `rm`, `cat`, `up`, `help`, `version`, `install`, `update`, `uninstall`, `init`, `doctor`.
+Names cannot match any built-in creft subcommand: `cmd`, `command`, `plugins`, `settings`, `up`, `help`, `version`, `init`, `doctor`.
 
 ```yaml
 name: deploy
@@ -161,7 +161,6 @@ Each fenced code block in the skill body is an executable step. The language tag
 | `python`, `python3` | `python3` | With deps: `uv run --with` |
 | `node`, `javascript`, `js` | `node` | With deps: `npm install` + `NODE_PATH` |
 | `typescript`, `ts` | `npx tsx` | Requires `npx` and `tsx` |
-| `ruby`, `rb` | `ruby` | |
 | `perl` | `perl` | |
 | `llm` | Provider CLI | See [LLM Blocks](#llm-blocks) |
 | `docs` | Not executed | Shown only in `--help` output |
@@ -194,19 +193,29 @@ Summarize these warnings in one paragraph: {{prev}}
 |---|---|
 | `0` | Success. Continue to the next block. |
 | `1`–`98` | Error. Stop the pipeline and propagate the exit code. |
-| `99` | Early successful return. Stop the pipeline; creft exits 0. |
+| `99` | **Deprecated.** Early return. Use `creft_exit` instead. |
 | `100+` | Error. Stop the pipeline and propagate the exit code. |
 
-**Exit 99** is a controlled early return. Use it when a block decides no further work is needed and the caller should not see a failure. A common pattern: a guard block that exits 99 when a precondition is already satisfied, so the rest of the skill is skipped without error.
+### Early Exit
+
+Call `creft_exit` to stop the pipeline from inside a block:
+
+```bash
+creft_exit          # success, stop the pipeline, creft exits 0
+creft_exit 0        # same as above
+creft_exit 1        # failure, stop the pipeline, creft exits 1
+```
+
+`creft_exit` sends a structured message on the side channel and exits the block cleanly. Any stdout produced before the call is flushed and displayed.
 
 ```bash
 # Guard: skip the rest if already deployed
 if deployed_already; then
-  exit 99
+  creft_exit
 fi
 ```
 
-Exit 99 is an internal signal. Creft translates it to exit 0 before returning to the caller. The code never escapes to the parent shell.
+**Exit 99** is deprecated. It still works but prints a warning. Migrate to `creft_exit` for new skills.
 
 ---
 
@@ -340,7 +349,7 @@ Run `creft init` in a project directory to create a local `.creft/commands/` for
 
 **CREFT_HOME:** Set `$CREFT_HOME` to override both local and global roots. All skills resolve to `$CREFT_HOME` when this variable is set.
 
-**Packages:** Installed packages live under `.creft/packages/` or `~/.creft/packages/`. See `creft install --help`.
+**Packages:** Installed packages live under `.creft/packages/` or `~/.creft/packages/`. See `creft plugin install --help`.
 
 ---
 
@@ -350,7 +359,7 @@ Creft validates skills at save time. Use `--force` to skip all checks, or `--no-
 
 Validation runs:
 
-- **Syntax:** `bash -n` for shell blocks, `python3 -c "import ast; ast.parse(...)"` for Python, `node --check` for Node, `ruby -c` for Ruby.
+- **Syntax:** `bash -n` for shell blocks, `python3 -c "import ast; ast.parse(...)"` for Python, `node --check` for Node.
 - **Shellcheck:** Warnings (not errors) for shell blocks that pass syntax. Placeholders are replaced with valid tokens before shellcheck runs.
 - **Command availability:** Shell blocks are scanned for `creft <name>` invocations; referenced skills are checked for existence.
 - **Dependency resolution:** Python and Node packages declared in `# deps:` comments are checked against their package registries via HTTP. Shell commands are checked for presence on PATH.

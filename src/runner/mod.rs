@@ -7,7 +7,10 @@ use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
 
 mod blocks;
+#[cfg(unix)]
+pub(crate) mod channel;
 mod pipe;
+mod preamble;
 #[cfg(unix)]
 mod signal;
 mod substitute;
@@ -40,6 +43,13 @@ pub(crate) struct RunContext {
 
     /// Whether `--dry-run` was passed. Controls execution vs. print-only.
     dry_run: bool,
+
+    /// Caller's preferred shell (e.g., "zsh", "bash").
+    ///
+    /// When set, shell-family blocks (`bash`, `sh`, `zsh`) use this shell
+    /// instead of the block's declared language tag. Set from shell detection
+    /// at skill invocation time. `None` means use block language literally.
+    shell_preference: Option<String>,
 }
 
 impl RunContext {
@@ -56,7 +66,22 @@ impl RunContext {
             env,
             verbose,
             dry_run,
+            shell_preference: None,
         }
+    }
+
+    /// Set the caller's shell preference.
+    ///
+    /// When `Some(shell)`, shell-family code blocks run under the given shell
+    /// rather than the shell named in the block's language tag.
+    pub(crate) fn with_shell_preference(mut self, preference: Option<String>) -> Self {
+        self.shell_preference = preference;
+        self
+    }
+
+    /// Borrow the shell preference, if one was detected.
+    pub(crate) fn shell_preference(&self) -> Option<&str> {
+        self.shell_preference.as_deref()
     }
 
     /// Check whether cancellation has been requested.
@@ -117,55 +142,109 @@ pub(crate) const EARLY_EXIT: i32 = 99;
 /// Bound pairs (name → value) and any passthrough args.
 pub type BindResult = (Vec<(String, String)>, Vec<String>);
 
-/// Build a clap Command dynamically from a parsed command's definition.
-fn build_clap_command(cmd: &ParsedCommand) -> clap::Command {
-    let mut clap_cmd = clap::Command::new(cmd.def.name.clone())
-        .no_binary_name(true)
-        .disable_help_flag(true)
-        .disable_version_flag(true);
-
-    for arg_def in &cmd.def.args {
-        let mut clap_arg = clap::Arg::new(arg_def.name.clone()).action(clap::ArgAction::Set);
-        // An arg is required by clap only when the caller must provide it AND
-        // there is no frontmatter default to fall back to.
-        if arg_def.required && arg_def.default.is_none() {
-            clap_arg = clap_arg.required(true);
-        }
-        clap_cmd = clap_cmd.arg(clap_arg);
-    }
-
-    for flag_def in &cmd.def.flags {
-        let mut clap_arg = clap::Arg::new(flag_def.name.clone()).long(flag_def.name.clone());
-        if let Some(short) = &flag_def.short
-            && let Some(ch) = short.chars().next()
-        {
-            clap_arg = clap_arg.short(ch);
-        }
-        if flag_def.r#type == "bool" {
-            clap_arg = clap_arg.action(clap::ArgAction::SetTrue);
-        } else {
-            clap_arg = clap_arg.action(clap::ArgAction::Set);
-        }
-        clap_cmd = clap_cmd.arg(clap_arg);
-    }
-
-    clap_cmd
-}
-
-/// Parse raw CLI args using clap's builder API, validate, apply defaults.
+/// Parse raw CLI args using lexopt, validate values, and apply frontmatter defaults.
 ///
-/// Returns a vec of `(name, value)` pairs for template substitution.
-/// Unknown flags cause a parse error (no silent passthrough).
+/// Returns a vec of `(name, value)` pairs for template substitution plus any
+/// passthrough args (currently always empty — all args must match the definition).
+/// Unknown flags produce a parse error; there is no silent passthrough.
 pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindResult, CreftError> {
-    let clap_cmd = build_clap_command(cmd);
-    let matches = clap_cmd
-        .try_get_matches_from(raw_args)
-        .map_err(|e| CreftError::MissingArg(e.to_string()))?;
+    use lexopt::prelude::*;
+
+    // Raw parsed values collected during the lexopt loop.
+    // Flags are keyed by their long name.
+    let mut flag_values: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Tracks whether a bool flag was set (present = true).
+    let mut flag_bools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Positional values in arrival order.
+    let mut positional: Vec<String> = Vec::new();
+
+    // Build a lookup from short char → flag name so we can handle -v, -q, etc.
+    let short_to_flag: std::collections::HashMap<char, &str> = cmd
+        .def
+        .flags
+        .iter()
+        .filter_map(|f| {
+            f.short
+                .as_deref()
+                .and_then(|s| s.chars().next())
+                .map(|ch| (ch, f.name.as_str()))
+        })
+        .collect();
+
+    let mut parser = lexopt::Parser::from_args(raw_args.iter().map(String::as_str));
+
+    while let Some(arg) = parser
+        .next()
+        .map_err(|e| CreftError::MissingArg(e.to_string()))?
+    {
+        match arg {
+            Long(name) => {
+                // Convert to owned so we can call parser.value() without
+                // conflicting borrows from the Long(&str) lifetime.
+                let name = name.to_owned();
+                if let Some(flag_def) = cmd.def.flags.iter().find(|f| f.name == name) {
+                    if flag_def.r#type == "bool" {
+                        flag_bools.insert(flag_def.name.clone());
+                    } else {
+                        let err_name = name.clone();
+                        let val = parser
+                            .value()
+                            .map_err(|e| CreftError::MissingArg(e.to_string()))?
+                            .into_string()
+                            .map_err(|_| {
+                                CreftError::MissingArg(format!(
+                                    "--{err_name}: value contains invalid UTF-8"
+                                ))
+                            })?;
+                        flag_values.insert(flag_def.name.clone(), val);
+                    }
+                } else {
+                    return Err(CreftError::MissingArg(format!(
+                        "unexpected option --{name}"
+                    )));
+                }
+            }
+            Short(ch) => {
+                if let Some(&flag_name) = short_to_flag.get(&ch) {
+                    let flag_def = cmd
+                        .def
+                        .flags
+                        .iter()
+                        .find(|f| f.name == flag_name)
+                        .expect("short_to_flag built from cmd.def.flags; name must exist");
+                    if flag_def.r#type == "bool" {
+                        flag_bools.insert(flag_def.name.clone());
+                    } else {
+                        let val = parser
+                            .value()
+                            .map_err(|e| CreftError::MissingArg(e.to_string()))?
+                            .into_string()
+                            .map_err(|_| {
+                                CreftError::MissingArg(format!(
+                                    "-{ch}: value contains invalid UTF-8"
+                                ))
+                            })?;
+                        flag_values.insert(flag_def.name.clone(), val);
+                    }
+                } else {
+                    return Err(CreftError::MissingArg(format!("unexpected option -{ch}")));
+                }
+            }
+            Value(v) => {
+                let s = v.into_string().map_err(|_| {
+                    CreftError::MissingArg("positional argument contains invalid UTF-8".to_string())
+                })?;
+                positional.push(s);
+            }
+        }
+    }
 
     let mut pairs: Vec<(String, String)> = Vec::new();
 
-    for arg_def in &cmd.def.args {
-        let val = if let Some(v) = matches.get_one::<String>(&arg_def.name) {
+    // Bind positional args in declaration order.
+    for (i, arg_def) in cmd.def.args.iter().enumerate() {
+        let val = if let Some(v) = positional.get(i) {
             v.clone()
         } else if let Some(d) = &arg_def.default {
             d.clone()
@@ -178,7 +257,7 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             return Err(CreftError::MissingArg(arg_def.name.clone()));
         };
 
-        // Regex validation — skip when optional arg was not provided (empty default)
+        // Regex validation — skip when optional arg was not provided (value is empty).
         if let Some(pattern) = &arg_def.validation
             && (!val.is_empty() || arg_def.required)
         {
@@ -197,10 +276,11 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
         pairs.push((arg_def.name.clone(), val));
     }
 
+    // Bind flags in declaration order.
     for flag_def in &cmd.def.flags {
         let val = if flag_def.r#type == "bool" {
-            matches.get_flag(&flag_def.name).to_string()
-        } else if let Some(v) = matches.get_one::<String>(&flag_def.name) {
+            flag_bools.contains(&flag_def.name).to_string()
+        } else if let Some(v) = flag_values.get(&flag_def.name) {
             v.clone()
         } else if let Some(d) = &flag_def.default {
             d.clone()
@@ -210,7 +290,7 @@ pub fn parse_and_bind(cmd: &ParsedCommand, raw_args: &[String]) -> Result<BindRe
             String::new()
         };
 
-        // Regex validation for string flags — skip when empty default (not provided)
+        // Regex validation for string flags — skip when empty (not provided).
         if flag_def.r#type != "bool"
             && let Some(pattern) = &flag_def.validation
             && !val.is_empty()
@@ -253,7 +333,6 @@ pub(crate) fn interpreter(lang: &str) -> &str {
         "python3" => "python3",
         "node" | "javascript" | "js" => "node",
         "typescript" | "ts" => "npx tsx",
-        "ruby" | "rb" => "ruby",
         "perl" => "perl",
         other => other,
     }
@@ -266,7 +345,6 @@ pub(crate) fn extension(lang: &str) -> &str {
         "python" | "python3" => "py",
         "node" | "javascript" | "js" => "js",
         "typescript" | "ts" => "ts",
-        "ruby" | "rb" => "rb",
         "perl" => "pl",
         other => other,
     }
@@ -274,10 +352,16 @@ pub(crate) fn extension(lang: &str) -> &str {
 
 /// Create a temporary script file for a code block.
 ///
+/// When `preamble` is `Some`, the preamble is written before `expanded_code`.
+/// If `expanded_code` starts with a shebang (`#!`), the shebang line is
+/// written first and the preamble follows it — so the kernel's script loader
+/// sees the interpreter directive at byte 0.
+///
 /// Returns the temp file handle (must be kept alive until the child exits).
 pub(crate) fn prepare_block_script(
     block: &CodeBlock,
     expanded_code: &str,
+    preamble: Option<&str>,
 ) -> Result<tempfile::NamedTempFile, CreftError> {
     let ext = extension(&block.lang);
     let mut tmp = tempfile::Builder::new()
@@ -286,8 +370,29 @@ pub(crate) fn prepare_block_script(
         .tempfile()
         .map_err(CreftError::Io)?;
 
-    tmp.write_all(expanded_code.as_bytes())
-        .map_err(CreftError::Io)?;
+    if let Some(pre) = preamble {
+        // If the script opens with a shebang, the kernel requires it at
+        // byte 0. Split the shebang off, write it, then inject the preamble
+        // before the rest of the user code.
+        if expanded_code.starts_with("#!") {
+            let (shebang_line, rest) = expanded_code
+                .split_once('\n')
+                .unwrap_or((expanded_code, ""));
+            tmp.write_all(shebang_line.as_bytes())
+                .map_err(CreftError::Io)?;
+            tmp.write_all(b"\n").map_err(CreftError::Io)?;
+            tmp.write_all(pre.as_bytes()).map_err(CreftError::Io)?;
+            tmp.write_all(rest.as_bytes()).map_err(CreftError::Io)?;
+        } else {
+            tmp.write_all(pre.as_bytes()).map_err(CreftError::Io)?;
+            tmp.write_all(expanded_code.as_bytes())
+                .map_err(CreftError::Io)?;
+        }
+    } else {
+        tmp.write_all(expanded_code.as_bytes())
+            .map_err(CreftError::Io)?;
+    }
+
     tmp.flush().map_err(CreftError::Io)?;
 
     Ok(tmp)
@@ -417,7 +522,8 @@ fn execute_block(
         return Err(CreftError::EarlyExit);
     }
 
-    let tmp = prepare_block_script(block, code)?;
+    let pre = preamble::for_language(&block.lang);
+    let tmp = prepare_block_script(block, code, pre.as_deref())?;
     let tmp_path = tmp.path().to_path_buf();
 
     let stdin_cfg = if stdin_data.is_some() {
@@ -425,6 +531,11 @@ fn execute_block(
     } else {
         std::process::Stdio::inherit()
     };
+
+    // Create the side channel before spawning so the child's pipe ends are
+    // ready for inheritance via pre_exec/dup2.
+    #[cfg(unix)]
+    let mut side_channel = channel::SideChannel::new().map_err(CreftError::Io)?;
 
     let (mut child, _node_deps_dir) = spawn_block(
         block,
@@ -436,7 +547,55 @@ fn execute_block(
         None, // single-block mode: no process group management
         #[cfg(unix)]
         false, // single-block mode: do not suppress SIGINT
+        #[cfg(unix)]
+        Some(&side_channel),
     )?;
+
+    // After spawn, close the parent's copies of the child's pipe ends.
+    // If the parent keeps them open, the control-pipe reader will never
+    // see EOF (the parent's write end keeps the pipe alive).
+    #[cfg(unix)]
+    side_channel.close_child_ends();
+
+    // Spawn the side-channel reader thread that parses NDJSON from fd 3
+    // and renders print/status messages to the terminal via stderr.
+    // Runs concurrently with stdout capture so neither pipe blocks.
+    //
+    // Interactive prompts are only valid when the child's stdin is the
+    // terminal (stdin_data is None). If stdin is piped, creft is using
+    // the child's stdin for data — interactive reading from the same
+    // terminal is not possible.
+    #[cfg(unix)]
+    let (reader_thread, prompt_thread, exit_signal) = {
+        let ctrl_reader = side_channel
+            .take_control_reader()
+            .expect("control reader taken exactly once per block");
+        let resp_writer_fd = side_channel
+            .take_response_writer()
+            .expect("response writer taken exactly once per block");
+        let writer = std::sync::Arc::new(channel::TerminalWriter::new());
+
+        // Set up a channel so the reader thread can forward prompt messages
+        // to the prompt handler thread.
+        let (prompt_tx, prompt_rx) = std::sync::mpsc::channel::<channel::ChannelMessage>();
+
+        // Interactive prompts require an unpiped stdin (terminal access).
+        let interactive = stdin_data.is_none();
+
+        let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
+        let reader = channel::spawn_reader(
+            ctrl_reader,
+            std::sync::Arc::clone(&writer),
+            Some(prompt_tx),
+            // The reader does not write responses directly — the prompt
+            // handler thread owns the response writer.
+            None,
+            Some(Arc::clone(&exit_signal)),
+        );
+        let prompter =
+            channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
+        (reader, prompter, exit_signal)
+    };
 
     // When prev_output data must be written to the child's stdin, do it on a
     // background thread so that stdout draining (via wait_with_output) and
@@ -474,7 +633,53 @@ fn execute_block(
             .map_err(CreftError::Io)?;
     }
 
+    // Join the reader thread after the child has exited and stdout has been
+    // drained. The child's exit closes its fd 3 write end; close_child_ends()
+    // above closed the parent's copy, so the reader will have seen EOF.
+    // When the reader exits it drops prompt_tx, which closes the mpsc channel
+    // and causes the prompt handler thread to exit.
+    // Joining here ensures all side-channel messages are rendered before
+    // the function returns, and that the exit_signal slot is final before
+    // we read it below.
+    #[cfg(unix)]
+    {
+        reader_thread
+            .join()
+            .expect("side-channel reader thread panicked");
+        // Join the prompt handler after the reader: the reader exits first
+        // (closes prompt_tx), which signals the prompt handler to finish.
+        prompt_thread
+            .join()
+            .expect("side-channel prompt handler thread panicked");
+    }
+
+    // Check the creft_exit side-channel signal before the exit-99 check.
+    // creft_exit causes the block to exit 0, so exit_code_of returns Some(0),
+    // not Some(99). There is no ambiguity between the two paths.
+    #[cfg(unix)]
+    {
+        let signal_code = exit_signal
+            .lock()
+            .expect("exit signal lock poisoned")
+            .take();
+        if let Some(code) = signal_code {
+            // Flush any stdout the block produced before creft_exit.
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            print!("{stdout}");
+            if code == 0 {
+                return Err(CreftError::EarlyExit);
+            } else {
+                return Err(CreftError::ExecutionFailed {
+                    block: block_idx,
+                    lang: block.lang.clone(),
+                    code,
+                });
+            }
+        }
+    }
+
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
+        eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
         // Print any output produced before the early exit so it is not lost.
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         print!("{}", stdout);
@@ -1356,13 +1561,11 @@ mod tests {
         assert_eq!(extension("js"), "js");
         assert_eq!(extension("typescript"), "ts");
         assert_eq!(extension("ts"), "ts");
-        assert_eq!(extension("ruby"), "rb");
-        assert_eq!(extension("rb"), "rb");
         assert_eq!(extension("perl"), "pl");
         assert_eq!(extension("unknown"), "unknown");
     }
 
-    // ---- interpreter mapping for ts/ruby/perl ----
+    // ---- interpreter mapping for ts/perl ----
 
     #[rstest]
     #[case::sh("sh", "sh")]
@@ -1372,8 +1575,6 @@ mod tests {
     #[case::js("js", "node")]
     #[case::typescript("typescript", "npx tsx")]
     #[case::ts("ts", "npx tsx")]
-    #[case::ruby("ruby", "ruby")]
-    #[case::rb("rb", "ruby")]
     #[case::perl("perl", "perl")]
     fn interpreter_maps_lang_to_executable(#[case] lang: &str, #[case] expected: &str) {
         assert_eq!(interpreter(lang), expected);
@@ -1846,5 +2047,89 @@ mod tests {
         let pairs = vec![("format".to_string(), String::new())];
         let result = bound_pairs_to_env(&pairs);
         assert_eq!(result, vec![("FORMAT".to_string(), String::new())]);
+    }
+
+    // ---- prepare_block_script ----
+
+    fn bash_block() -> CodeBlock {
+        CodeBlock {
+            lang: "bash".into(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        }
+    }
+
+    /// With no preamble, the file contains exactly the expanded code.
+    #[test]
+    fn prepare_block_script_none_preamble_writes_code_only() {
+        let block = bash_block();
+        let code = "echo hello\n";
+        let tmp = prepare_block_script(&block, code, None).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, code);
+    }
+
+    /// With a preamble, the preamble is written before the code.
+    #[test]
+    fn prepare_block_script_some_preamble_prepends_preamble() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "echo hello\n";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "# preamble\necho hello\n");
+    }
+
+    /// When the code starts with a shebang, the shebang is placed first,
+    /// then the preamble, then the remainder of the code.
+    #[test]
+    fn prepare_block_script_shebang_placed_before_preamble() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "#!/bin/bash\necho hello\n";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "#!/bin/bash\n# preamble\necho hello\n");
+    }
+
+    /// A shebang-only script (no trailing newline after shebang) is handled
+    /// without panicking — remainder is empty.
+    #[test]
+    fn prepare_block_script_shebang_only_no_panic() {
+        let block = bash_block();
+        let preamble = "# preamble\n";
+        let code = "#!/bin/bash";
+        let tmp = prepare_block_script(&block, code, Some(preamble)).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, "#!/bin/bash\n# preamble\n");
+    }
+
+    /// Without a preamble, a shebang-prefixed code is written unchanged.
+    #[test]
+    fn prepare_block_script_shebang_without_preamble_unchanged() {
+        let block = bash_block();
+        let code = "#!/bin/bash\necho hi\n";
+        let tmp = prepare_block_script(&block, code, None).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(contents, code);
+    }
+
+    /// The file extension matches the block's language.
+    #[test]
+    fn prepare_block_script_file_has_correct_extension() {
+        let block = CodeBlock {
+            lang: "python".into(),
+            code: String::new(),
+            deps: vec![],
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        let tmp = prepare_block_script(&block, "print('hi')\n", None).unwrap();
+        assert!(
+            tmp.path().extension().map(|e| e == "py").unwrap_or(false),
+            "python blocks must produce .py temp files"
+        );
     }
 }

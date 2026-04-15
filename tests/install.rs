@@ -46,7 +46,7 @@ fn plugin_install_repo_without_manifest_fails() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
 
-    // Init a git repo but do NOT add creft.yaml.
+    // Init a git repo without a .creft/catalog.json manifest.
     std::process::Command::new("git")
         .args(["init"])
         .current_dir(path)
@@ -361,50 +361,49 @@ fn plugin_install_respects_creft_home() {
     );
 }
 
-// ── deprecated root alias tests ────────────────────────────────────────────────
+// ── root alias removal tests ───────────────────────────────────────────────────
 
-/// `creft install <url>` (deprecated) forwards to `creft plugin install` with a warning.
+/// `creft install <url>` is no longer a recognized command in v0.3.0 — it resolves
+/// as a user skill and fails with "command not found".
 #[test]
-fn deprecated_install_forwards_with_warning() {
-    let pkg_repo = create_test_package("deprecated-install-plugin", &[]);
+fn install_root_alias_removed() {
+    let pkg_repo = create_test_package("some-plugin", &[]);
     let creft_home = creft_env();
 
     creft_with(&creft_home)
         .args(["install", pkg_repo.path().to_str().unwrap()])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("deprecated"))
-        .stderr(predicate::str::contains("creft plugin install"))
-        .stderr(predicate::str::contains(
-            "installed: deprecated-install-plugin",
-        ));
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("command not found"));
 }
 
-/// `creft update` (deprecated) forwards to `creft plugin update` with a warning.
+/// `creft update` is no longer a recognized command in v0.3.0 — it resolves
+/// as a user skill and fails with "command not found".
 #[test]
-fn deprecated_update_forwards_with_warning() {
+fn update_root_alias_removed() {
     let creft_home = creft_env();
 
-    // No plugins installed — the forward still works and produces "no plugins installed".
     creft_with(&creft_home)
         .args(["update"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("deprecated"))
-        .stderr(predicate::str::contains("creft plugin update"));
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("command not found"));
 }
 
-/// `creft uninstall <name>` (deprecated) forwards to `creft plugin uninstall` with a warning.
+/// `creft uninstall <name>` is no longer a recognized command in v0.3.0 — it
+/// resolves as a user skill and fails with "command not found".
 #[test]
-fn deprecated_uninstall_forwards_with_warning() {
+fn uninstall_root_alias_removed() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
         .args(["uninstall", "nonexistent"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("deprecated"))
-        .stderr(predicate::str::contains("creft plugin uninstall"));
+        .code(2)
+        .stderr(predicate::str::contains("command not found"));
 }
 
 // ── reserved name tests ────────────────────────────────────────────────────────
@@ -428,9 +427,9 @@ fn formerly_reserved_names_are_now_valid_skill_names(#[case] name: &str) {
         .success();
 }
 
-/// `plugin` is now a reserved name (it is a built-in subcommand).
+/// `plugin` is a reserved name (it is a built-in subcommand).
 #[test]
-fn plugin_is_reserved() {
+fn plugins_is_reserved() {
     let creft_home = creft_env();
 
     creft_with(&creft_home)
@@ -457,11 +456,11 @@ fn plugin_is_reserved() {
 fn package_skill_resolves_and_runs() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("my-legacy-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: my-legacy-pkg\nversion: 1.0.0\ndescription: legacy package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"my-legacy-pkg","description":"legacy package","plugins":[{"name":"my-legacy-pkg","source":".","description":"legacy package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -488,13 +487,15 @@ fn package_nested_skill_resolves_and_runs() {
         .join("deploy");
     std::fs::create_dir_all(&pkg_dir).unwrap();
 
+    let nested_catalog_dir = creft_home
+        .path()
+        .join("packages")
+        .join("nested-pkg")
+        .join(".creft");
+    std::fs::create_dir_all(&nested_catalog_dir).unwrap();
     std::fs::write(
-        creft_home
-            .path()
-            .join("packages")
-            .join("nested-pkg")
-            .join("creft.yaml"),
-        "name: nested-pkg\nversion: 1.0.0\ndescription: nested package\n",
+        nested_catalog_dir.join("catalog.json"),
+        r#"{"name":"nested-pkg","description":"nested package","plugins":[{"name":"nested-pkg","source":".","description":"nested package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -515,11 +516,11 @@ fn package_nested_skill_resolves_and_runs() {
 fn package_appears_in_list_output() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("listable-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: listable-pkg\nversion: 1.0.0\ndescription: listable package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"listable-pkg","description":"listable package","plugins":[{"name":"listable-pkg","source":".","description":"listable package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -555,7 +556,10 @@ fn plugin_install_bare_name_without_slash_fails() {
         .stderr(predicate::str::contains("not a valid plugin source"));
 }
 
-/// Multi-plugin repo without `--plugin` returns an error listing available plugins.
+/// Multi-plugin repo accessed by full URL returns an error directing to the shorthand format.
+///
+/// Without the `--plugin` flag, `creft plugin install <url>` cannot select one plugin from
+/// a multi-plugin repo. Use `creft plugin install owner/<name>` instead.
 #[test]
 fn plugin_install_multi_plugin_repo_without_filter_fails() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
@@ -566,12 +570,17 @@ fn plugin_install_multi_plugin_repo_without_filter_fails() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("Use --plugin"));
+        .stderr(predicate::str::contains(
+            "Use 'creft plugin install owner/<name>'",
+        ));
 }
 
-/// Multi-plugin repo with `--plugin <name>` installs only the named plugin.
+/// `--plugin` is no longer a valid flag; it is rejected with an unknown-option error.
+///
+/// Multi-plugin repos accessed by full URL are not supported without the shorthand format.
+/// Users should use `creft plugin install owner/<name>` to select a specific plugin.
 #[test]
-fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
+fn plugin_install_plugin_flag_is_rejected() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha"), ("beta", "plugins/beta")]);
     let creft_home = creft_env();
 
@@ -584,18 +593,13 @@ fn plugin_install_multi_plugin_repo_with_filter_installs_selected() {
             "alpha",
         ])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("installed: alpha"));
-
-    // Only alpha is in the plugins dir; beta is not.
-    let plugins_dir = creft_home.path().join("plugins");
-    assert!(plugins_dir.join("alpha").exists());
-    assert!(!plugins_dir.join("beta").exists());
+        .failure()
+        .stderr(predicate::str::contains("invalid option"));
 }
 
-/// Multi-plugin repo with `--plugin <name>` that does not exist returns PluginNotInCatalog.
+/// Short `-p` flag is also rejected as an unknown flag.
 #[test]
-fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
+fn plugin_install_short_p_flag_is_rejected() {
     let repo = create_multi_plugin_repo(&[("alpha", "plugins/alpha")]);
     let creft_home = creft_env();
 
@@ -604,18 +608,17 @@ fn plugin_install_multi_plugin_repo_nonexistent_plugin_fails() {
             "plugin",
             "install",
             repo.path().to_str().unwrap(),
-            "--plugin",
-            "nonexistent",
+            "-p",
+            "alpha",
         ])
         .assert()
         .failure()
-        .code(2)
-        .stderr(predicate::str::contains("not found in catalog"));
+        .stderr(predicate::str::contains("invalid option"));
 }
 
-/// A repo missing both `.creft/catalog.json` and `creft.yaml` returns ManifestNotFound.
+/// A repo missing `.creft/catalog.json` returns ManifestNotFound.
 #[test]
-fn plugin_install_repo_without_catalog_or_yaml_fails() {
+fn plugin_install_repo_without_catalog_fails() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
 
@@ -679,11 +682,11 @@ fn plugin_install_github_shorthand_routes_to_github() {
 fn package_missing_skill_returns_command_not_found() {
     let creft_home = creft_env();
     let pkg_dir = creft_home.path().join("packages").join("err-pkg");
-    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
 
     std::fs::write(
-        pkg_dir.join("creft.yaml"),
-        "name: err-pkg\nversion: 1.0.0\ndescription: error package\n",
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"err-pkg","description":"error package","plugins":[{"name":"err-pkg","source":".","description":"error package","version":"1.0.0","tags":[]}]}"#,
     )
     .unwrap();
 

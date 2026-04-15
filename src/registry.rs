@@ -9,18 +9,16 @@ use crate::markdown;
 use crate::model::{AppContext, CommandDef, ParsedCommand, Scope};
 use crate::store;
 
-/// Manifest from a skill package's `creft.yaml` file.
-#[derive(Debug, Clone, Deserialize)]
+/// Manifest for an installed skill package.
+#[derive(Debug, Clone)]
 pub struct PackageManifest {
     pub name: String,
     pub version: String,
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub description: String,
-    #[serde(default)]
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub author: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)] // deserialized from manifest
+    #[allow(dead_code)] // parsed from manifest YAML
     pub license: Option<String>,
 }
 
@@ -109,8 +107,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CreftError> {
 
 /// Read a `PackageManifest` from an installed package directory.
 ///
-/// Tries `.creft/catalog.json` first (new format), falling back to `creft.yaml`
-/// (legacy format) for backward compatibility. Returns `None` if neither exists.
+/// Reads `.creft/catalog.json`. Returns `None` if no catalog exists.
 pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, String>> {
     let catalog_path = path.join(".creft").join("catalog.json");
     if catalog_path.exists() {
@@ -138,26 +135,13 @@ pub(crate) fn read_manifest_from(path: &Path) -> Option<Result<PackageManifest, 
         );
     }
 
-    let yaml_path = path.join("creft.yaml");
-    if yaml_path.exists() {
-        return Some(
-            std::fs::read_to_string(&yaml_path)
-                .map_err(|e| e.to_string())
-                .and_then(|content| {
-                    serde_yaml_ng::from_str::<PackageManifest>(&content).map_err(|e| e.to_string())
-                }),
-        );
-    }
-
     None
 }
 
 /// List all installed packages in the given scope.
 ///
-/// Reads `ctx.packages_dir_for(scope)` and parses the manifest for each
-/// subdirectory. Tries `.creft/catalog.json` first; falls back to `creft.yaml`
-/// for packages installed before the catalog format was introduced.
-/// Entries that fail to parse are skipped with a warning to stderr.
+/// Reads `ctx.packages_dir_for(scope)` and parses `.creft/catalog.json` for each
+/// subdirectory. Entries that fail to parse are skipped with a warning to stderr.
 pub fn list_packages_in(
     ctx: &AppContext,
     scope: Scope,
@@ -198,7 +182,7 @@ pub fn list_packages_in(
 /// Skill names are derived from file paths relative to the package root —
 /// frontmatter `name` fields are ignored.
 ///
-/// Skips `creft.yaml`, dotfiles, and dot-directories.
+/// Skips dotfiles and dot-directories.
 /// Enforces a 3-level nesting cap: files nested more than 3 directory levels
 /// deep within the package root are skipped (to match CLI resolution limits).
 pub fn list_package_skills_in(
@@ -480,7 +464,7 @@ pub fn plugin_install(
             None => {
                 let names: Vec<&str> = cat.plugins.iter().map(|p| p.name.as_str()).collect();
                 return Err(CreftError::InvalidManifest(format!(
-                    "repository contains {} plugins: {}. Use --plugin <name> to install a specific one",
+                    "repository contains {} plugins: {}. Use 'creft plugin install owner/<name>' to install a specific one",
                     cat.plugins.len(),
                     names.join(", ")
                 )));
@@ -602,11 +586,11 @@ pub fn install_from_path(
 ///
 /// `creft/<plugin>` resolves to the official creft repo. All other
 /// `owner/repo` patterns resolve to `https://github.com/<owner>/<repo>`.
+/// The plugin name is always derived from the path segment after `/`.
 /// Bare names (no `/`) return an error.
 pub fn install_by_name(
     ctx: &AppContext,
     qualified_name: &str,
-    plugin_filter: Option<&str>,
 ) -> Result<InstalledPackage, CreftError> {
     let Some(slash_pos) = qualified_name.find('/') else {
         return Err(CreftError::InvalidManifest(format!(
@@ -621,16 +605,16 @@ pub fn install_by_name(
         // creft shorthand: clone the official repo and install the named plugin.
         plugin_install(ctx, CREFT_REPO, Some(plugin))
     } else {
-        // Treat as GitHub owner/repo shorthand.
+        // Treat as GitHub owner/repo shorthand. The plugin name is the repo
+        // name (the part after `/`), which is always derivable from the source.
         let url = format!("https://github.com/{owner}/{plugin}");
-        plugin_install(ctx, &url, plugin_filter)
+        plugin_install(ctx, &url, Some(plugin))
     }
 }
 
 /// Update an installed plugin by running `git pull --ff-only` in its directory.
 ///
-/// After pulling, re-reads the manifest from `.creft/catalog.json` or `creft.yaml`
-/// (whichever is present) to return updated metadata.
+/// After pulling, re-reads the manifest from `.creft/catalog.json` to return updated metadata.
 pub fn plugin_update(ctx: &AppContext, name: &str) -> Result<InstalledPackage, CreftError> {
     let plugin_path = ctx.plugins_dir()?.join(name);
     if !plugin_path.exists() {
@@ -849,7 +833,7 @@ pub struct PluginSettings {
 /// Deserialization: `true` → `All(true)`, `["cmd1", "cmd2"]` → `Commands(vec)`.
 /// `false` is rejected by `PluginSettings::validate`. An empty command list
 /// is normalized to `All(true)` by `validate` — key presence means active.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ActivationEntry {
     /// All commands from this plugin are active.
@@ -921,9 +905,29 @@ pub fn save_settings(
     Ok(())
 }
 
+/// Activate all commands for an already-validated installed plugin.
+///
+/// Writes `All(true)` into the plugin's activation entry and persists settings.
+/// Callers must verify the plugin directory exists before calling this.
+fn activate_plugin_all(
+    ctx: &AppContext,
+    plugin_name: &str,
+    scope: Scope,
+) -> Result<(), CreftError> {
+    let mut settings = load_settings(ctx, scope)?;
+    settings
+        .activated
+        .insert(plugin_name.to_string(), ActivationEntry::All(true));
+    save_settings(ctx, scope, &settings)
+}
+
 /// Activate a command or all commands from an installed plugin.
 ///
-/// `target` is either `plugin` (activate all) or `plugin/cmd` (one command).
+/// `target` is either `plugin` (activate all), `plugin/cmd` (one command),
+/// or `owner/plugin` (qualified install name — the owner prefix is stripped).
+/// The qualified-name form lets callers use `creft plugin activate creft/ask`
+/// interchangeably with `creft plugin activate ask`.
+///
 /// Validates the plugin is installed and the command exists before writing.
 /// Writes activation state to the `settings.json` for the given scope.
 pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), CreftError> {
@@ -932,6 +936,15 @@ pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), Cref
     let plugins_dir = ctx.plugins_dir()?;
     let plugin_dir = plugins_dir.join(plugin_name);
     if !plugin_dir.is_dir() {
+        // The first segment isn't an installed plugin. If the input looks like
+        // `owner/plugin` (i.e. cmd_name is Some and that name IS installed),
+        // treat it as a qualified install name and activate the second segment.
+        if let Some(qualified_plugin) = cmd_name {
+            let alt_dir = plugins_dir.join(qualified_plugin);
+            if alt_dir.is_dir() {
+                return activate_plugin_all(ctx, qualified_plugin, scope);
+            }
+        }
         return Err(CreftError::PackageNotFound(plugin_name.to_string()));
     }
 
@@ -1209,7 +1222,7 @@ mod tests {
     #[test]
     fn test_manifest_full_fields() {
         let yaml = "name: k8s-tools\nversion: 0.1.0\ndescription: Kubernetes skills\nauthor: someone\nlicense: MIT\n";
-        let manifest: PackageManifest = serde_yaml_ng::from_str(yaml).unwrap();
+        let manifest: PackageManifest = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(manifest.name, "k8s-tools");
         assert_eq!(manifest.version, "0.1.0");
         assert_eq!(manifest.description, "Kubernetes skills");
@@ -1220,7 +1233,7 @@ mod tests {
     #[test]
     fn test_manifest_optional_fields_absent() {
         let yaml = "name: my-pkg\nversion: 1.0.0\ndescription: A package\n";
-        let manifest: PackageManifest = serde_yaml_ng::from_str(yaml).unwrap();
+        let manifest: PackageManifest = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(manifest.name, "my-pkg");
         assert!(manifest.author.is_none());
         assert!(manifest.license.is_none());
@@ -1229,21 +1242,21 @@ mod tests {
     #[test]
     fn test_manifest_missing_required_field_name() {
         let yaml = "version: 1.0.0\ndescription: A package\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_manifest_missing_required_field_version() {
         let yaml = "name: my-pkg\ndescription: A package\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_manifest_missing_required_field_description() {
         let yaml = "name: my-pkg\nversion: 1.0.0\n";
-        let result: Result<PackageManifest, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<PackageManifest, crate::yaml::YamlError> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -1291,27 +1304,41 @@ mod tests {
         assert!(matches!(err, CreftError::InvalidManifest(_)));
     }
 
-    #[test]
-    fn test_validate_manifest_name_reserved_add() {
-        let err = validate_manifest_name("add").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    /// Top-level builtins are reserved and cannot be used as package names.
+    #[rstest]
+    #[case::add("add")]
+    #[case::list("list")]
+    #[case::show("show")]
+    #[case::remove("remove")]
+    #[case::plugin("plugin")]
+    #[case::settings("settings")]
+    #[case::up("up")]
+    #[case::help("help")]
+    #[case::version("version")]
+    #[case::init("init")]
+    #[case::doctor("doctor")]
+    #[case::completions("completions")]
+    fn reserved_builtins_are_rejected(#[case] name: &str) {
+        let err = validate_manifest_name(name).unwrap_err();
+        assert!(
+            matches!(err, CreftError::InvalidManifest(_)),
+            "{name} should be rejected as reserved"
+        );
     }
 
-    /// `install`, `update`, and `uninstall` are no longer reserved names.
-    /// Plugin management moved under `creft plugin`, freeing these names for skill authors.
+    /// Former namespace names (`cmd`, `plugins`) are no longer reserved and can be
+    /// used as package names.
     #[rstest]
+    #[case::cmd("cmd")]
+    #[case::plugins("plugins")]
     #[case::install("install")]
     #[case::update("update")]
     #[case::uninstall("uninstall")]
-    fn formerly_reserved_names_are_now_valid(#[case] name: &str) {
-        assert!(validate_manifest_name(name).is_ok());
-    }
-
-    #[test]
-    fn test_validate_manifest_name_plugin_is_reserved() {
-        // `plugin` is the new reserved name for the plugin management namespace.
-        let err = validate_manifest_name("plugin").unwrap_err();
-        assert!(matches!(err, CreftError::InvalidManifest(_)));
+    fn former_namespace_names_are_valid(#[case] name: &str) {
+        assert!(
+            validate_manifest_name(name).is_ok(),
+            "{name} should be valid as a package name"
+        );
     }
 
     // --- packages_dir (via AppContext) ---
@@ -1404,12 +1431,11 @@ mod tests {
     fn test_list_packages_returns_installed() {
         let dir = tempfile::TempDir::new().unwrap();
 
-        // Create a package directory with a creft.yaml
         let pkg_dir = dir.path().join("packages").join("my-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
         std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: my-pkg\nversion: 1.0.0\ndescription: A test package\n",
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"my-pkg","description":"A test package","plugins":[{"name":"my-pkg","source":".","description":"A test package","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
 
@@ -1429,17 +1455,17 @@ mod tests {
 
         // Valid package
         let pkg1 = dir.path().join("packages").join("good-pkg");
-        std::fs::create_dir_all(&pkg1).unwrap();
+        std::fs::create_dir_all(pkg1.join(".creft")).unwrap();
         std::fs::write(
-            pkg1.join("creft.yaml"),
-            "name: good-pkg\nversion: 1.0.0\ndescription: Good\n",
+            pkg1.join(".creft").join("catalog.json"),
+            r#"{"name":"good-pkg","description":"Good","plugins":[{"name":"good-pkg","source":".","description":"Good","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
 
-        // Invalid package — missing required fields
+        // Invalid package — malformed catalog.json
         let pkg2 = dir.path().join("packages").join("bad-pkg");
-        std::fs::create_dir_all(&pkg2).unwrap();
-        std::fs::write(pkg2.join("creft.yaml"), "not_valid_yaml: [unclosed").unwrap();
+        std::fs::create_dir_all(pkg2.join(".creft")).unwrap();
+        std::fs::write(pkg2.join(".creft").join("catalog.json"), "not valid json [").unwrap();
 
         let ctx = AppContext::for_test_with_creft_home(
             dir.path().to_path_buf(),
@@ -1450,22 +1476,16 @@ mod tests {
         assert_eq!(pkgs[0].manifest.name, "good-pkg");
     }
 
-    // --- read_manifest_from (Stage 3: catalog-first with creft.yaml fallback) ---
+    // --- read_manifest_from ---
 
     #[test]
-    fn read_manifest_from_prefers_catalog_json() {
+    fn read_manifest_from_reads_catalog_json() {
         let dir = tempfile::TempDir::new().unwrap();
         let catalog_dir = dir.path().join(".creft");
         std::fs::create_dir_all(&catalog_dir).unwrap();
         std::fs::write(
             catalog_dir.join("catalog.json"),
             r#"{"name":"my-pkg","description":"desc","plugins":[{"name":"my-pkg","source":".","description":"From catalog","version":"2.0.0","tags":[]}]}"#,
-        )
-        .unwrap();
-        // Also write creft.yaml — catalog.json should win.
-        std::fs::write(
-            dir.path().join("creft.yaml"),
-            "name: my-pkg\nversion: 1.0.0\ndescription: From yaml\n",
         )
         .unwrap();
 
@@ -1475,22 +1495,16 @@ mod tests {
     }
 
     #[test]
-    fn read_manifest_from_falls_back_to_creft_yaml() {
+    fn read_manifest_from_returns_none_when_no_manifest() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("creft.yaml"),
-            "name: old-pkg\nversion: 1.5.0\ndescription: Legacy package\n",
-        )
-        .unwrap();
-
-        let manifest = read_manifest_from(dir.path()).unwrap().unwrap();
-        assert_eq!(manifest.name, "old-pkg");
-        assert_eq!(manifest.version, "1.5.0");
+        assert!(read_manifest_from(dir.path()).is_none());
     }
 
     #[test]
-    fn read_manifest_from_returns_none_when_no_manifest() {
+    fn read_manifest_from_ignores_directory_without_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
+        // Directory exists but contains no .creft/catalog.json.
+        std::fs::create_dir_all(dir.path().join("some-files")).unwrap();
         assert!(read_manifest_from(dir.path()).is_none());
     }
 
@@ -1513,26 +1527,6 @@ mod tests {
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].manifest.name, "catalog-pkg");
         assert_eq!(pkgs[0].manifest.version, "3.0.0");
-    }
-
-    #[test]
-    fn list_packages_backward_compat_creft_yaml() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let pkg_dir = dir.path().join("packages").join("yaml-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: yaml-pkg\nversion: 1.0.0\ndescription: Legacy\n",
-        )
-        .unwrap();
-
-        let ctx = AppContext::for_test_with_creft_home(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
-        let pkgs = list_packages_in(&ctx, Scope::Global).unwrap();
-        assert_eq!(pkgs.len(), 1);
-        assert_eq!(pkgs[0].manifest.name, "yaml-pkg");
     }
 
     // --- list_package_skills ---
@@ -1621,18 +1615,19 @@ mod tests {
     }
 
     #[test]
-    fn test_list_package_skills_excludes_creft_yaml() {
+    fn test_list_package_skills_excludes_non_md_files() {
         let dir = tempfile::TempDir::new().unwrap();
 
         let pkg_dir = dir.path().join("packages").join("mypkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-
-        // creft.yaml — not a .md file, should be excluded by extension filter
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
         std::fs::write(
-            pkg_dir.join("creft.yaml"),
-            "name: mypkg\nversion: 1.0.0\ndescription: A package\n",
+            pkg_dir.join(".creft").join("catalog.json"),
+            r#"{"name":"mypkg","description":"","plugins":[{"name":"mypkg","source":".","description":"A package","version":"1.0.0","tags":[]}]}"#,
         )
         .unwrap();
+
+        // A non-.md file — should be excluded by extension filter
+        std::fs::write(pkg_dir.join("notes.txt"), "just some notes").unwrap();
 
         // Real skill
         std::fs::write(
@@ -2071,5 +2066,115 @@ mod tests {
         let local = ctx.packages_dir_for(Scope::Local).unwrap();
         let global = ctx.packages_dir_for(Scope::Global).unwrap();
         assert_eq!(local, global);
+    }
+
+    // --- activate: owner/plugin qualified name fallback ---
+
+    fn make_plugin_dir(creft_home: &std::path::Path, plugin_name: &str) {
+        let plugins = creft_home.join("plugins");
+        std::fs::create_dir_all(plugins.join(plugin_name)).unwrap();
+    }
+
+    fn make_plugin_skill(creft_home: &std::path::Path, plugin_name: &str, skill_file: &str) {
+        let plugin_dir = creft_home.join("plugins").join(plugin_name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(skill_file), b"---\nname: test\n---\n").unwrap();
+    }
+
+    fn activated_entry(ctx: &AppContext, plugin: &str) -> Option<ActivationEntry> {
+        let settings = load_settings(ctx, Scope::Global).unwrap();
+        settings.activated.get(plugin).cloned()
+    }
+
+    #[test]
+    fn activate_bare_plugin_name_activates_all_commands() {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::All(true)),
+        );
+    }
+
+    #[test]
+    fn activate_qualified_owner_plugin_strips_owner_and_activates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // "creft" is not an installed plugin, but "ask" is.
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "creft/ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::All(true)),
+        );
+        // The "creft" key must not appear in the activation map.
+        assert!(activated_entry(&ctx, "creft").is_none());
+    }
+
+    #[test]
+    fn activate_plugin_slash_cmd_activates_specific_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // "ask" is installed and has a "fetch.md" skill file.
+        make_plugin_skill(dir.path(), "ask", "fetch.md");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        activate(&ctx, "ask/fetch", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "ask"),
+            Some(ActivationEntry::Commands(vec!["fetch".to_string()])),
+        );
+    }
+
+    #[test]
+    fn activate_returns_package_not_found_when_neither_segment_is_installed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        let err = activate(&ctx, "creft/ask", Scope::Global).unwrap_err();
+        assert!(
+            matches!(err, CreftError::PackageNotFound(ref name) if name == "creft"),
+            "expected PackageNotFound(creft) when neither segment is installed; got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn activate_prefers_literal_interpretation_when_first_segment_is_installed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Both "creft" and "ask" are installed.
+        make_plugin_skill(dir.path(), "creft", "ask.md");
+        make_plugin_dir(dir.path(), "ask");
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        // "creft/ask" with "creft" installed → literal: plugin=creft, cmd=ask.
+        activate(&ctx, "creft/ask", Scope::Global).unwrap();
+
+        assert_eq!(
+            activated_entry(&ctx, "creft"),
+            Some(ActivationEntry::Commands(vec!["ask".to_string()])),
+        );
+        // "ask" plugin must not be touched.
+        assert!(activated_entry(&ctx, "ask").is_none());
     }
 }

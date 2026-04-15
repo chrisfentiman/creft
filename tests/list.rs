@@ -1,4 +1,4 @@
-//! Tests for `creft list`, `creft show`, `creft cat`, grouped output, drill-in, and namespace help.
+//! Tests for `creft list`, `creft show`, `creft show --blocks`, grouped output, drill-in, and namespace help.
 
 mod helpers;
 
@@ -7,7 +7,10 @@ use predicates::prelude::*;
 
 // ── list tests ────────────────────────────────────────────────────────────────
 
-/// `creft list` with an empty store reports that no commands exist.
+/// `creft list` with an empty skill store renders the Commands: section without a Skills: section.
+///
+/// Even with no user skills the root listing is always shown — the Skills: section is omitted
+/// when the store is empty, but the Commands: section (built-in commands) always appears.
 #[test]
 fn test_list_empty() {
     let dir = creft_env();
@@ -15,7 +18,9 @@ fn test_list_empty() {
         .args(["list"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("no commands found"));
+        .stdout(predicate::str::contains("Commands:"))
+        .stdout(predicate::str::contains("Skills:").not())
+        .stderr(predicate::str::is_empty());
 }
 
 /// After adding two commands, `creft list` shows both names.
@@ -110,9 +115,9 @@ fn test_show_not_found() {
         .code(2);
 }
 
-// ── cat tests ─────────────────────────────────────────────────────────────────
+// ── show --blocks tests ───────────────────────────────────────────────────────
 
-/// `creft cat <name>` prints the code block content without frontmatter.
+/// `creft show --blocks <name>` prints the code block content without frontmatter.
 #[test]
 fn test_cat_command() {
     let dir = creft_env();
@@ -124,7 +129,7 @@ fn test_cat_command() {
         .success();
 
     creft_with(&dir)
-        .args(["cat", "hello"])
+        .args(["show", "--blocks", "hello"])
         .assert()
         .success()
         .stdout(predicate::str::contains("echo hello"))
@@ -392,18 +397,18 @@ fn test_list_drill_into_namespace() {
 
     let stdout = String::from_utf8_lossy(&output);
 
-    // Full skill names appear with their descriptions.
+    // Relative skill names appear (namespace prefix is implicit from context).
     assert!(
-        stdout.contains("tavily search"),
-        "tavily search should appear in drill-in output; got: {stdout:?}"
+        stdout.contains("search"),
+        "search should appear in drill-in output; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Search the web"),
         "tavily search description should appear; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily crawl"),
-        "tavily crawl should appear in drill-in output; got: {stdout:?}"
+        stdout.contains("crawl"),
+        "crawl should appear in drill-in output; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Crawl a website"),
@@ -459,12 +464,12 @@ fn test_list_deep_namespace() {
     let aws_stdout = String::from_utf8_lossy(&aws_output);
 
     assert!(
-        aws_stdout.contains("aws s3"),
-        "aws s3 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
+        aws_stdout.contains("s3"),
+        "s3 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
     );
     assert!(
-        aws_stdout.contains("aws ec2"),
-        "aws ec2 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
+        aws_stdout.contains("ec2"),
+        "ec2 sub-namespace should appear when drilling into aws; got: {aws_stdout:?}"
     );
     // Leaf skills should not appear at this level.
     assert!(
@@ -492,16 +497,16 @@ fn test_list_deep_namespace() {
     let s3_stdout = String::from_utf8_lossy(&s3_output);
 
     assert!(
-        s3_stdout.contains("aws s3 copy"),
-        "aws s3 copy should appear in aws s3 drill-in; got: {s3_stdout:?}"
+        s3_stdout.contains("copy"),
+        "copy should appear in aws s3 drill-in; got: {s3_stdout:?}"
     );
     assert!(
         s3_stdout.contains("Copy objects between S3 buckets"),
         "aws s3 copy description should appear; got: {s3_stdout:?}"
     );
     assert!(
-        s3_stdout.contains("aws s3 sync"),
-        "aws s3 sync should appear in aws s3 drill-in; got: {s3_stdout:?}"
+        s3_stdout.contains("sync"),
+        "sync should appear in aws s3 drill-in; got: {s3_stdout:?}"
     );
     assert!(
         s3_stdout.contains("Sync a local directory to S3"),
@@ -514,16 +519,22 @@ fn test_list_deep_namespace() {
     );
 }
 
-// ── list output truncation and footer ─────────────────────────────────────────
+// ── list output wrapping ──────────────────────────────────────────────────────
 
-/// `creft list` with a skill that has a 100-char description shows "..." truncation.
+/// `creft list` with a long description wraps it across continuation lines
+/// instead of truncating with "...".
+///
+/// Skill name `long-desc-skill` (14 chars) gives a description column at
+/// `2 + 14 + 2 = 18`. The 80-column budget leaves 62 chars for the first
+/// line. A description of 100 chars with spaces must wrap — not truncate.
 #[test]
 fn test_list_long_description_truncated() {
     let dir = creft_env();
-    // 100-character description — over the 60-char display limit.
-    let long_desc = "a".repeat(100);
+    // Description is long enough to require wrapping (> 62 chars), uses spaces
+    // so wrap_description has word boundaries to break on.
+    let long_desc = "Deploy all services to the target environment and restart the load balancer with health checks";
     let markdown = format!(
-        "---\nname: truncated-skill\ndescription: {long_desc}\n---\n\n```bash\necho hi\n```\n"
+        "---\nname: long-desc-skill\ndescription: {long_desc}\n---\n\n```bash\necho hi\n```\n"
     );
 
     creft_with(&dir)
@@ -536,10 +547,11 @@ fn test_list_long_description_truncated() {
         .args(["list"])
         .assert()
         .success()
-        // The truncated output should contain "..." (ellipsis suffix).
-        .stdout(predicate::str::contains("..."))
-        // The full 100-char description must NOT appear verbatim.
-        .stdout(predicate::str::contains(long_desc).not());
+        // Wrapping must never produce "..." — that is truncation, not wrapping.
+        .stdout(predicate::str::contains("...").not())
+        // All words from the description must appear in full.
+        .stdout(predicate::str::contains("Deploy all services"))
+        .stdout(predicate::str::contains("health checks"));
 }
 
 /// `creft list` with a skill that has a short description shows it in full (no "...").
@@ -634,13 +646,13 @@ fn hidden_subcommand_excluded_from_namespace_drill_in() {
         "hooks namespace should show 1 skill (hidden guard excluded); got: {top_stdout:?}"
     );
 
-    // Drill-in: hooks deploy appears, hooks _guard does not.
+    // Drill-in: deploy appears (without namespace prefix), _guard does not.
     creft_with(&dir)
         .args(["list", "hooks"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("hooks deploy"))
-        .stdout(predicate::str::contains("hooks _guard").not());
+        .stdout(predicate::str::contains("deploy"))
+        .stdout(predicate::str::contains("_guard").not());
 }
 
 /// A namespace whose own token starts with `_` is entirely excluded from `creft list`.
@@ -672,11 +684,12 @@ fn explicit_hidden_prefix_shows_hidden_commands() {
         .assert()
         .success();
 
+    // The namespace is implicit from context — only the relative name appears.
     creft_with(&dir)
         .args(["list", "_private"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("_private mycommand"));
+        .stdout(predicate::str::contains("mycommand"));
 }
 
 /// A hidden command executes normally when called by name.
@@ -766,7 +779,7 @@ fn test_list_shows_footer_with_namespaces() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "See 'creft <skill> --help' for details.",
+            "See 'creft <command> --help' for details.",
         ));
 }
 
@@ -818,7 +831,7 @@ fn test_list_footer_always_shown_at_root() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "See 'creft <skill> --help' for details.",
+            "See 'creft <command> --help' for details.",
         ));
 }
 
@@ -992,32 +1005,32 @@ fn test_namespace_help() {
 
     let stdout = String::from_utf8_lossy(&output);
 
-    // Header line: "tavily — 3 skills"
+    // New format: Skills: header + usage line with namespace name.
     assert!(
-        stdout.contains("tavily"),
-        "namespace help should show namespace name; got: {stdout:?}"
+        stdout.contains("Skills:"),
+        "namespace help should show Skills: header; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("3 skills"),
-        "namespace help header should show skill count; got: {stdout:?}"
+        stdout.contains("creft tavily <command>"),
+        "namespace help should show usage line with namespace name; got: {stdout:?}"
     );
 
-    // Individual skills should be listed with descriptions.
+    // Individual skills appear by their relative name (namespace prefix is implicit).
     assert!(
-        stdout.contains("tavily search"),
-        "tavily search should appear in namespace help; got: {stdout:?}"
+        stdout.contains("search"),
+        "search should appear in namespace help; got: {stdout:?}"
     );
     assert!(
         stdout.contains("Search the web"),
         "tavily search description should appear; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily crawl"),
-        "tavily crawl should appear in namespace help; got: {stdout:?}"
+        stdout.contains("crawl"),
+        "crawl should appear in namespace help; got: {stdout:?}"
     );
     assert!(
-        stdout.contains("tavily extract"),
-        "tavily extract should appear in namespace help; got: {stdout:?}"
+        stdout.contains("extract"),
+        "extract should appear in namespace help; got: {stdout:?}"
     );
 }
 
@@ -1130,13 +1143,18 @@ fn help_subcommand_listing_suppresses_hidden_subcommands() {
 
     let stdout = String::from_utf8_lossy(&output);
 
+    // Under the `hooks` namespace, child skills display without the parent prefix.
     assert!(
-        stdout.contains("hooks deploy"),
-        "visible subcommand should appear in --help subcommand listing; got: {stdout:?}"
+        stdout.contains("deploy"),
+        "visible subcommand should appear in --help skill listing; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("hooks deploy"),
+        "parent prefix must be stripped from child skill names; got: {stdout:?}"
     );
     assert!(
         !stdout.contains("hooks _guard"),
-        "hidden subcommand must be suppressed from --help subcommand listing; got: {stdout:?}"
+        "hidden subcommand must be suppressed from --help skill listing; got: {stdout:?}"
     );
     assert!(
         !stdout.contains("_guard"),
@@ -1178,7 +1196,7 @@ fn test_list_has_skills_header() {
     );
 }
 
-/// `creft list <namespace>` drill-in prints "Skills in '<namespace>':" header.
+/// `creft list <namespace>` drill-in prints Skills: header, scoped usage, flags, and footer.
 #[test]
 fn test_list_drill_in_has_scoped_header() {
     let dir = creft_env();
@@ -1205,8 +1223,20 @@ fn test_list_drill_in_has_scoped_header() {
 
     let stdout = String::from_utf8_lossy(&output);
     assert!(
-        stdout.contains("Skills in 'tavily':"),
-        "drill-in should print scoped header; got: {stdout:?}"
+        stdout.contains("Skills:"),
+        "drill-in should print 'Skills:' header; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("creft tavily <command>"),
+        "drill-in should print scoped usage line; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "drill-in should print --dry-run flag; got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("creft tavily <command> --help"),
+        "drill-in should print scoped footer; got: {stdout:?}"
     );
 }
 
@@ -1423,7 +1453,10 @@ fn test_list_namespace_without_leaf_no_subskill_annotation() {
     );
 }
 
-/// `creft list` on empty store shows no "Skills:" header — early return fires first.
+/// `creft list` on empty store shows Commands: but no Skills: section.
+///
+/// When no user skills are installed the root listing renders the built-in Commands:
+/// section and omits the Skills: section entirely.
 #[test]
 fn test_list_empty_no_header() {
     let dir = creft_env();
@@ -1439,11 +1472,95 @@ fn test_list_empty_no_header() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        stderr.contains("no commands found"),
-        "empty list should print 'no commands found' to stderr; got: {stderr:?}"
+        stdout.contains("Commands:"),
+        "empty list should print Commands: header; got: {stdout:?}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "empty list should produce no stderr output; got: {stderr:?}"
     );
     assert!(
         !stdout.contains("Skills:"),
         "empty list should not print Skills: header; got: {stdout:?}"
     );
+}
+
+// ── list --names tests ────────────────────────────────────────────────────────
+
+/// `creft list --names` with skills present outputs exactly one name per line.
+///
+/// The output must contain no ANSI escape codes, no headers, and no descriptions —
+/// only bare skill names separated by newlines. This contract is relied on by the
+/// shell completion scripts that call `creft list --names 2>/dev/null` to populate
+/// the dynamic completion list.
+#[test]
+fn list_names_outputs_one_name_per_line() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: alpha\ndescription: first skill\n---\n\n```bash\necho alpha\n```\n",
+        )
+        .assert()
+        .success();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin("---\nname: beta\ndescription: second skill\n---\n\n```bash\necho beta\n```\n")
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["list", "--names"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output);
+
+    // Each line must be exactly a bare skill name — no ANSI, no descriptions.
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&"alpha"),
+        "output must contain 'alpha' as a bare line; got:\n{stdout}",
+    );
+    assert!(
+        lines.contains(&"beta"),
+        "output must contain 'beta' as a bare line; got:\n{stdout}",
+    );
+
+    // No ANSI escape sequences.
+    assert!(
+        !stdout.contains('\x1b'),
+        "output must not contain ANSI escape codes; got:\n{stdout}",
+    );
+
+    // No headers or descriptions.
+    assert!(
+        !stdout.contains("Commands:") && !stdout.contains("Skills:"),
+        "output must not contain section headers; got:\n{stdout}",
+    );
+    assert!(
+        !stdout.contains("first skill") && !stdout.contains("second skill"),
+        "output must not contain skill descriptions; got:\n{stdout}",
+    );
+}
+
+/// `creft list --names` with an empty skill store produces empty stdout and exits 0.
+///
+/// Completion scripts call `creft list --names 2>/dev/null` and feed the output
+/// directly into the completion word list. Empty output — not an error, not a
+/// message — is the correct response when no skills are registered.
+#[test]
+fn list_names_empty_store_produces_empty_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["list", "--names"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
 }

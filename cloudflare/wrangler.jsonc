@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "creft-run",
+  "main": "workers/dist/creft-run.js",
+  "compatibility_date": "2026-04-13",
+  "routes": [
+    {
+      "pattern": "creft.run",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "analytics_engine_datasets": [
+    {
+      "binding": "CREFT_ANALYTICS",
+      "dataset": "creft_analytics"
+    }
+  ]
+}

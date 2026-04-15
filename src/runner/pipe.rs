@@ -6,8 +6,12 @@ use crate::model::{CodeBlock, ParsedCommand};
 
 use super::blocks::spawn_block;
 use super::substitute::substitute;
-use super::{EARLY_EXIT, RunContext, exit_code_of, make_execution_error, prepare_block_script};
+use super::{
+    EARLY_EXIT, RunContext, exit_code_of, make_execution_error, preamble, prepare_block_script,
+};
 
+#[cfg(unix)]
+use super::channel::{ExitSignal, SideChannel, TerminalWriter};
 #[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
@@ -117,13 +121,13 @@ fn dup_pipe_stdout(stdout: &PipeStdout) -> std::io::Result<DupedPipeReader> {
 /// A stdout handle from a pipe chain stage.
 ///
 /// Normal blocks produce a `ChildStdout`; sponge stages produce a
-/// `PipeReader` from an `os_pipe::pipe()` pair. Both can be converted to
+/// `PipeReader` from a `std::io::pipe()` pair. Both can be converted to
 /// `Stdio` for the next block's stdin, and both implement `Read` for the
 /// relay thread.
 pub(super) enum PipeStdout {
     Child(std::process::ChildStdout),
     #[cfg(unix)]
-    Pipe(os_pipe::PipeReader),
+    Pipe(std::io::PipeReader),
 }
 
 impl PipeStdout {
@@ -262,7 +266,7 @@ fn should_cancel_sponge(
 #[cfg(unix)]
 pub(super) fn sponge_stage(
     upstream: Option<PipeStdout>,
-    pipe_writer: os_pipe::PipeWriter,
+    pipe_writer: std::io::PipeWriter,
     block: &CodeBlock,
     bound_refs: Vec<(String, String)>,
     ctx: RunContext,
@@ -348,7 +352,9 @@ pub(super) fn sponge_stage(
 
         // prepare_block_script creates a temp file; LLM runners ignore it (prompt
         // is delivered via stdin), but it must exist for the trait signature.
-        let tmp = match prepare_block_script(block, &expanded) {
+        // Sponge stages run LLM blocks — preamble injection is out of scope for
+        // sponge (no pre_exec hook available without fork). Pass None.
+        let tmp = match prepare_block_script(block, &expanded, None) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
@@ -806,6 +812,7 @@ fn wait_pipe_children_unix(
             BlockOutcome::Exited(status) => {
                 if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
                     early_exit = true;
+                    eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
                     // Kill all processes in the pipe group so grandchildren are also killed.
                     // Falls back to per-PID kills if killpg fails.
                     kill_pipe_group_by_pids(child_pgid, &child_pids);
@@ -970,7 +977,7 @@ fn wait_pipe_children_fallback(
 /// Blocks that return `true` from `needs_sponge()` participate as sponge stages:
 /// each sponge thread reads all upstream output, performs template substitution,
 /// spawns the block's process, and relays the process's stdout to the next block
-/// via an `os_pipe` pair.
+/// via a `std::io::pipe()` pair.
 ///
 /// Returns Ok(()) if the last block exits successfully. Earlier blocks dying
 /// from SIGPIPE when the downstream consumer exits early is normal pipeline
@@ -991,7 +998,8 @@ pub(super) fn run_pipe_chain(
         } else {
             // In pipe mode, no "prev" template arg (output is on stdin).
             let expanded = substitute(&block.code, bound_refs, &block.lang)?;
-            let tmp = prepare_block_script(block, &expanded)?;
+            let pre = preamble::for_language(&block.lang);
+            let tmp = prepare_block_script(block, &expanded, pre.as_deref())?;
             temp_files.push(Some(tmp));
         }
     }
@@ -1038,12 +1046,28 @@ pub(super) fn run_pipe_chain(
         std::sync::mpsc::Receiver<bool>,
     > = std::collections::HashMap::new();
 
+    // Shared terminal writer for all reader threads in this pipe chain.
+    // Created once so all threads serialise through the same mutex.
+    #[cfg(unix)]
+    let terminal_writer = std::sync::Arc::new(TerminalWriter::new());
+
+    // Join handles for side-channel reader threads (one per non-sponge block).
+    // Joined after all children exit to flush any buffered side-channel output.
+    #[cfg(unix)]
+    let mut reader_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
+    // ExitSignal slots parallel to reader_handles (same index = same block).
+    // Written by reader threads when they receive ChannelMessage::Exit;
+    // read by run_pipe_chain after reader threads are joined (no concurrent access).
+    #[cfg(unix)]
+    let mut exit_signals: Vec<ExitSignal> = Vec::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
         #[cfg(unix)]
         if block.needs_sponge() {
-            let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(CreftError::Io)?;
+            let (pipe_reader, pipe_writer) = std::io::pipe().map_err(CreftError::Io)?;
 
             let upstream = prev_stdout.take();
             let is_pgid_creator = i == 0;
@@ -1178,6 +1202,16 @@ pub(super) fn run_pipe_chain(
         #[cfg(unix)]
         let sigint_ignored = i > 0;
 
+        // Create a side channel for this block before spawning so the child
+        // inherits the pipe ends via pre_exec/dup2. Each block gets its own
+        // independent pipe pair and reader thread.
+        #[cfg(unix)]
+        let mut block_channel = SideChannel::new().inspect_err(|_| {
+            kill_pipe_group(child_pgid, &children);
+            drop(children.drain(..));
+            drop(node_deps_dirs.drain(..));
+        })?;
+
         let (mut child, node_deps_dir) = spawn_block(
             block,
             script_path,
@@ -1188,6 +1222,8 @@ pub(super) fn run_pipe_chain(
             pg,
             #[cfg(unix)]
             sigint_ignored,
+            #[cfg(unix)]
+            Some(&block_channel),
         )
         .inspect_err(|_| {
             #[cfg(unix)]
@@ -1195,6 +1231,30 @@ pub(super) fn run_pipe_chain(
             drop(children.drain(..));
             drop(node_deps_dirs.drain(..));
         })?;
+
+        // Close parent's copies of the child's pipe ends immediately after
+        // spawn. If kept open, the reader thread will never see EOF.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+            block_channel.close_child_ends();
+            let ctrl_reader = block_channel
+                .take_control_reader()
+                .expect("control reader taken exactly once per block");
+            let resp_writer = block_channel
+                .take_response_writer()
+                .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
+            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let handle = super::channel::spawn_reader(
+                ctrl_reader,
+                std::sync::Arc::clone(&terminal_writer),
+                None,
+                resp_writer,
+                Some(std::sync::Arc::clone(&signal)),
+            );
+            reader_handles.push(handle);
+            exit_signals.push(signal);
+        }
         node_deps_dirs.push(node_deps_dir);
 
         // After spawning the first non-sponge block, record its PID as the
@@ -1288,8 +1348,13 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
+    // Child PIDs saved before wait_pipe_children_unix consumes `children`.
+    // Used in the post-reader-join exit-signal cleanup.
     #[cfg(unix)]
-    let (results, early_exit) = {
+    let saved_child_pids: Vec<u32>;
+
+    #[cfg(unix)]
+    let (results, mut early_exit) = {
         let last_stdout = last_child_stdout.ok_or_else(|| {
             CreftError::Setup("internal: failed to capture last block stdout".to_owned())
         })?;
@@ -1298,6 +1363,7 @@ pub(super) fn run_pipe_chain(
         let tx = reaper_tx;
         let rx = reaper_rx;
         let child_pids: Vec<u32> = children.iter().map(|(c, _, _, _)| c.id()).collect();
+        saved_child_pids = child_pids.clone();
         wait_pipe_children_unix(
             WaitArgs {
                 children,
@@ -1322,6 +1388,52 @@ pub(super) fn run_pipe_chain(
             .collect();
         wait_pipe_children_fallback(children_opt)?
     };
+
+    // Join all side-channel reader threads now that every child has exited.
+    // The children's fd 3 write ends are closed on exit; close_child_ends()
+    // above closed the parent's copies, so every reader has seen EOF.
+    // Joining here flushes any buffered side-channel output to the terminal.
+    #[cfg(unix)]
+    for handle in reader_handles {
+        handle.join().expect("side-channel reader thread panicked");
+    }
+
+    // Reader threads are joined — all ExitSignal slots are now final.
+    // Check whether any block called creft_exit. This happens after reader
+    // joins because the reader thread writes the signal; the main thread
+    // must not read until the writer has exited.
+    #[cfg(unix)]
+    for (block_idx, signal) in exit_signals.iter().enumerate() {
+        let exit_code = *signal.lock().expect("exit signal lock poisoned");
+        if let Some(code) = exit_code {
+            if code == 0 {
+                if !early_exit {
+                    early_exit = true;
+                    // All processes have already exited (wait_pipe_children_unix
+                    // joined them). kill_pipe_group_by_pids is a no-op for already-
+                    // exited PIDs, but ensures any late grandchildren are cleaned up.
+                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    ctx.request_cancel();
+                }
+            } else {
+                // creft_exit with non-zero: explicit failure.
+                if !early_exit {
+                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    ctx.request_cancel();
+                }
+                let lang = results
+                    .iter()
+                    .find(|r| r.block == block_idx)
+                    .map(|r| r.lang.clone())
+                    .unwrap_or_default();
+                return Err(CreftError::ExecutionFailed {
+                    block: block_idx,
+                    lang,
+                    code,
+                });
+            }
+        }
+    }
 
     if early_exit {
         // Ensure the cancel token is set for any code that polls it after the
@@ -1436,7 +1548,7 @@ mod tests {
     #[test]
     fn test_dup_pipe_stdout_returns_readable_fd() {
         use std::io::Write as _;
-        let (pipe_reader, mut pipe_writer) = os_pipe::pipe().expect("pipe creation must succeed");
+        let (pipe_reader, mut pipe_writer) = std::io::pipe().expect("pipe creation must succeed");
         let pipe_stdout = PipeStdout::Pipe(pipe_reader);
 
         // Dup before consuming the original.

@@ -1,189 +1,731 @@
-use clap::{Parser, Subcommand};
+//! CLI argument types and lexopt-based parser.
+//!
+//! The public surface is [`parse`], which consumes tokens from a [`lexopt::Parser`]
+//! and returns either a built-in [`Parsed`] result or `None` (meaning the caller
+//! should treat the invocation as a user skill).
 
-use crate::help::*;
+use crate::help::BuiltinHelp;
 
-/// Top-level CLI parser for creft.
-#[derive(Parser, Debug)]
-#[command(
-    name = "creft",
-    about = ROOT_ABOUT,
-    long_about = ROOT_LONG_ABOUT,
-    version
-)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: BuiltinCommand,
+/// Result of parsing built-in CLI arguments.
+#[derive(Debug)]
+pub(crate) enum Parsed {
+    /// A built-in command with its arguments.
+    Command(Command),
+    /// A specific built-in's `--help` page (short form, 10-15 lines).
+    Help(BuiltinHelp),
+    /// A specific built-in's `--docs` page (full reference).
+    Docs(BuiltinHelp),
+    /// Global `--help`: the two-section listing (requires the skill registry).
+    RootHelp,
+    /// `--version`: print the version string and exit.
+    Version,
 }
 
-/// Built-in subcommands dispatched before user-defined skills.
-#[derive(Subcommand, Debug)]
-pub enum BuiltinCommand {
-    /// Save a new skill from stdin
-    #[command(long_about = ADD_LONG_ABOUT)]
+/// A parsed built-in command with its arguments.
+#[derive(Debug)]
+pub(crate) enum Command {
     Add {
-        /// Command name (overrides frontmatter)
-        #[arg(long)]
         name: Option<String>,
-        /// Description (overrides frontmatter)
-        #[arg(long)]
         description: Option<String>,
-        /// Add an arg in NAME:DESC format (repeatable)
-        #[arg(long = "arg", value_name = "NAME:DESC")]
         args: Vec<String>,
-        /// Add a tag (repeatable)
-        #[arg(long = "tag")]
         tags: Vec<String>,
-        /// Overwrite if command already exists
-        #[arg(long)]
         force: bool,
-        /// Skip code block validation (syntax and template checks)
-        #[arg(long)]
         no_validate: bool,
-        /// Save to global ~/.creft/ instead of local .creft/
-        #[arg(short = 'g', long)]
         global: bool,
     },
-
-    /// List available skills
-    #[command(long_about = LIST_LONG_ABOUT)]
     List {
-        /// Filter by tag
-        #[arg(long)]
         tag: Option<String>,
-        /// Show all commands in flat list, including hidden `_`-prefixed commands
-        #[arg(long)]
         all: bool,
-        /// Namespace path to drill into
-        #[arg(trailing_var_arg = true)]
+        names: bool,
         namespace: Vec<String>,
     },
-
-    /// Show a skill's full definition
-    #[command(long_about = SHOW_LONG_ABOUT)]
     Show {
-        /// Command name
         name: Vec<String>,
+        blocks: bool,
     },
-
-    /// Edit a skill in $EDITOR or from stdin
-    #[command(long_about = EDIT_LONG_ABOUT)]
-    Edit {
-        /// Command name
+    Remove {
         name: Vec<String>,
-        /// Force editing in global ~/.creft/ even if a local version exists
-        #[arg(short = 'g', long)]
-        global: bool,
-        /// Skip code block validation when piping new content
-        #[arg(long)]
-        no_validate: bool,
-    },
-
-    /// Delete a skill
-    #[command(long_about = RM_LONG_ABOUT)]
-    Rm {
-        /// Command name
-        name: Vec<String>,
-        /// Force deletion from global ~/.creft/ even if a local version exists
-        #[arg(short = 'g', long)]
         global: bool,
     },
-
-    /// Print a skill's code blocks
-    #[command(long_about = CAT_LONG_ABOUT)]
-    Cat {
-        /// Command name
-        name: Vec<String>,
-    },
-
-    /// Manage plugins
-    #[command(long_about = PLUGIN_LONG_ABOUT)]
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
-
-    /// Set up creft for a coding AI system
-    #[command(long_about = UP_LONG_ABOUT)]
+    Plugin(PluginCommand),
+    Settings(SettingsCommand),
     Up {
-        /// Target system (claude-code, cursor, windsurf, aider, copilot, codex, gemini).
-        /// Auto-detects if omitted.
         system: Option<String>,
-        /// Install globally instead of project-level
-        #[arg(short = 'g', long)]
         global: bool,
     },
-
-    /// Initialize local skill storage
-    #[command(long_about = INIT_LONG_ABOUT)]
     Init,
-
-    /// Check environment and skill health
-    #[command(long_about = DOCTOR_LONG_ABOUT)]
     Doctor {
-        /// Skill name to check (omit for global health check)
-        #[arg(trailing_var_arg = true)]
         name: Vec<String>,
+    },
+    Completions {
+        shell: String,
     },
 }
 
 /// Subcommands for `creft plugin`.
-#[derive(Subcommand, Debug)]
-pub enum PluginAction {
-    /// Install a plugin from a git repo
-    #[command(long_about = PLUGIN_INSTALL_LONG_ABOUT)]
-    Install {
-        /// Plugin source: git URL or path to a local repo
-        source: String,
-        /// Install a specific plugin from a multi-plugin repo
-        #[arg(short = 'p', long)]
-        plugin: Option<String>,
-    },
+#[derive(Debug)]
+pub(crate) enum PluginCommand {
+    Install { source: String },
+    Update { name: Option<String> },
+    Uninstall { name: String },
+    Activate { target: String, global: bool },
+    Deactivate { target: String, global: bool },
+    List { name: Option<String> },
+    Search { query: Vec<String> },
+}
 
-    /// Update installed plugins
-    #[command(long_about = PLUGIN_UPDATE_LONG_ABOUT)]
-    Update {
-        /// Plugin name (updates all if omitted)
-        name: Option<String>,
-    },
+/// Subcommands for `creft settings`.
+#[derive(Debug)]
+pub(crate) enum SettingsCommand {
+    Show,
+    Set { key: String, value: String },
+}
 
-    /// Remove an installed plugin
-    #[command(long_about = PLUGIN_UNINSTALL_LONG_ABOUT)]
-    Uninstall {
-        /// Plugin name
-        name: String,
-    },
+/// Errors produced during argument parsing.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CliError {
+    /// A general usage error (unknown flag, wrong value type, etc.).
+    #[error("{0}")]
+    Usage(String),
 
-    /// Activate a command from an installed plugin
-    #[command(long_about = PLUGIN_ACTIVATE_LONG_ABOUT)]
-    Activate {
-        /// Command to activate: plugin/cmd or plugin (activates all)
-        target: String,
-        /// Activate globally instead of in the nearest .creft/
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
+    /// The first positional argument did not match any built-in command name.
+    #[error("unknown command: {0}")]
+    UnknownCommand(String),
 
-    /// Deactivate a command
-    #[command(long_about = PLUGIN_DEACTIVATE_LONG_ABOUT)]
-    Deactivate {
-        /// Command to deactivate: plugin/cmd or plugin (deactivates all)
-        target: String,
-        /// Deactivate only in the global scope
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
+    /// A required argument was not supplied.
+    #[error("missing required argument: {0}")]
+    MissingArg(String),
+}
 
-    /// List installed plugins, or commands in a specific plugin
-    #[command(long_about = PLUGIN_LIST_LONG_ABOUT)]
-    List {
-        /// Show commands in this plugin instead of listing all plugins
-        name: Option<String>,
-    },
+impl From<lexopt::Error> for CliError {
+    fn from(e: lexopt::Error) -> Self {
+        CliError::Usage(e.to_string())
+    }
+}
 
-    /// Search for commands across installed plugins
-    #[command(long_about = PLUGIN_SEARCH_LONG_ABOUT)]
-    Search {
-        /// Search query (matches name, description, tags)
-        query: Vec<String>,
-    },
+/// Parse CLI arguments from a [`lexopt::Parser`] into a [`Parsed`] result.
+///
+/// Returns `None` when the first positional argument is not a recognized
+/// built-in command name. The caller should treat this as a user skill
+/// invocation and pass the original raw args to the skill runner.
+///
+/// `--help` / `-h` and `--version` / `-V` at the top level return
+/// [`Parsed::RootHelp`] and [`Parsed::Version`] respectively.
+pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliError> {
+    use lexopt::prelude::*;
+
+    let first = match parser.next()? {
+        None => return Ok(Some(Parsed::RootHelp)),
+        Some(Long("help") | Short('h')) => return Ok(Some(Parsed::RootHelp)),
+        Some(Long("version") | Short('V')) => return Ok(Some(Parsed::Version)),
+        Some(Value(v)) => v.string()?,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    };
+
+    match first.as_str() {
+        "add" => parse_add(parser),
+        "list" => parse_list(parser),
+        "show" => parse_show(parser, false),
+        "remove" => parse_remove(parser),
+        "plugin" => parse_plugin(parser),
+        "settings" => parse_settings(parser),
+        "up" => parse_up(parser),
+        "init" => parse_init(parser),
+        "doctor" => parse_doctor(parser),
+        "completions" => parse_completions(parser),
+
+        // Not a built-in: caller should try as a user skill.
+        _ => return Ok(None),
+    }
+    .map(Some)
+}
+
+// ── Per-command parsers ───────────────────────────────────────────────────────
+
+fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = None;
+    let mut description = None;
+    let mut args = Vec::new();
+    let mut tags = Vec::new();
+    let mut force = false;
+    let mut no_validate = false;
+    let mut global = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("name") => name = Some(parser.value()?.string()?),
+            Long("description") => description = Some(parser.value()?.string()?),
+            Long("arg") => args.push(parser.value()?.string()?),
+            Long("tag") => tags.push(parser.value()?.string()?),
+            Long("force") => force = true,
+            Long("no-validate") => no_validate = true,
+            Short('g') | Long("global") => global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Add)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Add)),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Add {
+        name,
+        description,
+        args,
+        tags,
+        force,
+        no_validate,
+        global,
+    }))
+}
+
+fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut tag = None;
+    let mut all = false;
+    let mut names = false;
+    let mut namespace = Vec::new();
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("tag") => tag = Some(parser.value()?.string()?),
+            Long("all") => all = true,
+            Long("names") | Short('n') => names = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::List)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::List)),
+            Value(v) => namespace.push(v.string()?),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::List {
+        tag,
+        all,
+        names,
+        namespace,
+    }))
+}
+
+/// Parse `show`. When `initial_blocks` is true, only code blocks are printed.
+fn parse_show(parser: &mut lexopt::Parser, initial_blocks: bool) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = Vec::new();
+    let mut blocks = initial_blocks;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("blocks") => blocks = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Show)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Show)),
+            Value(v) => name.push(v.string()?),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Show { name, blocks }))
+}
+
+fn parse_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = Vec::new();
+    let mut global = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('g') | Long("global") => global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Remove)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Remove)),
+            Value(v) => name.push(v.string()?),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Remove { name, global }))
+}
+
+fn parse_plugin(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let sub = match parser.next()? {
+        // Bare `creft plugin` lists installed plugins.
+        None => {
+            return Ok(Parsed::Command(Command::Plugin(PluginCommand::List {
+                name: None,
+            })));
+        }
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Plugin)),
+        Some(Long("docs")) => return Ok(Parsed::Docs(BuiltinHelp::Plugin)),
+        Some(Value(v)) => v.string()?,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    };
+
+    match sub.as_str() {
+        "install" => parse_plugin_install(parser),
+        "update" => parse_plugin_update(parser),
+        "uninstall" => parse_plugin_uninstall(parser),
+        "activate" => parse_plugin_activate(parser),
+        "deactivate" => parse_plugin_deactivate(parser),
+        "list" => parse_plugin_list(parser),
+        "search" => parse_plugin_search(parser),
+        other => Err(CliError::UnknownCommand(format!("plugin {other}"))),
+    }
+}
+
+fn parse_plugin_install(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut source = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginInstall)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginInstall)),
+            Value(v) if source.is_none() => source = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let source = source.ok_or_else(|| {
+        CliError::MissingArg("<source>\n\nUsage: creft plugin install <source>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::Install {
+        source,
+    })))
+}
+
+fn parse_plugin_update(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginUpdate)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginUpdate)),
+            Value(v) if name.is_none() => name = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::Update {
+        name,
+    })))
+}
+
+fn parse_plugin_uninstall(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginUninstall)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginUninstall)),
+            Value(v) if name.is_none() => name = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let name = name.ok_or_else(|| {
+        CliError::MissingArg("<name>\n\nUsage: creft plugin uninstall <name>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::Uninstall {
+        name,
+    })))
+}
+
+fn parse_plugin_activate(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut target = None;
+    let mut global = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('g') | Long("global") => global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginActivate)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginActivate)),
+            Value(v) if target.is_none() => target = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let target = target.ok_or_else(|| {
+        CliError::MissingArg("<target>\n\nUsage: creft plugin activate <target>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::Activate {
+        target,
+        global,
+    })))
+}
+
+fn parse_plugin_deactivate(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut target = None;
+    let mut global = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('g') | Long("global") => global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginDeactivate)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginDeactivate)),
+            Value(v) if target.is_none() => target = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let target = target.ok_or_else(|| {
+        CliError::MissingArg("<target>\n\nUsage: creft plugin deactivate <target>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Plugin(
+        PluginCommand::Deactivate { target, global },
+    )))
+}
+
+fn parse_plugin_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginList)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginList)),
+            Value(v) if name.is_none() => name = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::List {
+        name,
+    })))
+}
+
+fn parse_plugin_search(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut query = Vec::new();
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginSearch)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginSearch)),
+            Value(v) => query.push(v.string()?),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Plugin(PluginCommand::Search {
+        query,
+    })))
+}
+
+fn parse_settings(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let sub = match parser.next()? {
+        // Bare `creft settings` shows current settings.
+        None => return Ok(Parsed::Command(Command::Settings(SettingsCommand::Show))),
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Settings)),
+        Some(Long("docs")) => return Ok(Parsed::Docs(BuiltinHelp::Settings)),
+        Some(Value(v)) => v.string()?,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    };
+
+    match sub.as_str() {
+        "show" => parse_settings_show(parser),
+        "set" => parse_settings_set(parser),
+        other => Err(CliError::UnknownCommand(format!("settings {other}"))),
+    }
+}
+
+fn parse_settings_show(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    if let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SettingsShow)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::SettingsShow)),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Settings(SettingsCommand::Show)))
+}
+
+fn parse_settings_set(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut key = None;
+    let mut value = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SettingsSet)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::SettingsSet)),
+            Value(v) if key.is_none() => key = Some(v.string()?),
+            Value(v) if value.is_none() => value = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let key = key.ok_or_else(|| {
+        CliError::MissingArg("<key>\n\nUsage: creft settings set <key> <value>".to_string())
+    })?;
+    let value = value.ok_or_else(|| {
+        CliError::MissingArg("<value>\n\nUsage: creft settings set <key> <value>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Settings(SettingsCommand::Set {
+        key,
+        value,
+    })))
+}
+
+fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut system = None;
+    let mut global = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('g') | Long("global") => global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Up)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Up)),
+            Value(v) if system.is_none() => system = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Up { system, global }))
+}
+
+fn parse_init(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    if let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Init)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Init)),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Init))
+}
+
+fn parse_doctor(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut name = Vec::new();
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Doctor)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Doctor)),
+            Value(v) => name.push(v.string()?),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Doctor { name }))
+}
+
+fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut shell = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Completions)),
+            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Completions)),
+            Value(v) if shell.is_none() => shell = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let shell = shell.ok_or_else(|| {
+        CliError::MissingArg("<shell>\n\nUsage: creft completions <shell>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Completions { shell }))
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Option<Parsed>, CliError> {
+        let mut parser = lexopt::Parser::from_args(args.iter().copied());
+        parse(&mut parser)
+    }
+
+    #[test]
+    fn list_names_long_flag_sets_names_true() {
+        let result = parse_args(&["list", "--names"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(names, "--names flag must set names=true");
+    }
+
+    #[test]
+    fn list_names_short_flag_sets_names_true() {
+        let result = parse_args(&["list", "-n"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(names, "-n flag must set names=true");
+    }
+
+    #[test]
+    fn list_without_names_flag_defaults_false() {
+        let result = parse_args(&["list"]).unwrap().unwrap();
+        let Parsed::Command(Command::List { names, .. }) = result else {
+            panic!("expected Command::List");
+        };
+        assert!(!names, "names must default to false when flag is absent");
+    }
+
+    #[test]
+    fn completions_missing_shell_returns_missing_arg_error() {
+        let result = parse_args(&["completions"]);
+        assert!(
+            matches!(result, Err(CliError::MissingArg(_))),
+            "completions with no shell must return MissingArg; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn completions_with_shell_parses_correctly() {
+        let result = parse_args(&["completions", "bash"]).unwrap().unwrap();
+        let Parsed::Command(Command::Completions { shell }) = result else {
+            panic!("expected Command::Completions");
+        };
+        assert_eq!(shell, "bash");
+    }
+
+    #[test]
+    fn completions_help_returns_help_variant() {
+        let result = parse_args(&["completions", "--help"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Completions)),
+            "completions --help must return Parsed::Help(Completions); got: {result:?}",
+        );
+    }
+
+    #[rstest]
+    #[case::completions("completions", crate::help::BuiltinHelp::Completions)]
+    #[case::add("add", crate::help::BuiltinHelp::Add)]
+    #[case::list("list", crate::help::BuiltinHelp::List)]
+    #[case::doctor("doctor", crate::help::BuiltinHelp::Doctor)]
+    #[case::plugin("plugin", crate::help::BuiltinHelp::Plugin)]
+    #[case::settings("settings", crate::help::BuiltinHelp::Settings)]
+    #[case::up("up", crate::help::BuiltinHelp::Up)]
+    #[case::init("init", crate::help::BuiltinHelp::Init)]
+    fn docs_flag_returns_docs_variant(
+        #[case] cmd: &str,
+        #[case] expected: crate::help::BuiltinHelp,
+    ) {
+        let result = parse_args(&[cmd, "--docs"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Docs(ref v) if *v == expected),
+            "{cmd} --docs must return Parsed::Docs({expected:?}); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_accepts_source_without_plugin_flag() {
+        let result = parse_args(&["plugin", "install", "creft/ask"])
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                result,
+                Parsed::Command(Command::Plugin(PluginCommand::Install {
+                    source: ref s,
+                })) if s == "creft/ask"
+            ),
+            "plugin install <source> must parse correctly; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_rejects_plugin_flag() {
+        let result = parse_args(&["plugin", "install", "creft/ask", "--plugin", "ask"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "--plugin must be rejected as an unknown flag; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn plugin_install_short_flag_p_rejected() {
+        let result = parse_args(&["plugin", "install", "creft/ask", "-p", "ask"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "-p must be rejected as an unknown flag; got: {result:?}",
+        );
+    }
 }

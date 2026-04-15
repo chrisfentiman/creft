@@ -2,13 +2,15 @@ use std::path::Path;
 
 use crate::error::CreftError;
 use crate::model::CodeBlock;
+use crate::shell as detect_shell;
 
 use super::RunContext;
+#[cfg(unix)]
+use super::channel::{CONTROL_FD, RESPONSE_FD, SideChannel};
 
 mod llm;
 mod node;
 mod python;
-mod ruby;
 mod shell;
 
 /// Trait for language-specific block command building.
@@ -37,7 +39,6 @@ pub(super) fn runner_for(lang: &str) -> Box<dyn BlockRunner> {
         "bash" | "sh" | "zsh" => Box::new(shell::ShellRunner),
         "python" | "python3" => Box::new(python::PythonRunner),
         "node" | "javascript" | "js" => Box::new(node::NodeRunner),
-        "ruby" | "rb" => Box::new(ruby::RubyRunner),
         "llm" => Box::new(llm::LlmRunner),
         // Unknown language: fall back to ShellRunner which uses interpreter()
         // to resolve the command name (returns the lang tag verbatim for unknowns).
@@ -99,8 +100,6 @@ mod tests {
     #[case::node("node", "node")]
     #[case::javascript("javascript", "node")]
     #[case::js("js", "node")]
-    #[case::ruby("ruby", "ruby")]
-    #[case::rb("rb", "ruby")]
     #[case::unknown("mylangtag", "mylangtag")]
     fn runner_for_dispatches_to_expected_program(#[case] lang: &str, #[case] expected: &str) {
         assert_eq!(program_for(lang), expected);
@@ -139,6 +138,12 @@ mod tests {
 /// chain: only the first block receives Ctrl+C; downstream blocks learn
 /// the pipe broke via EOF/SIGPIPE and exit cleanly. `SIG_IGN` is inherited
 /// across exec, so the spawned interpreter (e.g. Python) will also ignore it.
+// spawn_block has 8 parameters by design: the first 5 are platform-independent
+// and the last 3 are unix-only (process_group, ignore_sigint, side_channel).
+// On non-unix targets the function has only 5 parameters and does not trigger
+// this lint. Splitting the function would scatter the shared spawn scaffolding
+// that the spec intentionally concentrates here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_block(
     block: &CodeBlock,
     script_path: &Path,
@@ -147,9 +152,26 @@ pub(crate) fn spawn_block(
     stdout_cfg: std::process::Stdio,
     #[cfg(unix)] process_group: Option<u32>,
     #[cfg(unix)] ignore_sigint: bool,
+    #[cfg(unix)] side_channel: Option<&SideChannel>,
 ) -> Result<(std::process::Child, Option<tempfile::TempDir>), CreftError> {
     let env_pairs = ctx.env_pairs();
     let cwd = ctx.cwd();
+
+    // Resolve shell preference: if the block's language is in the shell family
+    // and the user's preferred shell is also in the shell family, substitute it.
+    // This lets a zsh user run bash-tagged blocks under zsh, and vice versa.
+    let resolved_block: CodeBlock;
+    let block = if let Some(resolved_lang) =
+        detect_shell::resolve_shell(&block.lang, ctx.shell_preference())
+    {
+        resolved_block = CodeBlock {
+            lang: resolved_lang.to_string(),
+            ..block.clone()
+        };
+        &resolved_block
+    } else {
+        block
+    };
 
     let runner = runner_for(&block.lang);
     let (mut cmd, node_deps_dir) = runner.build_command(block, script_path)?;
@@ -158,21 +180,36 @@ pub(crate) fn spawn_block(
     for (k, v) in &env_pairs {
         cmd.env(k, v);
     }
+    // Advertise the side channel fd numbers as env vars so languages without
+    // a preamble (or power users) can open the fds manually.
+    #[cfg(unix)]
+    if side_channel.is_some() {
+        cmd.env("CREFT_CONTROL_FD", CONTROL_FD.to_string());
+        cmd.env("CREFT_RESPONSE_FD", RESPONSE_FD.to_string());
+    }
     cmd.stdin(stdin_cfg);
     cmd.stdout(stdout_cfg);
     cmd.stderr(std::process::Stdio::piped());
 
     // Both operations must happen between fork() and exec() — exactly when
-    // pre_exec() runs. setpgid(2) and signal(2) are both async-signal-safe.
+    // pre_exec() runs. setpgid(2), signal(2), dup2(2), and close(2) are all
+    // async-signal-safe (POSIX-required for use in the fork-exec window).
     #[cfg(unix)]
     {
-        let need_pre_exec = process_group.is_some() || ignore_sigint;
+        // Extract raw fd values before entering the closure. The closure cannot
+        // capture OwnedFd (non-Copy), so we capture i32 (Copy) directly.
+        let side_channel_fds: Option<(i32, i32)> = side_channel.map(|ch| ch.child_fds());
+
+        let need_pre_exec = process_group.is_some() || ignore_sigint || side_channel_fds.is_some();
         if need_pre_exec {
             use std::os::unix::process::CommandExt;
-            // SAFETY: Both setpgid(0, pgid) and signal(SIGINT, SIG_IGN) are
-            // async-signal-safe (POSIX-required for use in the fork-exec window).
-            // No Rust allocations or mutex operations inside pre_exec. Captured
-            // values (pgid via Option<u32>, ignore_sigint via bool) are Copy.
+            // SAFETY: setpgid(0, pgid), signal(SIGINT, SIG_IGN), dup2, and
+            // close are all async-signal-safe POSIX calls valid in the
+            // fork-exec window. No Rust allocations or mutex operations occur.
+            // All captured values (pgid via Option<u32>, bools, i32 fd values)
+            // are Copy. The fd values were extracted from SideChannel before
+            // this closure was registered; the parent still holds the OwnedFds,
+            // keeping them valid across the fork.
             unsafe {
                 cmd.pre_exec(move || {
                     if let Some(pgid) = process_group {
@@ -188,6 +225,22 @@ pub(crate) fn spawn_block(
                         // SIGINT, preventing spurious tracebacks when the pipe
                         // head dies from Ctrl+C and EOF propagates downstream.
                         libc::signal(libc::SIGINT, libc::SIG_IGN);
+                    }
+                    if let Some((ctrl_write_fd, resp_read_fd)) = side_channel_fds {
+                        // dup2 the control pipe write end to fd 3.
+                        if libc::dup2(ctrl_write_fd, CONTROL_FD) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if ctrl_write_fd != CONTROL_FD {
+                            libc::close(ctrl_write_fd);
+                        }
+                        // dup2 the response pipe read end to fd 4.
+                        if libc::dup2(resp_read_fd, RESPONSE_FD) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if resp_read_fd != RESPONSE_FD {
+                            libc::close(resp_read_fd);
+                        }
                     }
                     Ok(())
                 });

@@ -4,11 +4,14 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use yansi::Paint;
+
 use crate::error::CreftError;
 use crate::model::{AppContext, CodeBlock, SkillSource};
 use crate::registry;
+use crate::settings::Settings;
+use crate::shell;
 use crate::store;
-use crate::style;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -184,6 +187,26 @@ fn check_optional_tool(name: &str, purpose: &str) -> CheckResult {
     }
 }
 
+/// Report the caller's detected shell preference.
+///
+/// This is informational only — the check never fails. It shows which shell
+/// will be used to run shell-family code blocks, so users can confirm the
+/// detected value matches their expectation.
+fn check_shell_preference(settings_shell: Option<&str>) -> CheckResult {
+    match shell::detect(settings_shell) {
+        Some(name) => CheckResult {
+            label: "shell".to_string(),
+            status: CheckStatus::Info,
+            detail: name,
+        },
+        None => CheckResult {
+            label: "shell".to_string(),
+            status: CheckStatus::Info,
+            detail: "none (blocks use their language tag directly)".to_string(),
+        },
+    }
+}
+
 /// Check if `~/.creft/` exists and is writable.
 fn check_global_dir(ctx: &AppContext) -> CheckResult {
     let root = match ctx.global_root() {
@@ -265,7 +288,6 @@ fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
 
     // list_packages_in silently skips unreadable manifests; scan dirs directly
     // to surface broken ones as explicit Fail results.
-    // read_manifest_from tries .creft/catalog.json first, falls back to creft.yaml.
     for scope in &[Scope::Global, Scope::Local] {
         let base = match ctx.packages_dir_for(*scope) {
             Ok(p) => p,
@@ -477,7 +499,6 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.push(python_result);
 
     results.push(check_interpreter("node"));
-    results.push(check_interpreter("ruby"));
     results.push(check_interpreter("git"));
 
     results.push(check_optional_tool("shellcheck", "used for shell linting"));
@@ -494,6 +515,16 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     results.extend(check_flat_files(ctx));
     results.extend(check_activations(ctx));
 
+    // Load the settings shell preference for doctor display. A corrupt or
+    // missing settings file is treated as no preference — the check is
+    // informational and must not itself fail.
+    let settings_shell_pref = ctx
+        .settings_path()
+        .ok()
+        .and_then(|p| Settings::load(&p).ok())
+        .and_then(|s| s.get("shell").map(str::to_string));
+    results.push(check_shell_preference(settings_shell_pref.as_deref()));
+
     results
 }
 
@@ -503,20 +534,27 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
 ///
 /// Checks interpreters, env vars, commands, dependencies, and creft sub-skill
 /// references. Detects cycles and limits recursion to 10 levels.
+///
+/// `shell_pref` is the active shell preference (from settings or `CREFT_SHELL`).
+/// When set and a block's language is in the shell family, the resolved
+/// interpreter is reported instead of the block's literal language tag — matching
+/// what will actually run the block.
 pub(crate) fn run_skill_check(
     ctx: &AppContext,
     name: &str,
     source: &SkillSource,
+    shell_pref: Option<&str>,
 ) -> Result<DoctorReport, CreftError> {
     let mut visited = HashSet::new();
     visited.insert(name.to_string());
-    run_skill_check_inner(ctx, name, source, &mut visited, 0)
+    run_skill_check_inner(ctx, name, source, shell_pref, &mut visited, 0)
 }
 
 fn run_skill_check_inner(
     ctx: &AppContext,
     name: &str,
     source: &SkillSource,
+    shell_pref: Option<&str>,
     visited: &mut HashSet<String>,
     depth: usize,
 ) -> Result<DoctorReport, CreftError> {
@@ -569,7 +607,12 @@ fn run_skill_check_inner(
             continue;
         }
 
-        if let Some(interp) = interpreter_for_lang(&block.lang)
+        // When a shell preference is active and this block is in the shell
+        // family, report the resolved interpreter (what will actually run).
+        // This matches execution behaviour rather than the literal language tag.
+        let effective_interp: Option<&str> = shell::resolve_shell(&block.lang, shell_pref)
+            .or_else(|| interpreter_for_lang(&block.lang));
+        if let Some(interp) = effective_interp
             && seen_interpreters.insert(interp.to_string())
         {
             interpreter_checks.push(check_block_interpreter(interp));
@@ -702,6 +745,7 @@ fn run_skill_check_inner(
                         ctx,
                         &resolved_name,
                         &sub_source,
+                        shell_pref,
                         visited,
                         depth + 1,
                     ) {
@@ -751,7 +795,6 @@ fn interpreter_for_lang(lang: &str) -> Option<&'static str> {
         "python" | "python3" => Some("python3"),
         "node" | "js" | "javascript" => Some("node"),
         "typescript" | "ts" => Some("npx"),
-        "ruby" | "rb" => Some("ruby"),
         "perl" => Some("perl"),
         _ => None,
     }
@@ -878,6 +921,12 @@ pub(crate) fn extract_commands(code: &str) -> Vec<String> {
     for cap in COMMAND_RE.captures_iter(&filtered) {
         if let Some(m) = cap.get(1) {
             let cmd_name = m.as_str();
+            // Skip variable assignments: NAME=value, cwd=$(pwd), SIGNAL=9, etc.
+            // The regex crate does not support lookaheads, so we check the character
+            // immediately following the match end in the filtered string.
+            if filtered.as_bytes().get(m.end()) == Some(&b'=') {
+                continue;
+            }
             if !SHELL_BUILTINS.contains(&cmd_name) && !cmd_name.is_empty() {
                 commands.push(cmd_name.to_string());
             }
@@ -933,8 +982,7 @@ fn status_marker(status: CheckStatus) -> &'static str {
 
 /// Render global check results to stderr.
 pub(crate) fn render_global(results: &[CheckResult]) {
-    let ansi = style::use_ansi();
-    eprintln!("{}", style::bold("Environment Health Check", ansi));
+    eprintln!("{}", "Environment Health Check".bold());
     eprintln!();
     for r in results {
         eprintln!("  {} {} ({})", status_marker(r.status), r.label, r.detail);
@@ -945,9 +993,8 @@ pub(crate) fn render_global(results: &[CheckResult]) {
 
 /// Render a skill doctor report to stderr.
 pub(crate) fn render_skill(report: &DoctorReport) {
-    let ansi = style::use_ansi();
     let header = format!("Skill Health: {} ({})", report.skill_name, report.source);
-    eprintln!("{}", style::bold(&header, ansi));
+    eprintln!("{}", header.as_str().bold());
     eprintln!();
     render_skill_indented(report, 0);
 
@@ -1284,22 +1331,23 @@ mod tests {
 
     #[test]
     fn test_extract_creft_calls_in_subshell() {
-        // "cat" is a creft reserved builtin; should be filtered out.
-        let result = extract_creft_calls("$(creft cat some-skill)");
+        // "list" is a reserved builtin; should be filtered out.
+        let result = extract_creft_calls("$(creft list)");
         assert!(
             result.is_empty(),
-            "creft cat is a builtin, should be filtered, got: {:?}",
+            "creft list is a builtin, should be filtered, got: {:?}",
             result
         );
     }
 
     #[test]
     fn test_extract_creft_calls_filters_reserved() {
-        let code = "creft list\ncreft add --name foo\ncreft my-skill";
+        let code = "creft list\ncreft plugin install foo\ncreft my-skill";
         let result = extract_creft_calls(code);
-        // "list" and "add" are reserved; "my-skill" is a skill.
+        // "list" and "plugin" are reserved top-level builtins; "my-skill" is a skill.
         assert!(!result.contains(&"list".to_string()));
-        assert!(!result.contains(&"add".to_string()));
+        assert!(!result.contains(&"plugin install foo".to_string()));
+        assert!(!result.contains(&"plugin".to_string()));
         assert!(
             result.contains(&"my-skill".to_string()),
             "got: {:?}",
@@ -1842,10 +1890,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx =
             crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        // Create a broken manifest
+        // Create a package with a malformed catalog.json
         let pkg_dir = tmp.path().join(".creft/packages/broken-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(pkg_dir.join("creft.yaml"), "not: valid: yaml: [").unwrap();
+        std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
+        std::fs::write(
+            pkg_dir.join(".creft").join("catalog.json"),
+            "not valid json [",
+        )
+        .unwrap();
 
         let results = check_packages(&ctx);
         // Should include at least one Fail result for the broken manifest
@@ -1896,8 +1948,6 @@ mod tests {
     #[case::javascript("javascript", Some("node"))]
     #[case::typescript("typescript", Some("npx"))]
     #[case::ts("ts", Some("npx"))]
-    #[case::ruby("ruby", Some("ruby"))]
-    #[case::rb("rb", Some("ruby"))]
     #[case::perl("perl", Some("perl"))]
     #[case::unknown("unknown", None)]
     fn interpreter_for_lang_maps_correctly(#[case] lang: &str, #[case] expected: Option<&str>) {
@@ -2023,7 +2073,7 @@ mod tests {
     fn test_skill_check_creft_prev_warns_removal() {
         let markdown = "---\nname: test-skill\ndescription: uses CREFT_PREV\n---\n\n```bash\necho $CREFT_PREV\n```\n";
         let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
-        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let report = run_skill_check(&ctx, &name, &source, None).unwrap();
         let misc = &report.misc_checks;
         let pipeline_check = misc
             .iter()
@@ -2045,7 +2095,7 @@ mod tests {
     fn test_skill_check_prev_in_shell_block_warns_not_supported() {
         let markdown = "---\nname: test-skill\ndescription: uses prev in shell\n---\n\n```bash\necho '{{prev}}'\n```\n";
         let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
-        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let report = run_skill_check(&ctx, &name, &source, None).unwrap();
         let misc = &report.misc_checks;
         let pipeline_check = misc.iter().find(|c| c.label == "pipeline input").unwrap();
         assert_eq!(
@@ -2064,7 +2114,7 @@ mod tests {
     fn test_skill_check_prev_in_llm_block_is_info() {
         let markdown = "---\nname: test-skill\ndescription: llm sponge\n---\n\n```bash\necho upstream\n```\n\n```llm\nprovider: cat\n---\nresult: {{prev}}\n```\n";
         let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
-        let report = run_skill_check(&ctx, &name, &source).unwrap();
+        let report = run_skill_check(&ctx, &name, &source, None).unwrap();
         let misc = &report.misc_checks;
         let pipeline_check = misc.iter().find(|c| c.label == "pipeline input").unwrap();
         assert_eq!(
@@ -2076,6 +2126,131 @@ mod tests {
             pipeline_check.detail.contains("buffered upstream input"),
             "expected buffered upstream input message, got: {}",
             pipeline_check.detail
+        );
+    }
+
+    // ── Stage 3: check_shell_preference ──────────────────────────────────────
+
+    #[test]
+    fn check_shell_preference_with_setting_shows_simple_label_and_name() {
+        // SAFETY: nextest runs each test in its own process; no concurrent env mutation.
+        unsafe {
+            std::env::remove_var("CREFT_SHELL");
+            std::env::remove_var("SHELL");
+        }
+        let result = check_shell_preference(Some("zsh"));
+        assert_eq!(result.label, "shell");
+        assert_eq!(result.detail, "zsh");
+        assert_eq!(result.status, CheckStatus::Info);
+    }
+
+    #[test]
+    fn check_shell_preference_with_no_detection_shows_none_message() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::remove_var("CREFT_SHELL");
+            std::env::remove_var("SHELL");
+        }
+        let result = check_shell_preference(None);
+        assert_eq!(result.label, "shell");
+        assert!(
+            result.detail.contains("none"),
+            "expected 'none' in detail, got: {}",
+            result.detail
+        );
+        assert_eq!(result.status, CheckStatus::Info);
+    }
+
+    // ── Stage 3: variable assignment filtering ────────────────────────────────
+
+    #[rstest]
+    #[case::simple_assignment("TARGET=foo\ncurl https://example.com", &["curl"])]
+    #[case::numeric_assignment("SIGNAL=9\nkill -9 $PID", &["kill"])]
+    #[case::subshell_assignment("cwd=$(pwd)\nls $cwd", &["ls"])]
+    #[case::assignment_and_pipe("OUT=$(git rev-parse HEAD)\necho $OUT | grep abc", &["git", "grep"])]
+    fn extract_commands_skips_variable_assignments(#[case] code: &str, #[case] expected: &[&str]) {
+        let result = extract_commands(code);
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn extract_commands_does_not_filter_regular_commands_with_equals_in_args() {
+        // "--key=value" style args should not suppress the command itself.
+        // The command name ends before '=', so the check fires only on the identifier.
+        let result = extract_commands("curl --url=http://example.com");
+        assert!(
+            result.contains(&"curl".to_string()),
+            "curl should be extracted even when args contain '=', got: {:?}",
+            result
+        );
+    }
+
+    // ── Stage 3: resolved interpreter with shell preference ───────────────────
+
+    #[test]
+    fn run_skill_check_with_shell_pref_reports_resolved_interpreter_for_bash_block() {
+        let markdown =
+            "---\nname: test-skill\ndescription: shell block\n---\n\n```bash\necho hello\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        // Shell preference is zsh; the block is bash — resolved interpreter should be zsh.
+        let report = run_skill_check(&ctx, &name, &source, Some("zsh")).unwrap();
+        let labels: Vec<&str> = report
+            .interpreter_checks
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"zsh"),
+            "expected zsh as resolved interpreter, got: {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"bash"),
+            "bash should not appear when zsh preference overrides it, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn run_skill_check_without_shell_pref_reports_block_lang_interpreter() {
+        let markdown =
+            "---\nname: test-skill\ndescription: shell block\n---\n\n```bash\necho hello\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        // No shell preference — literal block language is reported.
+        let report = run_skill_check(&ctx, &name, &source, None).unwrap();
+        let labels: Vec<&str> = report
+            .interpreter_checks
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"bash"),
+            "expected bash as interpreter when no preference, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn run_skill_check_with_shell_pref_does_not_affect_non_shell_blocks() {
+        let markdown = "---\nname: test-skill\ndescription: python block\n---\n\n```python\nprint('hi')\n```\n";
+        let (_tmp, ctx, name, source) = write_skill_to_tmp(markdown);
+        // Shell preference should not apply to python blocks.
+        let report = run_skill_check(&ctx, &name, &source, Some("zsh")).unwrap();
+        let labels: Vec<&str> = report
+            .interpreter_checks
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"python3"),
+            "python3 should still be reported for python blocks, got: {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"zsh"),
+            "zsh should not appear for a python block, got: {:?}",
+            labels
         );
     }
 }

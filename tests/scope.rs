@@ -267,10 +267,10 @@ fn test_scope_plugin_install_never_uses_local_scope() {
     );
 }
 
-// ── 8. update finds package across scopes ────────────────────────────────────
+// ── 8. update uses plugins subcommand ────────────────────────────────────────
 
-/// `creft update <name>` (deprecated) forwards to `creft plugin update`, which
-/// finds and updates a plugin in the global plugins cache.
+/// `creft plugin update <name>` finds and updates a plugin in the global plugins cache.
+/// (The old root-level `creft update` alias was removed in v0.3.0.)
 #[test]
 fn test_scope_deprecated_update_forwards_to_plugin_update() {
     let pkg_repo = create_test_package(
@@ -283,15 +283,15 @@ fn test_scope_deprecated_update_forwards_to_plugin_update() {
 
     let env = TwoScopeEnv::new();
 
-    // Install via the plugin namespace (always global).
+    // Install via the plugins namespace (always global).
     creft_two_scope(&env)
         .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
-    // The deprecated update alias forwards to plugin update and should succeed.
+    // Update via the plugins namespace.
     creft_two_scope(&env)
-        .args(["update", "updatable-pkg"])
+        .args(["plugin", "update", "updatable-pkg"])
         .assert()
         .success()
         .stderr(predicates::prelude::predicate::str::contains(
@@ -328,10 +328,10 @@ fn test_scope_update_finds_global_package() {
         ));
 }
 
-// ── 9. uninstall finds package across scopes ─────────────────────────────────
+// ── 9. uninstall uses plugins subcommand ─────────────────────────────────────
 
-/// `creft uninstall <name>` (deprecated) forwards to `creft plugin uninstall`,
-/// which removes the plugin from the global plugins cache.
+/// `creft plugin uninstall <name>` removes the plugin from the global plugins cache.
+/// (The old root-level `creft uninstall` alias was removed in v0.3.0.)
 #[test]
 fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let pkg_repo = create_test_package(
@@ -345,17 +345,16 @@ fn test_scope_deprecated_uninstall_removes_from_global_plugins() {
     let env = TwoScopeEnv::new();
 
     creft_two_scope(&env)
-        .args(["install", pkg_repo.path().to_str().unwrap()])
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
         .assert()
         .success();
 
     creft_two_scope(&env)
-        .args(["uninstall", "local-removable-pkg"])
+        .args(["plugin", "uninstall", "local-removable-pkg"])
         .assert()
         .success();
 
-    // The deprecated alias routes through plugin uninstall, which writes to
-    // the global plugins cache — verify the plugin directory is gone.
+    // Verify the plugin directory is gone from the global cache.
     assert!(
         !env.global_plugins().join("local-removable-pkg").exists(),
         "plugin should have been removed from global ~/.creft/plugins/"
@@ -458,7 +457,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 5: rm "ping" (removes the local copy).
     creft_two_scope(&env)
-        .args(["rm", "ping"])
+        .args(["remove", "ping"])
         .assert()
         .success();
 
