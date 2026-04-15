@@ -20,3 +20,5 @@ target
 
 # Generated Cloudflare Worker (build artifact from creft deploy install-script)
 cloudflare/workers/dist/
+cloudflare/.wrangler/
+cloudflare/.wrangler/
