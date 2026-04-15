@@ -34,7 +34,7 @@ No shared context needed between sessions — the skill is the context.
 ## Get Started
 
 ```sh
-cargo install creft
+curl creft.run | sh
 ```
 
 Set up your agent:
