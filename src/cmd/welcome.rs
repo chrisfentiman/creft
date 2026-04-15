@@ -1,3 +1,4 @@
+use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,7 +11,7 @@ use crate::model::AppContext;
 
 /// The creft ASCII logo.
 ///
-/// Block-letter art spelling "creft". Each line fits within 40 columns.
+/// Block-letter art spelling "creft". Each line fits within 41 columns.
 const LOGO: &[&str] = &[
     r" ██████╗██████╗ ███████╗███████╗████████╗",
     r"██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝",
@@ -27,23 +28,32 @@ const GRAD_FROM: (u8, u8, u8) = (212, 160, 23);
 /// Gradient end: dark turquoise.
 const GRAD_TO: (u8, u8, u8) = (0, 206, 209);
 
-/// Sparkle foreground colors — warm ember tones that complement the logo gradient.
-const SPARKLE_COLORS: &[(u8, u8, u8)] = &[
-    (255, 215, 0),   // gold
-    (255, 140, 0),   // dark orange
-    (255, 99, 71),   // tomato / coral
-    (255, 255, 255), // white
-];
-
 // ── Timing ─────────────────────────────────────────────────────────────────
 
-/// Target frame duration: ~30 FPS.
-const FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(33);
+/// Characters revealed per frame during the logo reveal phase.
+///
+/// The logo is 41 columns wide. At 3 columns per frame, the reveal
+/// takes ceil(41/3) = 14 frames × 35ms = ~490ms.
+const REVEAL_COLS_PER_FRAME: usize = 3;
 
-// ── Sparkle characters ─────────────────────────────────────────────────────
+/// Frame duration in milliseconds for the reveal phase.
+const REVEAL_FRAME_MS: u64 = 35;
 
-/// Printable, single-width characters used in the sparkle burst.
-const SPARKLE_CHARS: &[char] = &['*', '.', '+', '\'', '`', ','];
+/// Characters swept per frame during the underline phase.
+///
+/// At 4 columns per frame and 20ms per frame, the sweep takes
+/// ceil(41/4) × 20ms = ~220ms.
+const UNDERLINE_COLS_PER_FRAME: usize = 4;
+
+/// Frame duration in milliseconds for the underline sweep phase.
+const UNDERLINE_FRAME_MS: u64 = 20;
+
+// ── Underline character ────────────────────────────────────────────────────
+
+/// The character used for the underline sweep beneath the logo.
+///
+/// U+2500 BOX DRAWINGS LIGHT HORIZONTAL — a clean, single-width line character.
+const UNDERLINE_CHAR: char = '─';
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
@@ -144,6 +154,8 @@ fn render_static_to_writer(w: &mut dyn std::io::Write) -> std::io::Result<()> {
     Ok(())
 }
 
+// ── Color helpers ──────────────────────────────────────────────────────────
+
 /// Apply a horizontal RGB color gradient to a single line of text.
 ///
 /// Each character's color is linearly interpolated between `from` and `to`
@@ -166,7 +178,6 @@ fn gradient_line(text: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
         let g = lerp_u8(from.1, to.1, t);
         let b = lerp_u8(from.2, to.2, t);
         let s = ch.to_string();
-        use std::fmt::Write as FmtWrite;
         let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
     }
     out
@@ -177,28 +188,84 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     result.round().clamp(0.0, 255.0) as u8
 }
 
-// ── Animated rendering ─────────────────────────────────────────────────────
-
-/// A positioned sparkle for the burst animation phase.
+/// Compute the gradient color at position `i` out of `total` positions.
 ///
-/// Sparkles appear below the logo like falling embers. Each sparkle has a
-/// `start_frame` so they are staggered across the burst period rather than
-/// all appearing simultaneously. Once a sparkle finishes its visible lifetime
-/// it is marked `done` and no longer drawn.
-struct Sparkle {
-    /// Column (0-based), relative to the terminal's left edge.
-    col: usize,
-    /// Row offset below the logo bottom edge (0-based).
-    row: usize,
-    ch: char,
-    color: (u8, u8, u8),
-    /// Frame index on which this sparkle first becomes visible.
-    start_frame: usize,
-    /// Frames left to display. Counts down from initial value to 0, then done.
-    frames_remaining: u8,
-    /// True once the sparkle has been erased and should not be drawn again.
-    done: bool,
+/// Returns the (r, g, b) tuple interpolated between `GRAD_FROM` and `GRAD_TO`.
+fn gradient_color_at(i: usize, total: usize) -> (u8, u8, u8) {
+    let t = if total <= 1 {
+        0.0f32
+    } else {
+        i as f32 / (total - 1) as f32
+    };
+    (
+        lerp_u8(GRAD_FROM.0, GRAD_TO.0, t),
+        lerp_u8(GRAD_FROM.1, GRAD_TO.1, t),
+        lerp_u8(GRAD_FROM.2, GRAD_TO.2, t),
+    )
 }
+
+// ── Frame builders ─────────────────────────────────────────────────────────
+
+/// Build a single frame string for the logo reveal at the given column.
+///
+/// `reveal_col` is the number of columns to show (0 = nothing, 41 = full logo).
+/// Unrevealed columns are written as spaces to fully overwrite prior frame content.
+///
+/// Uses `\x1b[s` / `\x1b[u` (SCO save/restore cursor) so the cursor returns to
+/// the top of the logo region after each frame. No absolute row positioning needed.
+fn build_reveal_frame(reveal_col: usize) -> String {
+    let mut out = String::with_capacity(2048);
+
+    out.push_str("\x1b[s"); // save cursor position
+
+    for line in LOGO {
+        let chars: Vec<char> = line.chars().collect();
+        let total = chars.len();
+        for (i, ch) in chars.iter().enumerate() {
+            if i < reveal_col {
+                let (r, g, b) = gradient_color_at(i, total);
+                let s = ch.to_string();
+                let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+            } else {
+                out.push(' ');
+            }
+        }
+        out.push('\n');
+    }
+
+    out.push_str("\x1b[u"); // restore cursor position
+
+    out
+}
+
+/// Build a single frame for the underline sweep at the given column.
+///
+/// `sweep_col` is the number of underline characters to show (0 = nothing,
+/// `logo_width` = complete line). The underline appears on the line immediately
+/// below the logo, using the same gradient colors as the reveal.
+///
+/// Uses `\x1b[s` / `\x1b[u` (SCO save/restore cursor) and a relative cursor-down
+/// escape to reach the underline row without absolute positioning.
+fn build_underline_frame(sweep_col: usize, logo_width: usize) -> String {
+    let mut out = String::with_capacity(512);
+
+    out.push_str("\x1b[s"); // save cursor position
+
+    // Move down past the logo to the underline row.
+    let _ = write!(out, "\x1b[{}B", LOGO.len());
+
+    for i in 0..sweep_col {
+        let (r, g, b) = gradient_color_at(i, logo_width);
+        let s = UNDERLINE_CHAR.to_string();
+        let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+    }
+
+    out.push_str("\x1b[u"); // restore cursor position
+
+    out
+}
+
+// ── Animated rendering ─────────────────────────────────────────────────────
 
 /// Drop guard that restores cursor visibility.
 ///
@@ -227,15 +294,17 @@ impl Drop for CursorGuard<'_> {
 /// Run the animated welcome on a TTY, then leave static output visible.
 ///
 /// Falls back to `render_static()` when the terminal is too small to animate
-/// cleanly. Registers a SIGINT cancellation flag matching the pattern in
-/// `src/cmd/run.rs` — the animation loop breaks early on cancellation so the
-/// `CursorGuard` still drops on the normal return path.
+/// cleanly. Registers a SIGINT cancellation flag — the animation loop breaks
+/// early on cancellation so the `CursorGuard` still drops on the normal return
+/// path, restoring cursor visibility.
 ///
-/// Animation design:
-/// - Phase 1: Logo reveal — each line appears over ~120ms.
-/// - Phase 2: Sparkle burst — embers fall below the logo over ~1.2s.
-///   Sparkles are staggered so they appear one-by-one, not all at once.
-///   Sparkles are positioned below the logo, keeping the logo itself clean.
+/// Animation phases:
+/// - Phase 1: Logo reveal — all 6 lines advance left-to-right simultaneously (~490ms).
+/// - Phase 2: Gradient underline sweep — a colored line appears beneath the logo (~220ms).
+///
+/// Each frame is built as a single `String` containing all ANSI escape sequences
+/// and written with one `term.write_str()` call. One write per frame eliminates
+/// the flicker caused by multiple sequential flush calls.
 fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     let (rows, cols) = term.size();
 
@@ -243,7 +312,7 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
         return render_static(term);
     }
 
-    // SIGINT cancellation — same pattern as src/cmd/run.rs:169-174.
+    // SIGINT cancellation — same pattern as src/cmd/run.rs.
     let cancel = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel));
@@ -251,163 +320,66 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     term.hide_cursor()?;
     let _guard = CursorGuard::new(term);
 
-    // Reserve vertical space: 1 blank + logo + sparkle rows below logo + static block.
+    // Reserve vertical space: 1 blank + logo + 1 underline row + static block.
+    // The leading blank gives breathing room above the logo.
     let logo_height = LOGO.len();
-    let sparkle_rows = 3usize; // embers fall up to 3 rows below the logo
     let static_lines = 10; // blank + tagline + version + blank + header + 3 commands + blank + hint + blank
-    let total_lines = 1 + logo_height + sparkle_rows + static_lines;
+    let total_lines = 1 + logo_height + 1 + static_lines;
 
     for _ in 0..total_lines {
         term.write_line("")?;
     }
     term.move_cursor_up(total_lines)?;
 
-    // Phase 1: Logo reveal — one line per ~120ms (≈4 frames at 30fps).
-    let frames_per_line = 4usize;
-    for logo_line in LOGO.iter() {
-        for frame in 0..frames_per_line {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            if frame == 0 {
-                let rendered = gradient_line(logo_line, GRAD_FROM, GRAD_TO);
-                term.write_line(&rendered)?;
-            }
-            std::thread::sleep(FRAME_DURATION);
-        }
+    // Skip the leading blank line so the cursor sits at the first logo row.
+    term.write_line("")?;
+
+    // The logo width is the character count of the widest line.
+    let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(41);
+
+    // Phase 1: Logo reveal — advance `reveal_col` by REVEAL_COLS_PER_FRAME each frame.
+    // The loop starts at REVEAL_COLS_PER_FRAME so the first frame is non-empty.
+    let mut reveal_col = REVEAL_COLS_PER_FRAME;
+    while reveal_col < logo_width {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        let frame = build_reveal_frame(reveal_col);
+        term.write_str(&frame)?;
+        std::thread::sleep(std::time::Duration::from_millis(REVEAL_FRAME_MS));
+        reveal_col += REVEAL_COLS_PER_FRAME;
     }
-
-    // Phase 2: Sparkle burst — embers cascade below the logo.
-    //
-    // The cursor is now logo_height lines below the block start, sitting at
-    // the first sparkle row. Sparkles are placed in the `sparkle_rows` rows
-    // immediately below the logo. Each sparkle has a `start_frame` that
-    // staggers its appearance across the burst period so they drift in
-    // one-by-one rather than all flashing simultaneously.
+    // Final full-reveal frame ensures every column is visible.
     if !cancel.load(Ordering::Relaxed) {
-        let mut rng = Lcg::new();
-        let total_sparkles = 18usize;
-        let frames_per_burst = 36usize; // ~1.2s at 30fps
-
-        // Leave a small right margin to avoid triggering terminal line-wrapping.
-        let usable_cols = (cols as usize).saturating_sub(2).max(1);
-
-        // Distribute start_frames evenly across the burst window, reserving
-        // the last few frames so all sparkles finish erasing before we clear.
-        let burst_window = frames_per_burst.saturating_sub(4);
-
-        let mut sparkles: Vec<Sparkle> = (0..total_sparkles)
-            .map(|i| {
-                let col = (rng.next() as usize) % usable_cols;
-                // Row 0 is directly below the last logo line; rows go up to sparkle_rows-1.
-                let row = (rng.next() as usize) % sparkle_rows;
-                let ch = SPARKLE_CHARS[(rng.next() as usize) % SPARKLE_CHARS.len()];
-                let color_idx = (rng.next() as usize) % SPARKLE_COLORS.len();
-                let color = SPARKLE_COLORS[color_idx];
-                let frames_remaining = 2 + (rng.next() as u8 % 2); // 2 or 3 frames visible
-                let start_frame = (i * burst_window) / total_sparkles;
-                Sparkle {
-                    col,
-                    row,
-                    ch,
-                    color,
-                    start_frame,
-                    frames_remaining,
-                    done: false,
-                }
-            })
-            .collect();
-
-        // Reserve the sparkle rows by printing blank lines, then return the
-        // cursor to the top of the sparkle region.
-        for _ in 0..sparkle_rows {
-            term.write_line("")?;
-        }
-        term.move_cursor_up(sparkle_rows)?;
-
-        for current_frame in 0..frames_per_burst {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-
-            for sparkle in &mut sparkles {
-                if sparkle.done || current_frame < sparkle.start_frame {
-                    continue;
-                }
-
-                if sparkle.frames_remaining > 0 {
-                    // Draw the sparkle at its position below the logo.
-                    term.move_cursor_down(sparkle.row)?;
-                    term.move_cursor_right(sparkle.col)?;
-                    let s = sparkle.ch.to_string();
-                    let painted = format!(
-                        "{}",
-                        s.as_str()
-                            .rgb(sparkle.color.0, sparkle.color.1, sparkle.color.2)
-                    );
-                    term.write_str(&painted)?;
-                    // Return cursor to the top of the sparkle region.
-                    term.move_cursor_up(sparkle.row)?;
-                    term.move_cursor_left(sparkle.col + 1)?;
-                    sparkle.frames_remaining -= 1;
-                } else {
-                    // Erase: overwrite with a space and mark done.
-                    term.move_cursor_down(sparkle.row)?;
-                    term.move_cursor_right(sparkle.col)?;
-                    term.write_str(" ")?;
-                    term.move_cursor_up(sparkle.row)?;
-                    term.move_cursor_left(sparkle.col + 1)?;
-                    sparkle.done = true;
-                }
-            }
-
-            std::thread::sleep(FRAME_DURATION);
-        }
-
-        // Advance past the sparkle rows so clear_last_lines covers the right region.
-        term.move_cursor_down(sparkle_rows)?;
+        let frame = build_reveal_frame(logo_width);
+        term.write_str(&frame)?;
     }
 
-    // Clear the entire animation region (1 blank + logo + sparkle rows) and
-    // replace with clean static output.
-    term.clear_last_lines(1 + logo_height + sparkle_rows)?;
+    // Phase 2: Underline sweep — gradient line appears beneath the logo.
+    let mut sweep_col = UNDERLINE_COLS_PER_FRAME;
+    while sweep_col < logo_width {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let frame = build_underline_frame(sweep_col, logo_width);
+        term.write_str(&frame)?;
+        std::thread::sleep(std::time::Duration::from_millis(UNDERLINE_FRAME_MS));
+        sweep_col += UNDERLINE_COLS_PER_FRAME;
+    }
+    // Final full-width underline frame.
+    if !cancel.load(Ordering::Relaxed) {
+        let frame = build_underline_frame(logo_width, logo_width);
+        term.write_str(&frame)?;
+        // Brief hold so the completed image is visible before clearing.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // Clear the animation region (blank + logo + underline) and replace with
+    // static getting-started output.
+    term.clear_last_lines(1 + logo_height + 1)?;
     render_static(term)?;
 
     Ok(())
-}
-
-// ── Simple LCG PRNG ────────────────────────────────────────────────────────
-
-/// A minimal linear congruential generator seeded from wall-clock microseconds.
-///
-/// Parameters: multiplier and increment from Knuth's MMIX.
-/// Used only for sparkle position randomisation — no security or statistical
-/// quality requirements.
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_micros() as u64)
-            .unwrap_or(42);
-        Self {
-            state: seed ^ 0xDEAD_BEEF_CAFE_BABE,
-        }
-    }
-
-    fn next(&mut self) -> u32 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (self.state >> 33) as u32
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -574,62 +546,134 @@ mod tests {
         );
     }
 
-    // ── sparkle chars ─────────────────────────────────────────────────────
+    // ── gradient_color_at ─────────────────────────────────────────────────
 
     #[test]
-    fn sparkle_chars_are_printable_single_width() {
-        for &ch in SPARKLE_CHARS {
-            assert!(
-                ch.is_ascii_graphic() || ch == '\'',
-                "sparkle char {ch:?} must be printable single-width ASCII"
-            );
-        }
+    fn gradient_color_at_first_position_is_grad_from() {
+        let color = gradient_color_at(0, 10);
+        assert_eq!(color, GRAD_FROM, "position 0 must equal GRAD_FROM");
     }
 
-    // ── sparkle staggering ────────────────────────────────────────────────
-
-    /// Verify the stagger formula distributes sparkle start_frames across the
-    /// burst window with no duplicates and all values in range.
     #[test]
-    fn sparkle_start_frames_are_staggered_and_in_range() {
-        let total_sparkles = 18usize;
-        let frames_per_burst = 36usize;
-        let burst_window = frames_per_burst.saturating_sub(4);
-        let start_frames: Vec<usize> = (0..total_sparkles)
-            .map(|i| (i * burst_window) / total_sparkles)
-            .collect();
+    fn gradient_color_at_last_position_is_grad_to() {
+        let color = gradient_color_at(9, 10);
+        assert_eq!(color, GRAD_TO, "last position must equal GRAD_TO");
+    }
 
-        for &sf in &start_frames {
-            assert!(
-                sf < burst_window,
-                "start_frame {sf} must be within burst_window {burst_window}"
-            );
-        }
-
-        let unique: std::collections::HashSet<usize> = start_frames.iter().copied().collect();
+    #[test]
+    fn gradient_color_at_single_position_is_grad_from() {
+        let color = gradient_color_at(0, 1);
         assert_eq!(
-            unique.len(),
-            total_sparkles,
-            "all sparkle start_frames must be distinct"
+            color, GRAD_FROM,
+            "single-position gradient must return GRAD_FROM"
         );
     }
 
-    /// A sparkle marked `done` is terminal — it must never be redrawn.
-    ///
-    /// The animation loop skips any sparkle where `done == true`, even if
-    /// `frames_remaining` is non-zero.
+    // ── build_reveal_frame ────────────────────────────────────────────────
+
     #[test]
-    fn sparkle_done_flag_prevents_redraw() {
-        let sparkle = Sparkle {
-            col: 0,
-            row: 0,
-            ch: '*',
-            color: (255, 255, 255),
-            start_frame: 0,
-            frames_remaining: 5, // would normally draw, but done=true guards it
-            done: true,
-        };
-        assert!(sparkle.done, "done flag must be set and visible");
+    fn reveal_frame_starts_with_save_and_ends_with_restore() {
+        let frame = build_reveal_frame(0);
+        assert!(
+            frame.starts_with("\x1b[s"),
+            "reveal frame must start with SCO save cursor"
+        );
+        assert!(
+            frame.ends_with("\x1b[u"),
+            "reveal frame must end with SCO restore cursor"
+        );
+    }
+
+    #[test]
+    fn reveal_frame_at_zero_contains_only_spaces_newlines_and_cursor_sequences() {
+        yansi::disable();
+        let frame = build_reveal_frame(0);
+        yansi::enable();
+        // Strip the save/restore escapes and verify only spaces and newlines remain.
+        let inner = frame
+            .strip_prefix("\x1b[s")
+            .unwrap()
+            .strip_suffix("\x1b[u")
+            .unwrap();
+        assert!(
+            inner.chars().all(|c| c == ' ' || c == '\n'),
+            "zero-reveal frame must contain only spaces and newlines; got: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn reveal_frame_full_contains_all_logo_characters() {
+        yansi::disable();
+        let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap();
+        let frame = build_reveal_frame(logo_width);
+        yansi::enable();
+        for line in LOGO {
+            for ch in line.chars() {
+                assert!(
+                    frame.contains(ch),
+                    "full-reveal frame must contain logo character {ch:?}"
+                );
+            }
+        }
+    }
+
+    // ── build_underline_frame ─────────────────────────────────────────────
+
+    #[test]
+    fn underline_frame_starts_with_save_and_ends_with_restore() {
+        let frame = build_underline_frame(0, 41);
+        assert!(
+            frame.starts_with("\x1b[s"),
+            "underline frame must start with SCO save cursor"
+        );
+        assert!(
+            frame.ends_with("\x1b[u"),
+            "underline frame must end with SCO restore cursor"
+        );
+    }
+
+    #[test]
+    fn underline_frame_at_zero_contains_no_underline_chars() {
+        yansi::disable();
+        let frame = build_underline_frame(0, 41);
+        yansi::enable();
+        assert!(
+            !frame.contains(UNDERLINE_CHAR),
+            "zero-sweep frame must not contain underline characters"
+        );
+    }
+
+    #[test]
+    fn underline_frame_full_width_contains_expected_count_of_underline_chars() {
+        yansi::disable();
+        let logo_width = 41usize;
+        let frame = build_underline_frame(logo_width, logo_width);
+        yansi::enable();
+        // Strip escape sequences to count bare underline characters.
+        let char_count = frame.chars().filter(|&c| c == UNDERLINE_CHAR).count();
+        assert_eq!(
+            char_count, logo_width,
+            "full underline frame must contain exactly {logo_width} underline characters"
+        );
+    }
+
+    #[test]
+    fn underline_frame_full_width_gradient_uses_grad_from_and_grad_to() {
+        yansi::enable();
+        let logo_width = 41usize;
+        let frame = build_underline_frame(logo_width, logo_width);
+        // GRAD_FROM RGB values should appear (from the first character's color).
+        let from_r = GRAD_FROM.0.to_string();
+        assert!(
+            frame.contains(&from_r),
+            "full underline frame must contain GRAD_FROM red channel {from_r}"
+        );
+        // GRAD_TO RGB values should appear (from the last character's color).
+        let to_b = GRAD_TO.2.to_string();
+        assert!(
+            frame.contains(&to_b),
+            "full underline frame must contain GRAD_TO blue channel {to_b}"
+        );
     }
 
     // ── CursorGuard ───────────────────────────────────────────────────────
@@ -650,16 +694,6 @@ mod tests {
         cmd_welcome(&ctx, true).unwrap();
     }
 
-    // ── LCG ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn lcg_produces_different_values() {
-        let mut rng = Lcg { state: 1 };
-        let a = rng.next();
-        let b = rng.next();
-        assert_ne!(a, b, "LCG must advance state each call");
-    }
-
     // ── helpers ───────────────────────────────────────────────────────────
 
     /// Build an `AppContext` using `home` as the home directory.
@@ -667,5 +701,11 @@ mod tests {
     /// The marker path becomes `<home>/.creft/.welcome-done`.
     fn make_ctx(home: &std::path::Path) -> AppContext {
         AppContext::for_test(home.to_path_buf(), home.to_path_buf())
+    }
+
+    // Ensure assert_ne is exercised so the import isn't flagged as unused.
+    #[test]
+    fn grad_from_and_grad_to_are_different_colors() {
+        assert_ne!(GRAD_FROM, GRAD_TO, "gradient endpoints must differ");
     }
 }
