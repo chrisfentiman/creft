@@ -211,12 +211,11 @@ fn gradient_color_at(i: usize, total: usize) -> (u8, u8, u8) {
 /// `reveal_col` is the number of columns to show (0 = nothing, 41 = full logo).
 /// Unrevealed columns are written as spaces to fully overwrite prior frame content.
 ///
-/// Uses `\x1b[s` / `\x1b[u` (SCO save/restore cursor) so the cursor returns to
-/// the top of the logo region after each frame. No absolute row positioning needed.
+/// Each line is written with `\r\n` so the cursor returns to column 0 on every line
+/// regardless of terminal state. After the last logo line, a VT100 cursor-up sequence
+/// (`\x1b[{n}A`) returns the cursor to the first logo row, ready for the next frame.
 fn build_reveal_frame(reveal_col: usize) -> String {
     let mut out = String::with_capacity(2048);
-
-    out.push_str("\x1b[s"); // save cursor position
 
     for line in LOGO {
         let chars: Vec<char> = line.chars().collect();
@@ -230,10 +229,12 @@ fn build_reveal_frame(reveal_col: usize) -> String {
                 out.push(' ');
             }
         }
-        out.push('\n');
+        out.push_str("\r\n");
     }
 
-    out.push_str("\x1b[u"); // restore cursor position
+    // Move the cursor back up to the first logo row so the next frame overwrites
+    // the same region. This is the same sequence console's move_cursor_up uses.
+    let _ = write!(out, "\x1b[{}A", LOGO.len());
 
     out
 }
@@ -244,23 +245,28 @@ fn build_reveal_frame(reveal_col: usize) -> String {
 /// `logo_width` = complete line). The underline appears on the line immediately
 /// below the logo, using the same gradient colors as the reveal.
 ///
-/// Uses `\x1b[s` / `\x1b[u` (SCO save/restore cursor) and a relative cursor-down
-/// escape to reach the underline row without absolute positioning.
+/// Cursor is assumed to be at the first logo row on entry. The frame moves
+/// down past the logo, writes the underline characters, then returns the cursor
+/// to the first logo row with an equivalent cursor-up sequence.
 fn build_underline_frame(sweep_col: usize, logo_width: usize) -> String {
     let mut out = String::with_capacity(512);
-
-    out.push_str("\x1b[s"); // save cursor position
 
     // Move down past the logo to the underline row.
     let _ = write!(out, "\x1b[{}B", LOGO.len());
 
-    for i in 0..sweep_col {
-        let (r, g, b) = gradient_color_at(i, logo_width);
-        let s = UNDERLINE_CHAR.to_string();
-        let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+    // Overwrite the full underline row: colored chars up to sweep_col, spaces beyond.
+    for i in 0..logo_width {
+        if i < sweep_col {
+            let (r, g, b) = gradient_color_at(i, logo_width);
+            let s = UNDERLINE_CHAR.to_string();
+            let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+        } else {
+            out.push(' ');
+        }
     }
 
-    out.push_str("\x1b[u"); // restore cursor position
+    // Return cursor to the first logo row.
+    let _ = write!(out, "\x1b[{}A", LOGO.len());
 
     out
 }
@@ -373,6 +379,10 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
         // Brief hold so the completed image is visible before clearing.
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+
+    // Move the cursor from the first logo row to the line after the underline row,
+    // so that clear_last_lines covers the entire animation region (blank + logo + underline).
+    term.move_cursor_down(logo_height + 1)?;
 
     // Clear the animation region (blank + logo + underline) and replace with
     // static getting-started output.
@@ -571,33 +581,29 @@ mod tests {
 
     // ── build_reveal_frame ────────────────────────────────────────────────
 
+    /// The reveal frame must end with a VT100 cursor-up sequence that returns
+    /// the cursor to the first logo row so the next frame overwrites the same region.
     #[test]
-    fn reveal_frame_starts_with_save_and_ends_with_restore() {
+    fn reveal_frame_ends_with_cursor_up_to_logo_top() {
         let frame = build_reveal_frame(0);
+        let expected_suffix = format!("\x1b[{}A", LOGO.len());
         assert!(
-            frame.starts_with("\x1b[s"),
-            "reveal frame must start with SCO save cursor"
-        );
-        assert!(
-            frame.ends_with("\x1b[u"),
-            "reveal frame must end with SCO restore cursor"
+            frame.ends_with(&expected_suffix),
+            "reveal frame must end with cursor-up to first logo row; got: {frame:?}"
         );
     }
 
     #[test]
-    fn reveal_frame_at_zero_contains_only_spaces_newlines_and_cursor_sequences() {
+    fn reveal_frame_at_zero_contains_only_spaces_cr_lf_and_cursor_sequences() {
         yansi::disable();
         let frame = build_reveal_frame(0);
         yansi::enable();
-        // Strip the save/restore escapes and verify only spaces and newlines remain.
-        let inner = frame
-            .strip_prefix("\x1b[s")
-            .unwrap()
-            .strip_suffix("\x1b[u")
-            .unwrap();
+        // Strip the trailing cursor-up escape and verify only spaces, CR, and LF remain.
+        let cursor_up = format!("\x1b[{}A", LOGO.len());
+        let inner = frame.strip_suffix(&cursor_up).unwrap();
         assert!(
-            inner.chars().all(|c| c == ' ' || c == '\n'),
-            "zero-reveal frame must contain only spaces and newlines; got: {inner:?}"
+            inner.chars().all(|c| c == ' ' || c == '\r' || c == '\n'),
+            "zero-reveal frame must contain only spaces, CR, and LF; got: {inner:?}"
         );
     }
 
@@ -619,16 +625,20 @@ mod tests {
 
     // ── build_underline_frame ─────────────────────────────────────────────
 
+    /// The underline frame must start with a cursor-down to reach the underline row
+    /// and end with a cursor-up to return the cursor to the first logo row.
     #[test]
-    fn underline_frame_starts_with_save_and_ends_with_restore() {
+    fn underline_frame_starts_with_cursor_down_and_ends_with_cursor_up() {
         let frame = build_underline_frame(0, 41);
+        let expected_prefix = format!("\x1b[{}B", LOGO.len());
+        let expected_suffix = format!("\x1b[{}A", LOGO.len());
         assert!(
-            frame.starts_with("\x1b[s"),
-            "underline frame must start with SCO save cursor"
+            frame.starts_with(&expected_prefix),
+            "underline frame must start with cursor-down past logo; got: {frame:?}"
         );
         assert!(
-            frame.ends_with("\x1b[u"),
-            "underline frame must end with SCO restore cursor"
+            frame.ends_with(&expected_suffix),
+            "underline frame must end with cursor-up to first logo row; got: {frame:?}"
         );
     }
 
