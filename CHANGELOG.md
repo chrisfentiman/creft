@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/chrisfentiman/creft/compare/creft-v0.2.8...creft-v0.3.0) (2026-04-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* runtime bindings, shell completions, and install infra
+
+### Features
+
+* runtime bindings, shell completions, and install infra ([1c97273](https://github.com/chrisfentiman/creft/commit/1c9727377ec18235d6804dd0008cbdae7b986ee8))
+
 ## [0.2.8](https://github.com/chrisfentiman/creft/compare/creft-v0.2.7...creft-v0.2.8) (2026-04-12)
 
 
