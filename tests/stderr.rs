@@ -5,6 +5,7 @@ mod helpers;
 
 use helpers::{creft_env, creft_with};
 use predicates::prelude::*;
+use pretty_assertions::assert_eq;
 
 // ── single-block: stderr captured and discarded on success ────────────────────
 
