@@ -74,7 +74,8 @@ jobs:
         run: |
           gh release upload ${{ needs.release-please.outputs.tag_name }} \
             target/${{ matrix.target }}/release/creft-${{ matrix.target }}.tar.gz \
-            target/${{ matrix.target }}/release/creft-${{ matrix.target }}.tar.gz.sha256
+            target/${{ matrix.target }}/release/creft-${{ matrix.target }}.tar.gz.sha256 \
+            --clobber
 
   publish-crates:
     needs: release-please
