@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/chrisfentiman/creft/compare/creft-v0.3.2...creft-v0.3.3) (2026-04-16)
+
+
+### Bug Fixes
+
+* **markdown:** detect and prevent nested fence parsing bugs ([#58](https://github.com/chrisfentiman/creft/issues/58)) ([e970391](https://github.com/chrisfentiman/creft/commit/e970391ceb9bcfcc442d7367c0cce2187473782b))
+
 ## [0.3.2](https://github.com/chrisfentiman/creft/compare/creft-v0.3.1...creft-v0.3.2) (2026-04-16)
 
 
