@@ -569,10 +569,9 @@ pub(crate) fn extract_uv_indexes(content: &str) -> Vec<String> {
                     current_url = Some(url);
                 }
             }
-            "default"
-                if value.trim() == "true" => {
-                    current_is_default = true;
-                }
+            "default" if value.trim() == "true" => {
+                current_is_default = true;
+            }
             _ => {}
         }
     }
