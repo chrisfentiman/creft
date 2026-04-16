@@ -77,7 +77,7 @@ pub fn cmd_add(
     if !force && !no_validate {
         let (def, body) = frontmatter::parse(&input)?;
         let (_, blocks) = markdown::extract_blocks(&body);
-        let result = validate::validate_skill(&def, &blocks, Some(ctx));
+        let result = validate::validate_skill(&def, &blocks, &body, Some(ctx));
 
         for w in &result.warnings {
             eprintln!("warning: {}", w);
