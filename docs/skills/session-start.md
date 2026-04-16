@@ -3,7 +3,7 @@ name: _creft session start
 description: Output creft context for session initialization. Used by hook-based harness integrations.
 ---
 
-```bash
+````bash
 # Output creft context for the current session.
 # Harnesses that support hooks call this at session start
 # and inject the output into the agent's context.
@@ -77,4 +77,4 @@ Run `creft add --help` for the complete format reference.
 
 Local skills shadow global ones with the same name.
 CREFT_CONTEXT
-```
+````

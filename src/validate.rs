@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::doctor;
+use crate::markdown;
 use crate::model::{AppContext, CodeBlock, CommandDef, PLACEHOLDER_RE};
 use crate::registry_config::{self, HttpMethod, RegistryEndpoint};
 use crate::store;
@@ -325,13 +326,27 @@ fn validate_short_format(short: &str, errors: &mut Vec<ValidationDiagnostic>) {
 pub fn validate_skill(
     def: &CommandDef,
     blocks: &[CodeBlock],
+    body: &str,
     ctx: Option<&AppContext>,
 ) -> ValidationResult {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
-    // Frontmatter name checks run first — they are more fundamental than
-    // block-level problems and give the author the most actionable feedback.
+    // Fence nesting check runs before other checks — a skill with improperly
+    // nested fences will be misparsed by the runner, potentially invoking LLM
+    // providers unintentionally. This is a correctness issue, not a style issue.
+    for w in markdown::check_fence_nesting(body) {
+        errors.push(ValidationDiagnostic {
+            block_index: None,
+            lang: None,
+            message: w.message,
+            line: None,
+        });
+    }
+
+    // Frontmatter name checks run first among structural checks — they are more
+    // fundamental than block-level problems and give the author the most
+    // actionable feedback.
     check_frontmatter_names(def, &mut errors);
 
     // Skill-level check: description length.
@@ -1118,7 +1133,7 @@ mod tests {
     fn test_placeholder_all_declared() {
         let def = make_def(vec!["repo", "number"], vec![]);
         let block = make_block("bash", "gh api repos/{{repo}}/issues/{{number}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.is_clean(),
             "expected no warnings or errors, got: {:?}",
@@ -1130,7 +1145,7 @@ mod tests {
     fn test_placeholder_undeclared_no_default() {
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "echo {{foo}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert_eq!(result.warnings.len(), 1);
         assert!(
             result.warnings[0]
@@ -1145,7 +1160,7 @@ mod tests {
     fn test_placeholder_undeclared_with_default() {
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "echo {{foo|bar}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].message.contains("has default"));
         assert!(result.errors.is_empty());
@@ -1155,7 +1170,7 @@ mod tests {
     fn test_placeholder_prev_in_first_block() {
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "echo {{prev}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert_eq!(result.warnings.len(), 1);
         assert!(
             result.warnings[0]
@@ -1169,7 +1184,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         let block0 = make_block("bash", "echo hello");
         let block1 = make_block("bash", "echo {{prev}}");
-        let result = validate_skill(&def, &[block0, block1], None);
+        let result = validate_skill(&def, &[block0, block1], "", None);
         assert!(
             result.is_clean(),
             "expected no warnings for {{prev}} in block 1"
@@ -1180,7 +1195,7 @@ mod tests {
     fn test_placeholder_flags_recognized() {
         let def = make_def(vec![], vec!["format", "style"]);
         let block = make_block("bash", "echo {{format}} {{style}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.is_clean(), "flags should be in declared set");
     }
 
@@ -1188,14 +1203,14 @@ mod tests {
     fn test_no_placeholders() {
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "echo hello world");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.is_clean());
     }
 
     #[test]
     fn test_empty_blocks() {
         let def = make_def(vec![], vec![]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(result.is_clean());
     }
 
@@ -1206,7 +1221,7 @@ mod tests {
         // apply when there's no previous block.
         let def = make_def(vec!["prev"], vec![]);
         let block = make_block("bash", "echo {{prev}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         // {{prev}} in block 0 produces the "first block has no preceding block" warning
         // regardless of whether "prev" is also an arg name.
         assert_eq!(result.warnings.len(), 1);
@@ -1254,7 +1269,7 @@ mod tests {
     fn test_multiple_undeclared_placeholders() {
         let def = make_def(vec!["declared"], vec![]);
         let block = make_block("bash", "echo {{declared}} {{missing1}} {{missing2}}");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         // declared is fine, missing1 and missing2 each produce a warning
         assert_eq!(result.warnings.len(), 2);
     }
@@ -1300,7 +1315,7 @@ mod tests {
         // Only runs if bash is available; otherwise the check is skipped silently.
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "echo hello\nif true; then\n  echo ok\nfi\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "valid bash should produce no errors"
@@ -1316,7 +1331,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // Missing `fi` — bash -n will catch this.
         let block = make_block("bash", "if true; then\n  echo broken\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.errors.is_empty(),
             "invalid bash should produce at least one error"
@@ -1331,7 +1346,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // Invalid indentation — ast.parse will reject this.
         let block = make_block("python", "def foo():\nprint('bad indent')\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.errors.is_empty(),
             "invalid python should produce at least one error"
@@ -1345,7 +1360,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("python", "def foo():\n    print('hello')\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "valid python should produce no errors"
@@ -1361,7 +1376,7 @@ mod tests {
         }
         let def = make_def(vec!["name"], vec![]);
         let block = make_block("bash", "echo {{name}}\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "placeholder in bash should not cause syntax error after sanitization; errors: {:?}",
@@ -1374,7 +1389,7 @@ mod tests {
         // Unknown languages are silently skipped — no errors, no warnings from syntax check.
         let def = make_def(vec![], vec![]);
         let block = make_block("cobol", "MOVE 1 TO X");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
     }
 
@@ -1384,7 +1399,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // Deliberately broken TS syntax — should produce no error since ts is not checked.
         let block = make_block("typescript", "const x: = 1;");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "typescript should not be validated (too heavy)"
@@ -1407,7 +1422,7 @@ mod tests {
     fn hyphenated_flag_in_bash_block_emits_env_var_warning() {
         let def = make_def(vec![], vec!["always-confirm"]);
         let block = make_block("bash", "echo hello\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "hyphenated flag in bash block should not produce errors"
@@ -1430,7 +1445,7 @@ mod tests {
         // the normalized name since the subtraction-expression trap doesn't apply.
         let def = make_def(vec![], vec!["always-confirm"]);
         let block = make_block("python", "print('hello')\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "hyphenated flag in python block should not produce errors"
@@ -1445,7 +1460,7 @@ mod tests {
     fn non_hyphenated_flag_in_bash_block_emits_no_env_var_warning() {
         let def = make_def(vec![], vec!["format"]);
         let block = make_block("bash", "echo hello\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
         assert!(
             env_var_hints(&result).is_empty(),
@@ -1458,7 +1473,7 @@ mod tests {
         // Uses non-reserved hyphenated flag names to test env var hint emission.
         let def = make_def(vec![], vec!["output-format", "output-path"]);
         let block = make_block("bash", "echo hello\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
         let hints = env_var_hints(&result);
         assert_eq!(
@@ -1488,7 +1503,7 @@ mod tests {
         }
         let def = make_def(vec![], vec!["always-confirm"]);
         let block = make_block("bash", "echo {{always-confirm}}\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "{{always-confirm}} in bash should not produce a syntax error; errors: {:?}",
@@ -1567,7 +1582,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("sh", "echo hello\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "valid sh should produce no errors"
@@ -1581,7 +1596,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("sh", "if true; then\n  echo broken\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.errors.is_empty(),
             "invalid sh should produce at least one error"
@@ -1597,7 +1612,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("zsh", "echo hello\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "valid zsh should produce no errors"
@@ -1670,7 +1685,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("node", "console.log('hello');\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "valid node should produce no errors"
@@ -1684,7 +1699,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("node", "const x = ;\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.errors.is_empty(),
             "invalid node should produce at least one error"
@@ -1700,7 +1715,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("javascript", "var x = 1;\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
     }
 
@@ -1723,7 +1738,7 @@ mod tests {
         // 81-character description should produce exactly one warning about length.
         let desc = "a".repeat(DESCRIPTION_WARN_LEN + 1);
         let def = make_def_with_desc(&desc);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert_eq!(
             result.warnings.len(),
             1,
@@ -1752,7 +1767,7 @@ mod tests {
         // Exactly 80 characters: no warning.
         let desc = "a".repeat(DESCRIPTION_WARN_LEN);
         let def = make_def_with_desc(&desc);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.warnings.is_empty(),
             "no warning expected at exactly {DESCRIPTION_WARN_LEN} chars"
@@ -1762,7 +1777,7 @@ mod tests {
     #[test]
     fn test_description_length_no_warn_short() {
         let def = make_def_with_desc("Short description");
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         // May have no warnings (no blocks, no placeholders).
         let has_desc_warn = result
             .warnings
@@ -1779,7 +1794,7 @@ mod tests {
         // The diagnostic for description length must be skill-level (no block_index).
         let desc = "a".repeat(DESCRIPTION_WARN_LEN + 1);
         let def = make_def_with_desc(&desc);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         let desc_warn = result
             .warnings
             .iter()
@@ -1836,7 +1851,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // Missing `fi` — bash -n will add errors, so syntax_ok will be false.
         let block = make_block("bash", "if true; then\n  echo broken\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.errors.is_empty(),
             "syntax failure should produce errors"
@@ -1852,7 +1867,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("python", "x = 1\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         // No shellcheck warnings should be present for a python block.
         let shellcheck_warnings: Vec<_> = result
             .warnings
@@ -1939,7 +1954,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block("bash", "read answer\necho \"$answer\"\n");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             !result.warnings.is_empty(),
             "shellcheck must produce at least one warning for 'read' without -r (SC2162); got none"
@@ -1963,7 +1978,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // creft nonexistent-xyzzy-skill would fail resolution if ctx were present.
         let block = make_block("bash", "creft nonexistent-xyzzy-skill");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let sub_skill_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -1985,7 +2000,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         // Even if ctx were provided, python blocks are skipped.
         let block = make_block("python", "# creft nonexistent-xyzzy-skill");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let sub_skill_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -2019,7 +2034,7 @@ mod tests {
         // warning containing "not found on PATH".
         let def = make_def(vec![], vec![]);
         let block = make_block_with_deps("bash", "echo hello", vec!["__nonexistent_dep_xyzzy__"]);
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let dep_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -2047,7 +2062,7 @@ mod tests {
         }
         let def = make_def(vec![], vec![]);
         let block = make_block_with_deps("bash", "ls -la", vec!["ls"]);
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let dep_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -2065,7 +2080,7 @@ mod tests {
         // A block with no deps declared produces no dep resolution warnings.
         let def = make_def(vec![], vec![]);
         let block = make_block("python", "import sys");
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let dep_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -2083,7 +2098,7 @@ mod tests {
         // A block with an unknown language and declared deps produces no warnings.
         let def = make_def(vec![], vec![]);
         let block = make_block_with_deps("cobol", "MOVE 1 TO X", vec!["some-cobol-lib"]);
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let dep_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -2143,7 +2158,7 @@ mod tests {
     fn test_llm_block_empty_prompt_error() {
         let def = make_def(vec![], vec![]);
         let block = make_llm_block("   ", Some(default_llm_config()));
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert_eq!(result.errors.len(), 1);
         assert!(
             result.errors[0].message.contains("no prompt text"),
@@ -2157,7 +2172,7 @@ mod tests {
         let def = make_def(vec![], vec![]);
         let mut block = make_llm_block("some prompt", None);
         block.llm_parse_error = Some("mapping values are not allowed here".to_string());
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert_eq!(result.errors.len(), 1);
         assert!(
             result.errors[0].message.contains("invalid YAML header"),
@@ -2179,7 +2194,7 @@ mod tests {
         let mut config = default_llm_config();
         config.provider = "cat".to_string();
         let block = make_llm_block("hello from llm block", Some(config));
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "expected no errors, got: {:?}",
@@ -2193,7 +2208,7 @@ mod tests {
         let mut config = default_llm_config();
         config.provider = "nonexistent-llm-provider-xyz".to_string();
         let block = make_llm_block("my prompt", Some(config));
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         assert!(
             result.errors.is_empty(),
             "missing provider should warn, not error"
@@ -2215,7 +2230,7 @@ mod tests {
         let mut config = default_llm_config();
         config.provider = "cat".to_string();
         let block = make_llm_block("if then else fi {{ broken shell syntax }", Some(config));
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         // No syntax errors from the llm block content.
         assert!(
             result.errors.is_empty(),
@@ -2231,7 +2246,7 @@ mod tests {
         let mut config = default_llm_config();
         config.provider = "cat".to_string();
         let block = make_llm_block("Summarize {{some_arg}}", Some(config));
-        let result = validate_skill(&def, &[block], None);
+        let result = validate_skill(&def, &[block], "", None);
         let has_placeholder_warning = result
             .warnings
             .iter()
@@ -2251,7 +2266,7 @@ mod tests {
         let mut config = default_llm_config();
         config.provider = "cat".to_string();
         let llm_block = make_llm_block("Review this: {{prev}}", Some(config));
-        let result = validate_skill(&def, &[bash_block, llm_block], None);
+        let result = validate_skill(&def, &[bash_block, llm_block], "", None);
         let has_prev_warning = result.warnings.iter().any(|w| w.message.contains("prev"));
         assert!(
             !has_prev_warning,
@@ -2314,7 +2329,7 @@ mod tests {
     #[case::version("version")]
     fn reserved_flag_name_produces_error(#[case] name: &str) {
         let def = make_def_with_flags(vec![make_flag(name, None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         let msg = result
             .errors
             .iter()
@@ -2333,7 +2348,7 @@ mod tests {
     #[case::cap_v("V")]
     fn reserved_short_flag_produces_error(#[case] short: &str) {
         let def = make_def_with_flags(vec![make_flag("output", Some(short))]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("reserved")),
             "expected 'reserved' error for short flag '{short}', got: {:?}",
@@ -2344,7 +2359,7 @@ mod tests {
     #[test]
     fn duplicate_flag_long_names_produce_error() {
         let def = make_def_with_flags(vec![make_flag("output", None), make_flag("output", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2361,7 +2376,7 @@ mod tests {
             make_flag("output", Some("o")),
             make_flag("other", Some("o")),
         ]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2375,7 +2390,7 @@ mod tests {
     #[test]
     fn duplicate_arg_names_produce_error() {
         let def = make_def(vec!["repo", "repo"], vec![]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2389,7 +2404,7 @@ mod tests {
     #[test]
     fn flag_and_arg_sharing_name_produce_conflict_error() {
         let def = make_def_with_flags_and_args(vec![make_flag("output", None)], vec!["output"]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("conflict")),
             "expected 'conflict' error for flag/arg name collision, got: {:?}",
@@ -2400,7 +2415,7 @@ mod tests {
     #[test]
     fn valid_flag_and_short_passes_cleanly() {
         let def = make_def_with_flags(vec![make_flag("output", Some("o"))]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.is_empty(),
             "expected no errors for valid flag, got: {:?}",
@@ -2411,7 +2426,7 @@ mod tests {
     #[test]
     fn no_flags_no_args_passes_cleanly() {
         let def = make_def(vec![], vec![]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.is_empty(),
             "expected no errors for empty flags/args, got: {:?}",
@@ -2424,7 +2439,7 @@ mod tests {
     #[test]
     fn valid_flag_name_output_passes() {
         let def = make_def_with_flags(vec![make_flag("output", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.is_empty(),
             "expected no errors for flag 'output', got: {:?}",
@@ -2435,7 +2450,7 @@ mod tests {
     #[test]
     fn empty_flag_name_produces_error() {
         let def = make_def_with_flags(vec![make_flag("", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("empty")),
             "expected 'empty' error for blank flag name, got: {:?}",
@@ -2446,7 +2461,7 @@ mod tests {
     #[test]
     fn flag_name_with_space_produces_invalid_chars_error() {
         let def = make_def_with_flags(vec![make_flag("foo bar", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2460,7 +2475,7 @@ mod tests {
     #[test]
     fn flag_name_with_slash_produces_invalid_chars_error() {
         let def = make_def_with_flags(vec![make_flag("foo/bar", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2474,7 +2489,7 @@ mod tests {
     #[test]
     fn flag_name_starting_with_digit_produces_error() {
         let def = make_def_with_flags(vec![make_flag("3things", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2488,7 +2503,7 @@ mod tests {
     #[test]
     fn empty_arg_name_produces_error() {
         let def = make_def(vec![""], vec![]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("empty")),
             "expected 'empty' error for blank arg name, got: {:?}",
@@ -2499,7 +2514,7 @@ mod tests {
     #[test]
     fn arg_name_with_space_produces_invalid_chars_error() {
         let def = make_def(vec!["my arg"], vec![]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2513,7 +2528,7 @@ mod tests {
     #[test]
     fn multichar_short_form_produces_error() {
         let def = make_def_with_flags(vec![make_flag("output", Some("ab"))]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2527,7 +2542,7 @@ mod tests {
     #[test]
     fn digit_short_form_produces_error() {
         let def = make_def_with_flags(vec![make_flag("output", Some("3"))]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result
                 .errors
@@ -2541,7 +2556,7 @@ mod tests {
     #[test]
     fn empty_short_form_produces_error() {
         let def = make_def_with_flags(vec![make_flag("output", Some(""))]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("empty")),
             "expected 'empty' error for blank short form, got: {:?}",
@@ -2554,7 +2569,7 @@ mod tests {
         // "dry-run" contains a hyphen which is valid — the reserved check fires,
         // not the character check.
         let def = make_def_with_flags(vec![make_flag("dry-run", None)]);
-        let result = validate_skill(&def, &[], None);
+        let result = validate_skill(&def, &[], "", None);
         assert!(
             result.errors.iter().any(|e| e.message.contains("reserved")),
             "expected 'reserved' error for 'dry-run', got: {:?}",
@@ -2567,6 +2582,42 @@ mod tests {
                 .iter()
                 .any(|e| e.message.contains("invalid characters") && e.message.contains("dry-run")),
             "should not produce 'invalid characters' error for 'dry-run' (valid chars)"
+        );
+    }
+
+    // ── fence nesting integration tests ───────────────────────────────────────
+
+    #[test]
+    fn validate_skill_rejects_body_with_improperly_nested_fences() {
+        let def = make_def(vec![], vec![]);
+        // 3-backtick bash block containing an inner ```python fence — the inner
+        // fence would close the outer block, truncating the bash block.
+        let body = "```bash\necho hello\n```python\nprint('hi')\n```\n```\n";
+        let result = validate_skill(&def, &[], body, None);
+        assert!(
+            result.has_errors(),
+            "expected fence nesting error, got no errors"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("backticks")),
+            "expected error message to mention backticks, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn validate_skill_accepts_body_with_four_backtick_outer_fence() {
+        let def = make_def(vec![], vec![]);
+        // 4-backtick outer fence containing inner 3-backtick examples — valid.
+        let body = "````bash\necho hello\n```python\nprint('hi')\n```\n````\n";
+        let result = validate_skill(&def, &[], body, None);
+        assert!(
+            !result.has_errors(),
+            "expected no errors for properly nested fences, got: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
     }
 }

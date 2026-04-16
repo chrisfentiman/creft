@@ -7,6 +7,8 @@ use regex::Regex;
 use yansi::Paint;
 
 use crate::error::CreftError;
+use crate::frontmatter;
+use crate::markdown;
 use crate::model::{AppContext, CodeBlock, SkillSource};
 use crate::registry;
 use crate::settings::Settings;
@@ -62,6 +64,8 @@ pub(crate) struct DoctorReport {
     pub dep_checks: Vec<(usize, Vec<CheckResult>)>,
     /// Miscellaneous informational checks (cycle detection, depth limit, prev usage).
     pub misc_checks: Vec<CheckResult>,
+    /// Fence nesting warnings (inner fences that prematurely close outer fences).
+    pub fence_checks: Vec<CheckResult>,
     /// Reports for sub-skills (recursive).
     pub sub_reports: Vec<DoctorReport>,
 }
@@ -569,7 +573,27 @@ fn run_skill_check_inner(
     let mut sub_skill_checks: Vec<CheckResult> = Vec::new();
     let mut dep_checks: Vec<(usize, Vec<CheckResult>)> = Vec::new();
     let mut misc_checks: Vec<CheckResult> = Vec::new();
+    let mut fence_checks: Vec<CheckResult> = Vec::new();
     let mut sub_reports: Vec<DoctorReport> = Vec::new();
+
+    // Run fence nesting check on the raw body. The raw content includes
+    // frontmatter, so strip it before passing to check_fence_nesting to keep
+    // line numbers consistent with the creft-add path.
+    if let Ok(raw) = store::read_raw_from(ctx, name, source)
+        && let Ok((_, body)) = frontmatter::parse(&raw)
+    {
+        for w in markdown::check_fence_nesting(&body) {
+            fence_checks.push(CheckResult {
+                label: format!("line {} ({} backticks)", w.outer_line, w.outer_backticks),
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "contains inner fence at line {} — use {}+ backticks on outer fence",
+                    w.line,
+                    w.outer_backticks + 1,
+                ),
+            });
+        }
+    }
 
     if cmd.blocks.is_empty() {
         misc_checks.push(CheckResult {
@@ -586,6 +610,7 @@ fn run_skill_check_inner(
             sub_skill_checks,
             dep_checks,
             misc_checks,
+            fence_checks,
             sub_reports,
         });
     }
@@ -780,6 +805,7 @@ fn run_skill_check_inner(
         sub_skill_checks,
         dep_checks,
         misc_checks,
+        fence_checks,
         sub_reports,
     })
 }
@@ -1084,6 +1110,19 @@ fn render_skill_indented(report: &DoctorReport, indent: usize) {
         }
     }
 
+    if !report.fence_checks.is_empty() {
+        eprintln!("{}fence nesting:", inner);
+        for r in &report.fence_checks {
+            eprintln!(
+                "{}{} {} ({})",
+                item,
+                status_marker(r.status),
+                r.label,
+                r.detail
+            );
+        }
+    }
+
     for r in &report.misc_checks {
         eprintln!(
             "{}{} {} ({})",
@@ -1134,12 +1173,17 @@ fn count_failures_in_report(report: &DoctorReport) -> usize {
         .iter()
         .filter(|c| c.status == CheckStatus::Fail)
         .count();
+    let fence = report
+        .fence_checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Fail)
+        .count();
     let sub: usize = report
         .sub_reports
         .iter()
         .map(count_failures_in_report)
         .sum();
-    interp + env + cmds + sub_skills + deps + misc + sub
+    interp + env + cmds + sub_skills + deps + misc + fence + sub
 }
 
 /// Returns true if any check result in the slice has `Fail` status.
@@ -1155,6 +1199,7 @@ pub(crate) fn report_has_failures(report: &DoctorReport) -> bool {
         .chain(report.env_checks.iter())
         .chain(report.sub_skill_checks.iter())
         .chain(report.misc_checks.iter())
+        .chain(report.fence_checks.iter())
         .any(|r| r.status == CheckStatus::Fail)
         || report
             .command_checks
@@ -1675,6 +1720,7 @@ mod tests {
                 status: CheckStatus::Warn,
                 detail: "$CREFT_PREV is removed in v0.2.0. Multi-block skills now pipe stdout directly. Remove $CREFT_PREV references.".into(),
             }],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         render_skill(&report); // should not panic
@@ -1691,6 +1737,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         let report = DoctorReport {
@@ -1702,6 +1749,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![sub_report],
         };
         render_skill(&report); // should not panic
@@ -1736,6 +1784,7 @@ mod tests {
                 ),
             ],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         render_skill(&report); // should not panic
@@ -1758,6 +1807,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         assert!(!report_has_failures(&report));
@@ -1778,6 +1828,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         assert!(report_has_failures(&report));
@@ -1801,6 +1852,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         assert!(report_has_failures(&report));
@@ -1824,6 +1876,7 @@ mod tests {
                 }],
             )],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         assert!(report_has_failures(&report));
@@ -1844,6 +1897,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![],
         };
         let report = DoctorReport {
@@ -1855,6 +1909,7 @@ mod tests {
             sub_skill_checks: vec![],
             dep_checks: vec![],
             misc_checks: vec![],
+            fence_checks: vec![],
             sub_reports: vec![sub_report],
         };
         assert!(report_has_failures(&report));

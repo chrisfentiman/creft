@@ -164,6 +164,104 @@ fn parse_deps(code: &str, lang: &str) -> Vec<String> {
         .collect()
 }
 
+/// A finding from fence nesting analysis.
+#[derive(Debug, Clone)]
+pub struct FenceWarning {
+    /// Line number (1-indexed) of the inner fence that would close the outer fence.
+    pub line: usize,
+    /// Line number (1-indexed) of the outer fence's opening.
+    pub outer_line: usize,
+    /// Number of backticks on the outer fence.
+    pub outer_backticks: usize,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// Check raw markdown for inner fences that would prematurely close outer fences.
+///
+/// Returns a list of warnings. An empty list means no nesting issues were found.
+///
+/// This function mirrors the fence-matching logic of `extract_blocks` but does not
+/// extract content — it only checks for the specific failure mode where an inner
+/// fence (intended as example content) matches the closing fence pattern of an
+/// outer block.
+pub fn check_fence_nesting(body: &str) -> Vec<FenceWarning> {
+    let mut warnings = Vec::new();
+
+    let mut in_block = false;
+    let mut outer_line: usize = 0;
+    let mut outer_n: usize = 0;
+    // Tracks whether the outer block has an info string. Bare blocks are
+    // consumed to keep the state machine aligned with extract_blocks, but
+    // inner-fence tracking only applies to named blocks.
+    let mut has_info: bool = false;
+    let mut inner_fence_lines: Vec<usize> = Vec::new();
+
+    for (idx, line) in body.lines().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim_start();
+
+        if !in_block {
+            if !trimmed.starts_with("```") {
+                continue;
+            }
+            let n = trimmed.chars().take_while(|c| *c == '`').count();
+            if n < 3 {
+                continue;
+            }
+            let info = trimmed[n..].trim();
+            // Enter block state regardless of whether there is an info string,
+            // matching extract_blocks which consumes bare fences too.
+            in_block = true;
+            outer_line = line_num;
+            outer_n = n;
+            has_info = !info.is_empty();
+            inner_fence_lines.clear();
+        } else {
+            // Use the same closing-fence check as extract_blocks:
+            //   starts_with exactly outer_n backticks AND the rest is empty.
+            let closing = "`".repeat(outer_n);
+            if trimmed.starts_with(&closing) && trimmed[outer_n..].trim().is_empty() {
+                // Closing fence: emit warning if we tracked inner fences in a named block.
+                if has_info && !inner_fence_lines.is_empty() {
+                    let inner_lines_str: Vec<String> =
+                        inner_fence_lines.iter().map(|l| l.to_string()).collect();
+                    let first_inner = inner_fence_lines[0];
+                    let msg = format!(
+                        "block at line {} uses {} backticks but contains inner fence syntax at line {}. \
+                        Use {} or more backticks on the outer fence to contain inner fence examples.",
+                        outer_line,
+                        outer_n,
+                        inner_lines_str.join(", "),
+                        outer_n + 1,
+                    );
+                    warnings.push(FenceWarning {
+                        line: first_inner,
+                        outer_line,
+                        outer_backticks: outer_n,
+                        message: msg,
+                    });
+                }
+                in_block = false;
+            } else if has_info && trimmed.starts_with(&closing) {
+                // The line starts with at least outer_n backticks but is not a closing fence.
+                // Only track it as an inner fence if it carries a real info string — i.e., the
+                // full backtick run on this line ends and is followed by non-empty text.  A line
+                // that is only backticks (e.g. ``````) has no info string and is plain content
+                // in extract_blocks, so it must not be tracked here either.
+                let m = trimmed.chars().take_while(|c| *c == '`').count();
+                let info = trimmed[m..].trim();
+                if !info.is_empty() {
+                    inner_fence_lines.push(line_num);
+                }
+            }
+            // All other lines (including shorter backtick runs) are plain content.
+        }
+    }
+
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +468,23 @@ mod tests {
     }
 
     #[test]
+    fn four_backtick_outer_fence_treats_inner_three_backtick_examples_as_literal_content() {
+        // A 4-backtick bash block whose content includes 3-backtick examples (as the
+        // session-start skill does) must be parsed as a single block. The inner ```llm
+        // line must appear verbatim in the extracted code, not be treated as a new block.
+        let body = "````bash\necho hello\n```llm\nprompt here\n```\n````\n";
+        let (docs, blocks) = extract_blocks(body);
+        assert!(docs.is_none());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lang, "bash");
+        assert!(
+            blocks[0].code.contains("```llm"),
+            "expected block content to contain literal ```llm, got: {:?}",
+            blocks[0].code,
+        );
+    }
+
+    #[test]
     fn test_non_llm_block_with_triple_dash_in_code() {
         // A bash block whose code body contains "---" must not be mistaken for an llm separator.
         let body = "```bash\necho start\n---\necho end\n```\n";
@@ -379,5 +494,115 @@ mod tests {
         assert_eq!(blocks[0].code, "echo start\n---\necho end");
         assert!(blocks[0].llm_config.is_none());
         assert!(blocks[0].llm_parse_error.is_none());
+    }
+
+    // ── check_fence_nesting tests ─────────────────────────────────────────────
+
+    #[test]
+    fn check_fence_nesting_detects_inner_fence_that_would_close_outer() {
+        // 3-backtick bash block containing ```python and bare ``` — the inner
+        // ``` would close the outer block prematurely.
+        let body = "```bash\necho hello\n```python\nprint('hi')\n```\n```\n";
+        let warnings = check_fence_nesting(body);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].outer_line, 1);
+        assert_eq!(warnings[0].outer_backticks, 3);
+        assert_eq!(warnings[0].line, 3);
+        assert!(warnings[0].message.contains("line 1"));
+        assert!(warnings[0].message.contains("3 backticks"));
+        assert!(warnings[0].message.contains("line 3"));
+        assert!(warnings[0].message.contains("4 or more"));
+    }
+
+    #[test]
+    fn check_fence_nesting_no_warning_for_four_backtick_outer_with_inner_three() {
+        // 4-backtick outer fence containing inner 3-backtick examples — clean.
+        let body = "````bash\necho hello\n```python\nprint('hi')\n```\n````\n";
+        let warnings = check_fence_nesting(body);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_fence_nesting_no_warning_for_block_with_no_inner_fences() {
+        // Normal 3-backtick bash block with no fence-like content.
+        let body = "```bash\necho hello\necho world\n```\n";
+        let warnings = check_fence_nesting(body);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_fence_nesting_flags_only_problematic_block_in_multi_block_body() {
+        // Two blocks: first has inner fence issue, second is clean.
+        let body = concat!(
+            "```bash\n",
+            "echo step1\n",
+            "```python\n",
+            "print('x')\n",
+            "```\n",
+            "```\n",
+            "\n",
+            "````python\n",
+            "print('clean')\n",
+            "````\n",
+        );
+        let warnings = check_fence_nesting(body);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].outer_line, 1);
+    }
+
+    #[test]
+    fn check_fence_nesting_no_false_positive_for_echo_with_backticks_inline() {
+        // echo '```python' does NOT start with backticks — not a fence line.
+        let body = "```bash\necho '```python'\necho done\n```\n";
+        let warnings = check_fence_nesting(body);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_fence_nesting_no_warning_for_unclosed_outer_block() {
+        // An unclosed outer block should not produce a spurious warning.
+        let body = "```bash\necho hello\n```python\nprint('hi')\n";
+        let warnings = check_fence_nesting(body);
+        // The block never closes so no warning is emitted.
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_fence_nesting_four_bare_backticks_inside_three_backtick_block_is_not_a_closing_fence()
+    {
+        // A line of 4 bare backticks inside a 3-backtick block is NOT a closing fence
+        // per extract_blocks (starts_with "```" is true but "````"[3..] is "`", not empty).
+        // The block should remain open and no warning should fire.
+        let body = "```bash\necho hello\n````\necho still inside\n```\n";
+        let warnings = check_fence_nesting(body);
+        assert!(
+            warnings.is_empty(),
+            "4-bare-backtick line inside a 3-backtick block must not trigger a warning; got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn check_fence_nesting_bare_outer_fence_consumes_content_and_does_not_cause_false_positive() {
+        // A bare ``` block (no info string) followed by content including ```bash, then the
+        // matching ```, followed by a real ```bash block with no inner fences. The bare block
+        // must be consumed so that the real block is not misidentified as being inside it.
+        let body = concat!(
+            "```\n",
+            "some content\n",
+            "```bash\n",
+            "echo inside bare\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "echo real block\n",
+            "```\n",
+        );
+        let warnings = check_fence_nesting(body);
+        assert!(
+            warnings.is_empty(),
+            "bare outer fence followed by clean bash block must produce no warnings; got: {:?}",
+            warnings
+        );
     }
 }
