@@ -453,6 +453,7 @@ fn render_animated(term: &console::Term, use_truecolor: bool) -> Result<(), Cref
 #[cfg(test)]
 mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
+    use rstest::rstest;
 
     use super::*;
 
@@ -762,34 +763,19 @@ mod tests {
 
     // ── rgb_to_fixed ──────────────────────────────────────────────────────
 
-    #[test]
-    fn rgb_to_fixed_primary_colors_map_to_known_indices() {
-        // Pure red: 16 + 36*5 + 6*0 + 0 = 196
-        assert_eq!(
-            rgb_to_fixed(255, 0, 0),
-            196,
-            "pure red must map to index 196"
-        );
-        // Pure green: 16 + 36*0 + 6*5 + 0 = 46
-        assert_eq!(
-            rgb_to_fixed(0, 255, 0),
-            46,
-            "pure green must map to index 46"
-        );
-        // Pure blue: 16 + 36*0 + 6*0 + 5 = 21
-        assert_eq!(
-            rgb_to_fixed(0, 0, 255),
-            21,
-            "pure blue must map to index 21"
-        );
-        // Black: 16 + 0 + 0 + 0 = 16
-        assert_eq!(rgb_to_fixed(0, 0, 0), 16, "black must map to index 16");
-        // White: 16 + 36*5 + 6*5 + 5 = 231
-        assert_eq!(
-            rgb_to_fixed(255, 255, 255),
-            231,
-            "white must map to index 231"
-        );
+    #[rstest]
+    #[case::pure_red(255, 0, 0, 196)]
+    #[case::pure_green(0, 255, 0, 46)]
+    #[case::pure_blue(0, 0, 255, 21)]
+    #[case::black(0, 0, 0, 16)]
+    #[case::white(255, 255, 255, 231)]
+    fn rgb_to_fixed_maps_to_known_index(
+        #[case] r: u8,
+        #[case] g: u8,
+        #[case] b: u8,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(rgb_to_fixed(r, g, b), expected);
     }
 
     #[test]
