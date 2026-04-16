@@ -68,10 +68,11 @@ pub(crate) fn cmd_welcome(ctx: &AppContext, force: bool) -> Result<(), CreftErro
     }
 
     let term = console::Term::stdout();
+    let use_truecolor = term.features().true_colors_supported();
     if term.is_term() {
-        render_animated(&term)?;
+        render_animated(&term, use_truecolor)?;
     } else {
-        render_static(&term)?;
+        render_static(&term, use_truecolor)?;
     }
 
     write_marker(ctx)?;
@@ -109,9 +110,9 @@ fn write_marker(ctx: &AppContext) -> Result<(), CreftError> {
 /// Used directly for non-TTY output and as the final frame of the animated
 /// path. Respects the global yansi color condition: when color is disabled
 /// (NO_COLOR, TERM=dumb, non-TTY), all output is plain text.
-fn render_static(term: &console::Term) -> Result<(), CreftError> {
+fn render_static(term: &console::Term, use_truecolor: bool) -> Result<(), CreftError> {
     // &Term implements std::io::Write, so coerce through &mut &Term.
-    render_static_to_writer(&mut &*term)?;
+    render_static_to_writer(&mut &*term, use_truecolor)?;
     Ok(())
 }
 
@@ -120,33 +121,49 @@ fn render_static(term: &console::Term) -> Result<(), CreftError> {
 /// Separated from `render_static` so tests can pass a `Vec<u8>` and inspect
 /// the rendered bytes directly, without depending on `console::Term`'s
 /// internal buffer.
-fn render_static_to_writer(w: &mut dyn std::io::Write) -> std::io::Result<()> {
+fn render_static_to_writer(w: &mut dyn std::io::Write, use_truecolor: bool) -> std::io::Result<()> {
     writeln!(w)?;
     for line in LOGO {
-        writeln!(w, "{}", gradient_line(line, GRAD_FROM, GRAD_TO))?;
+        writeln!(
+            w,
+            "{}",
+            gradient_line(line, GRAD_FROM, GRAD_TO, use_truecolor)
+        )?;
     }
     writeln!(w)?;
-    writeln!(w, "  {}", "Executable skills for Agents".rgb(180, 180, 180))?;
-    writeln!(w, "  v{}", env!("CARGO_PKG_VERSION").rgb(120, 120, 120))?;
+    writeln!(
+        w,
+        "  {}",
+        paint_fg("Executable skills for Agents", 180, 180, 180, use_truecolor)
+    )?;
+    writeln!(
+        w,
+        "  v{}",
+        paint_fg(env!("CARGO_PKG_VERSION"), 120, 120, 120, use_truecolor)
+    )?;
     writeln!(w)?;
-    writeln!(w, "  {}", "Get started:".rgb(212, 160, 23))?;
+    writeln!(
+        w,
+        "  {}",
+        paint_fg("Get started:", 212, 160, 23, use_truecolor)
+    )?;
     writeln!(
         w,
         "    {}    {}",
-        "creft add".rgb(0, 206, 209),
-        "Create a skill from stdin".rgb(160, 160, 160)
+        paint_fg("creft add", 0, 206, 209, use_truecolor),
+        paint_fg("Create a skill from stdin", 160, 160, 160, use_truecolor)
     )?;
     writeln!(
         w,
         "    {}   {}",
-        "creft list".rgb(0, 206, 209),
-        "See available skills".rgb(160, 160, 160)
+        paint_fg("creft list", 0, 206, 209, use_truecolor),
+        paint_fg("See available skills", 160, 160, 160, use_truecolor)
     )?;
     writeln!(
         w,
         "    {}     {}",
-        "creft up".rgb(0, 206, 209),
-        "Set up editor integrations".rgb(160, 160, 160)
+        paint_fg("creft up", 0, 206, 209, use_truecolor),
+        paint_fg("Set up editor integrations", 160, 160, 160, use_truecolor)
     )?;
     writeln!(w)?;
     writeln!(w, "  Run creft --help for the full command reference.")?;
@@ -156,12 +173,48 @@ fn render_static_to_writer(w: &mut dyn std::io::Write) -> std::io::Result<()> {
 
 // ── Color helpers ──────────────────────────────────────────────────────────
 
+/// Convert an RGB color to the nearest index in the ANSI 256-color cube.
+///
+/// The 256-color palette encodes a 6x6x6 color cube at indices 16-231.
+/// Each channel maps from 0-255 to 0-5. The formula is:
+///   index = 16 + 36*r_idx + 6*g_idx + b_idx
+///
+/// Grayscale ramp (indices 232-255) is not used — the 6x6x6 cube is
+/// sufficient for gradient approximation and simpler to implement.
+fn rgb_to_fixed(r: u8, g: u8, b: u8) -> u8 {
+    // Map each channel from 0-255 to 0-5.
+    // The thresholds match the standard 256-color cube boundaries.
+    fn to_ansi(v: u8) -> u8 {
+        match v {
+            0..=47 => 0,
+            48..=115 => 1,
+            116..=155 => 2,
+            156..=195 => 3,
+            196..=235 => 4,
+            236..=255 => 5,
+        }
+    }
+    16 + 36 * to_ansi(r) + 6 * to_ansi(g) + to_ansi(b)
+}
+
+/// Apply a foreground color to a string, choosing truecolor or 256-color.
+///
+/// When `use_truecolor` is true, emits `\x1b[38;2;R;G;Bm`. When false,
+/// converts to the nearest 256-color index and emits `\x1b[38;5;Nm`.
+fn paint_fg(s: &str, r: u8, g: u8, b: u8, use_truecolor: bool) -> yansi::Painted<&str> {
+    if use_truecolor {
+        s.rgb(r, g, b)
+    } else {
+        s.fixed(rgb_to_fixed(r, g, b))
+    }
+}
+
 /// Apply a horizontal RGB color gradient to a single line of text.
 ///
 /// Each character's color is linearly interpolated between `from` and `to`
 /// based on its position in the string. When yansi is globally disabled,
 /// returns the plain text unchanged — yansi's `Display` impl omits escapes.
-fn gradient_line(text: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
+fn gradient_line(text: &str, from: (u8, u8, u8), to: (u8, u8, u8), use_truecolor: bool) -> String {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     if n == 0 {
@@ -178,7 +231,7 @@ fn gradient_line(text: &str, from: (u8, u8, u8), to: (u8, u8, u8)) -> String {
         let g = lerp_u8(from.1, to.1, t);
         let b = lerp_u8(from.2, to.2, t);
         let s = ch.to_string();
-        let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+        let _ = write!(out, "{}", paint_fg(s.as_str(), r, g, b, use_truecolor));
     }
     out
 }
@@ -214,7 +267,7 @@ fn gradient_color_at(i: usize, total: usize) -> (u8, u8, u8) {
 /// Each line is written with `\r\n` so the cursor returns to column 0 on every line
 /// regardless of terminal state. After the last logo line, a VT100 cursor-up sequence
 /// (`\x1b[{n}A`) returns the cursor to the first logo row, ready for the next frame.
-fn build_reveal_frame(reveal_col: usize) -> String {
+fn build_reveal_frame(reveal_col: usize, use_truecolor: bool) -> String {
     let mut out = String::with_capacity(2048);
 
     for line in LOGO {
@@ -224,7 +277,7 @@ fn build_reveal_frame(reveal_col: usize) -> String {
             if i < reveal_col {
                 let (r, g, b) = gradient_color_at(i, total);
                 let s = ch.to_string();
-                let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+                let _ = write!(out, "{}", paint_fg(s.as_str(), r, g, b, use_truecolor));
             } else {
                 out.push(' ');
             }
@@ -248,7 +301,7 @@ fn build_reveal_frame(reveal_col: usize) -> String {
 /// Cursor is assumed to be at the first logo row on entry. The frame moves
 /// down past the logo, writes the underline characters, then returns the cursor
 /// to the first logo row with an equivalent cursor-up sequence.
-fn build_underline_frame(sweep_col: usize, logo_width: usize) -> String {
+fn build_underline_frame(sweep_col: usize, logo_width: usize, use_truecolor: bool) -> String {
     let mut out = String::with_capacity(512);
 
     // Move down past the logo to the underline row, then reset to column 0.
@@ -262,7 +315,7 @@ fn build_underline_frame(sweep_col: usize, logo_width: usize) -> String {
         if i < sweep_col {
             let (r, g, b) = gradient_color_at(i, logo_width);
             let s = UNDERLINE_CHAR.to_string();
-            let _ = write!(out, "{}", s.as_str().rgb(r, g, b));
+            let _ = write!(out, "{}", paint_fg(s.as_str(), r, g, b, use_truecolor));
         } else {
             out.push(' ');
         }
@@ -314,11 +367,11 @@ impl Drop for CursorGuard<'_> {
 /// Each frame is built as a single `String` containing all ANSI escape sequences
 /// and written with one `term.write_str()` call. One write per frame eliminates
 /// the flicker caused by multiple sequential flush calls.
-fn render_animated(term: &console::Term) -> Result<(), CreftError> {
+fn render_animated(term: &console::Term, use_truecolor: bool) -> Result<(), CreftError> {
     let (rows, cols) = term.size();
 
     if cols < 50 || rows < 15 {
-        return render_static(term);
+        return render_static(term, use_truecolor);
     }
 
     // SIGINT cancellation — same pattern as src/cmd/run.rs.
@@ -353,14 +406,14 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let frame = build_reveal_frame(reveal_col);
+        let frame = build_reveal_frame(reveal_col, use_truecolor);
         term.write_str(&frame)?;
         std::thread::sleep(std::time::Duration::from_millis(REVEAL_FRAME_MS));
         reveal_col += REVEAL_COLS_PER_FRAME;
     }
     // Final full-reveal frame ensures every column is visible.
     if !cancel.load(Ordering::Relaxed) {
-        let frame = build_reveal_frame(logo_width);
+        let frame = build_reveal_frame(logo_width, use_truecolor);
         term.write_str(&frame)?;
     }
 
@@ -370,14 +423,14 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let frame = build_underline_frame(sweep_col, logo_width);
+        let frame = build_underline_frame(sweep_col, logo_width, use_truecolor);
         term.write_str(&frame)?;
         std::thread::sleep(std::time::Duration::from_millis(UNDERLINE_FRAME_MS));
         sweep_col += UNDERLINE_COLS_PER_FRAME;
     }
     // Final full-width underline frame.
     if !cancel.load(Ordering::Relaxed) {
-        let frame = build_underline_frame(logo_width, logo_width);
+        let frame = build_underline_frame(logo_width, logo_width, use_truecolor);
         term.write_str(&frame)?;
         // Brief hold so the completed image is visible before clearing.
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -390,7 +443,7 @@ fn render_animated(term: &console::Term) -> Result<(), CreftError> {
     // Clear the animation region (blank + logo + underline) and replace with
     // static getting-started output.
     term.clear_last_lines(1 + logo_height + 1)?;
-    render_static(term)?;
+    render_static(term, use_truecolor)?;
 
     Ok(())
 }
@@ -479,7 +532,7 @@ mod tests {
         // making string matching unambiguous.
         yansi::disable();
         let mut buf: Vec<u8> = Vec::new();
-        render_static_to_writer(&mut buf).unwrap();
+        render_static_to_writer(&mut buf, true).unwrap();
         yansi::enable();
 
         let output = String::from_utf8(buf).expect("render_static must produce valid UTF-8");
@@ -523,7 +576,7 @@ mod tests {
     #[test]
     fn gradient_line_plain_when_yansi_disabled() {
         yansi::disable();
-        let result = gradient_line("hello", GRAD_FROM, GRAD_TO);
+        let result = gradient_line("hello", GRAD_FROM, GRAD_TO, true);
         yansi::enable();
         assert!(
             !result.contains('\x1b'),
@@ -535,7 +588,7 @@ mod tests {
     #[test]
     fn gradient_line_contains_ansi_when_yansi_enabled() {
         yansi::enable();
-        let result = gradient_line("hello", GRAD_FROM, GRAD_TO);
+        let result = gradient_line("hello", GRAD_FROM, GRAD_TO, true);
         assert!(
             result.contains('\x1b'),
             "must contain ANSI escapes when yansi is enabled"
@@ -544,14 +597,14 @@ mod tests {
 
     #[test]
     fn gradient_line_empty_string() {
-        let result = gradient_line("", GRAD_FROM, GRAD_TO);
+        let result = gradient_line("", GRAD_FROM, GRAD_TO, true);
         assert_eq!(result, "");
     }
 
     #[test]
     fn gradient_line_single_char_uses_from_color() {
         yansi::enable();
-        let result = gradient_line("X", GRAD_FROM, GRAD_TO);
+        let result = gradient_line("X", GRAD_FROM, GRAD_TO, true);
         let from_r = GRAD_FROM.0.to_string();
         assert!(
             result.contains(&from_r),
@@ -588,7 +641,7 @@ mod tests {
     /// the cursor to the first logo row so the next frame overwrites the same region.
     #[test]
     fn reveal_frame_ends_with_cursor_up_to_logo_top() {
-        let frame = build_reveal_frame(0);
+        let frame = build_reveal_frame(0, true);
         let expected_suffix = format!("\x1b[{}A", LOGO.len());
         assert!(
             frame.ends_with(&expected_suffix),
@@ -599,7 +652,7 @@ mod tests {
     #[test]
     fn reveal_frame_at_zero_contains_only_spaces_cr_lf_and_cursor_sequences() {
         yansi::disable();
-        let frame = build_reveal_frame(0);
+        let frame = build_reveal_frame(0, true);
         yansi::enable();
         // Strip the trailing cursor-up escape and verify only spaces, CR, and LF remain.
         let cursor_up = format!("\x1b[{}A", LOGO.len());
@@ -614,7 +667,7 @@ mod tests {
     fn reveal_frame_full_contains_all_logo_characters() {
         yansi::disable();
         let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap();
-        let frame = build_reveal_frame(logo_width);
+        let frame = build_reveal_frame(logo_width, true);
         yansi::enable();
         for line in LOGO {
             for ch in line.chars() {
@@ -632,7 +685,7 @@ mod tests {
     /// and end with a cursor-up to return the cursor to the first logo row.
     #[test]
     fn underline_frame_starts_with_cursor_down_and_ends_with_cursor_up() {
-        let frame = build_underline_frame(0, 41);
+        let frame = build_underline_frame(0, 41, true);
         let expected_prefix = format!("\x1b[{}B", LOGO.len());
         let expected_suffix = format!("\x1b[{}A", LOGO.len());
         assert!(
@@ -648,7 +701,7 @@ mod tests {
     #[test]
     fn underline_frame_at_zero_contains_no_underline_chars() {
         yansi::disable();
-        let frame = build_underline_frame(0, 41);
+        let frame = build_underline_frame(0, 41, true);
         yansi::enable();
         assert!(
             !frame.contains(UNDERLINE_CHAR),
@@ -660,7 +713,7 @@ mod tests {
     fn underline_frame_full_width_contains_expected_count_of_underline_chars() {
         yansi::disable();
         let logo_width = 41usize;
-        let frame = build_underline_frame(logo_width, logo_width);
+        let frame = build_underline_frame(logo_width, logo_width, true);
         yansi::enable();
         // Strip escape sequences to count bare underline characters.
         let char_count = frame.chars().filter(|&c| c == UNDERLINE_CHAR).count();
@@ -674,7 +727,7 @@ mod tests {
     fn underline_frame_full_width_gradient_uses_grad_from_and_grad_to() {
         yansi::enable();
         let logo_width = 41usize;
-        let frame = build_underline_frame(logo_width, logo_width);
+        let frame = build_underline_frame(logo_width, logo_width, true);
         // GRAD_FROM RGB values should appear (from the first character's color).
         let from_r = GRAD_FROM.0.to_string();
         assert!(
@@ -705,6 +758,134 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_ctx(dir.path());
         cmd_welcome(&ctx, true).unwrap();
+    }
+
+    // ── rgb_to_fixed ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rgb_to_fixed_primary_colors_map_to_known_indices() {
+        // Pure red: 16 + 36*5 + 6*0 + 0 = 196
+        assert_eq!(
+            rgb_to_fixed(255, 0, 0),
+            196,
+            "pure red must map to index 196"
+        );
+        // Pure green: 16 + 36*0 + 6*5 + 0 = 46
+        assert_eq!(
+            rgb_to_fixed(0, 255, 0),
+            46,
+            "pure green must map to index 46"
+        );
+        // Pure blue: 16 + 36*0 + 6*0 + 5 = 21
+        assert_eq!(
+            rgb_to_fixed(0, 0, 255),
+            21,
+            "pure blue must map to index 21"
+        );
+        // Black: 16 + 0 + 0 + 0 = 16
+        assert_eq!(rgb_to_fixed(0, 0, 0), 16, "black must map to index 16");
+        // White: 16 + 36*5 + 6*5 + 5 = 231
+        assert_eq!(
+            rgb_to_fixed(255, 255, 255),
+            231,
+            "white must map to index 231"
+        );
+    }
+
+    #[test]
+    fn rgb_to_fixed_gradient_endpoints_produce_reasonable_indices() {
+        // Amber (212, 160, 23): r=4 (196-235), g=3 (156-195), b=0 (0-47)
+        // 16 + 36*4 + 6*3 + 0 = 16 + 144 + 18 + 0 = 178
+        assert_eq!(
+            rgb_to_fixed(GRAD_FROM.0, GRAD_FROM.1, GRAD_FROM.2),
+            178,
+            "amber gradient start must produce index 178"
+        );
+        // Turquoise (0, 206, 209): r=0 (0-47), g=4 (196-235), b=4 (196-235)
+        // 16 + 36*0 + 6*4 + 4 = 16 + 0 + 24 + 4 = 44
+        assert_eq!(
+            rgb_to_fixed(GRAD_TO.0, GRAD_TO.1, GRAD_TO.2),
+            44,
+            "turquoise gradient end must produce index 44"
+        );
+    }
+
+    #[test]
+    fn rgb_to_fixed_threshold_boundaries() {
+        // (47, 47, 47): all channels at level 0 → index 16
+        assert_eq!(
+            rgb_to_fixed(47, 47, 47),
+            16,
+            "(47, 47, 47) must map to index 16"
+        );
+        // (48, 48, 48): all channels at level 1 → 16 + 36 + 6 + 1 = 59
+        assert_eq!(
+            rgb_to_fixed(48, 48, 48),
+            59,
+            "(48, 48, 48) must map to index 59"
+        );
+    }
+
+    // ── paint_fg ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn paint_fg_truecolor_emits_rgb_sequence() {
+        yansi::enable();
+        let painted = paint_fg("x", 100, 150, 200, true);
+        let rendered = format!("{painted}");
+        assert!(
+            rendered.contains("38;2;"),
+            "truecolor paint_fg must emit 38;2; sequence; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn paint_fg_fallback_emits_fixed_sequence_not_rgb() {
+        yansi::enable();
+        let painted = paint_fg("x", 100, 150, 200, false);
+        let rendered = format!("{painted}");
+        assert!(
+            rendered.contains("38;5;"),
+            "fallback paint_fg must emit 38;5; sequence; got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("38;2;"),
+            "fallback paint_fg must not emit 38;2; sequence; got: {rendered:?}"
+        );
+    }
+
+    // ── gradient_line 256-color fallback ──────────────────────────────────
+
+    #[test]
+    fn gradient_line_fallback_emits_no_rgb_sequences() {
+        yansi::enable();
+        let result = gradient_line("hello", GRAD_FROM, GRAD_TO, false);
+        assert!(
+            result.contains('\x1b'),
+            "fallback gradient_line must still contain ANSI escapes"
+        );
+        assert!(
+            !result.contains("38;2;"),
+            "fallback gradient_line must not contain RGB sequences; got: {result:?}"
+        );
+    }
+
+    // ── render_static_to_writer 256-color fallback ────────────────────────
+
+    #[test]
+    fn render_static_to_writer_fallback_emits_fixed_not_rgb_sequences() {
+        yansi::enable();
+        let mut buf: Vec<u8> = Vec::new();
+        render_static_to_writer(&mut buf, false).unwrap();
+        let output = String::from_utf8(buf).expect("output must be valid UTF-8");
+        assert!(
+            output.contains("38;5;"),
+            "fallback render_static_to_writer must emit 38;5; sequences; got:\n{output}"
+        );
+        assert!(
+            !output.contains("38;2;"),
+            "fallback render_static_to_writer must not emit 38;2; sequences; got:\n{output}"
+        );
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
