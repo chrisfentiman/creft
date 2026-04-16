@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/chrisfentiman/creft/compare/creft-v0.3.1...creft-v0.3.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* **release:** overwrite existing assets on re-run ([#56](https://github.com/chrisfentiman/creft/issues/56)) ([72b71d1](https://github.com/chrisfentiman/creft/commit/72b71d1cbefa34a7790ec43dc8232a3c38016dd2))
+
 ## [0.3.1](https://github.com/chrisfentiman/creft/compare/creft-v0.3.0...creft-v0.3.1) (2026-04-15)
 
 
