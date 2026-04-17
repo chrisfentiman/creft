@@ -8,6 +8,7 @@ description: Output creft context for session initialization. Used by hook-based
 # Harnesses that support hooks call this at session start
 # and inject the output into the agent's context.
 
+# Static reference: how creft works.
 cat <<'CREFT_CONTEXT'
 # creft -- Executable Skills for AI Agents
 
@@ -77,4 +78,17 @@ Run `creft add --help` for the complete format reference.
 
 Local skills shadow global ones with the same name.
 CREFT_CONTEXT
+
+# Dynamic listing: show what commands are actually available.
+if command -v creft >/dev/null 2>&1; then
+  echo ""
+  echo "## Installed Commands"
+  echo ""
+  echo "The following commands are available in this environment."
+  echo "Run 'creft <command> --help' for usage details."
+  echo ""
+  # Strip ANSI escapes and filter out hooks namespace (agent-facing output).
+  # The sed strips ANSI SGR sequences; grep removes the hooks summary line.
+  creft list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^ *hooks '
+fi
 ````

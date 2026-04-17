@@ -1728,6 +1728,20 @@ mod tests {
     }
 
     #[test]
+    fn ensure_session_skill_content_has_dynamic_availability_check() {
+        // The skill must check for creft on PATH before running creft list,
+        // so that harnesses without creft in their environment fail silently.
+        assert!(
+            SESSION_SKILL_CONTENT.contains("command -v creft"),
+            "skill must guard creft list with a command -v check"
+        );
+        assert!(
+            SESSION_SKILL_CONTENT.contains("creft list"),
+            "skill must include dynamic creft list invocation"
+        );
+    }
+
+    #[test]
     fn ensure_session_skill_is_idempotent() {
         let dir = TempDir::new().unwrap();
         let ctx = ctx_no_home(dir.path());
