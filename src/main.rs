@@ -144,7 +144,7 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             }
         },
 
-        cli::Command::Up { system, global } => cmd::setup::cmd_up(ctx, system, global),
+        cli::Command::Up { system, local } => cmd::setup::cmd_up(ctx, system, local),
 
         cli::Command::Init => cmd::init::cmd_init(ctx),
 

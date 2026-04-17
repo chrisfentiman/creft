@@ -2,7 +2,7 @@ use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::setup;
 
-pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<(), CreftError> {
+pub fn cmd_up(ctx: &AppContext, system: Option<String>, local: bool) -> Result<(), CreftError> {
     let cwd = ctx.cwd.clone();
 
     if let Some(name) = system {
@@ -16,9 +16,11 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             "installing creft instructions for {}...",
             sys.display_name()
         );
+        let global = !local;
         setup::ensure_session_skill(ctx, &cwd, global)?;
         setup::install(ctx, sys, &cwd, global)?;
-    } else if global {
+    } else if !local {
+        // Default: install globally for all systems that support global install.
         // Aider global requires a manual config step, so it's excluded here.
         let global_systems = [
             setup::System::ClaudeCode,
@@ -26,7 +28,7 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             setup::System::Gemini,
         ];
         eprintln!("installing creft instructions globally...");
-        setup::ensure_session_skill(ctx, &cwd, global)?;
+        setup::ensure_session_skill(ctx, &cwd, true)?;
         for sys in &global_systems {
             eprintln!();
             eprintln!("{}:", sys.display_name());
@@ -36,6 +38,7 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, global: bool) -> Result<
             }
         }
     } else {
+        // --local: auto-detect systems in CWD and install per-project.
         let detected = setup::detect_systems(&cwd);
         if detected.is_empty() {
             eprintln!("no coding AI systems detected in current directory.");
