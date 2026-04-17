@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.4](https://github.com/chrisfentiman/creft/compare/creft-v0.3.3...creft-v0.3.4) (2026-04-17)
+
+
+### Features
+
+* **setup:** default to global install, dynamic session start ([#62](https://github.com/chrisfentiman/creft/issues/62)) ([1933245](https://github.com/chrisfentiman/creft/commit/19332458e13dd26c3dfd2d85326a0ac79c0d558c))
+
+
+### Bug Fixes
+
+* **welcome:** fall back to 256-color when truecolor is unavailable ([#60](https://github.com/chrisfentiman/creft/issues/60)) ([0bb43cd](https://github.com/chrisfentiman/creft/commit/0bb43cda424289c83272c68f9cafaf3771ba6d94))
+
 ## [0.3.3](https://github.com/chrisfentiman/creft/compare/creft-v0.3.2...creft-v0.3.3) (2026-04-16)
 
 
