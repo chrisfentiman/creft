@@ -248,10 +248,6 @@ fn collect_package_skills(
             continue;
         }
 
-        if file_name.eq_ignore_ascii_case("README.md") {
-            continue;
-        }
-
         let rel = path
             .strip_prefix(pkg_root)
             .expect("path must be under pkg_root");
@@ -263,6 +259,7 @@ fn collect_package_skills(
                     def.name = skill_name;
                     skills.push(def);
                 }
+                Err(CreftError::MissingFrontmatterDelimiter) => continue,
                 Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
             },
             Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
@@ -779,10 +776,6 @@ fn collect_plugin_skills_unprefixed(
             continue;
         }
 
-        if file_name.eq_ignore_ascii_case("README.md") {
-            continue;
-        }
-
         let rel = path
             .strip_prefix(plugin_root)
             .expect("path must be under plugin_root");
@@ -805,6 +798,7 @@ fn collect_plugin_skills_unprefixed(
                     def.name = skill_name;
                     skills.push(def);
                 }
+                Err(CreftError::MissingFrontmatterDelimiter) => continue,
                 Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
             },
             Err(e) => eprintln!("warning: skipping {}: {}", path.display(), e),
@@ -1646,7 +1640,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_package_skills_excludes_readme() {
+    fn collect_package_skills_silently_skips_plain_markdown_without_frontmatter() {
         let dir = tempfile::TempDir::new().unwrap();
 
         let pkg_dir = dir.path().join("packages").join("mypkg");
@@ -1659,10 +1653,15 @@ mod tests {
         )
         .unwrap();
 
-        // README.md must not appear as a skill.
+        // Plain markdown files without frontmatter must be silently skipped.
         std::fs::write(
             pkg_dir.join("README.md"),
             "# mypkg\n\nInstallation instructions.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("CHANGELOG.md"),
+            "# Changelog\n\n## 0.1.0\n- initial release\n",
         )
         .unwrap();
 
@@ -1675,7 +1674,43 @@ mod tests {
         assert_eq!(
             skills.len(),
             1,
-            "README.md must not appear as a skill, got: {:?}",
+            "plain markdown files without frontmatter must not appear as skills, got: {:?}",
+            names
+        );
+        assert_eq!(names[0], "mypkg skill");
+    }
+
+    #[test]
+    fn collect_package_skills_excludes_invalid_yaml_frontmatter_file_from_results() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let pkg_dir = dir.path().join("packages").join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        std::fs::write(
+            pkg_dir.join("skill.md"),
+            "---\nname: skill\ndescription: a skill\n---\n\n```bash\necho ok\n```\n",
+        )
+        .unwrap();
+
+        // A file with valid delimiters but invalid YAML inside: emits a warning,
+        // must not appear as a skill.
+        std::fs::write(
+            pkg_dir.join("broken.md"),
+            "---\n: invalid: yaml: [\n---\n\n```bash\necho broken\n```\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let skills = list_package_skills_in(&ctx, "mypkg", Scope::Global).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            skills.len(),
+            1,
+            "invalid-yaml-frontmatter file must not appear as a skill, got: {:?}",
             names
         );
         assert_eq!(names[0], "mypkg skill");
@@ -2002,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_plugin_skills_excludes_readme() {
+    fn collect_plugin_skills_silently_skips_plain_markdown_without_frontmatter() {
         let dir = tempfile::TempDir::new().unwrap();
         let ctx = AppContext::for_test_with_creft_home(
             dir.path().to_path_buf(),
@@ -2018,10 +2053,47 @@ mod tests {
         )
         .unwrap();
 
-        // README.md must not appear as a plugin skill.
+        // Plain markdown files without frontmatter must be silently skipped.
         std::fs::write(
             plugin_dir.join("README.md"),
             "# myplugin\n\nUsage instructions.\n",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("NOTES.md"), "# Notes\n\nDeveloper notes.\n").unwrap();
+
+        let skills = list_plugin_skills_in(&ctx, "myplugin").unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            skills.len(),
+            1,
+            "plain markdown files without frontmatter must not appear as plugin skills, got: {:?}",
+            names
+        );
+        assert_eq!(names[0], "myplugin");
+    }
+
+    #[test]
+    fn collect_plugin_skills_excludes_invalid_yaml_frontmatter_file_from_results() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+
+        let plugin_dir = dir.path().join("plugins").join("myplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("myplugin.md"),
+            "---\nname: myplugin\ndescription: a plugin skill\n---\n\n```bash\necho ok\n```\n",
+        )
+        .unwrap();
+
+        // A file with valid delimiters but invalid YAML inside: emits a warning,
+        // must not appear as a plugin skill.
+        std::fs::write(
+            plugin_dir.join("broken.md"),
+            "---\n: invalid: yaml: [\n---\n\n```bash\necho broken\n```\n",
         )
         .unwrap();
 
@@ -2030,7 +2102,7 @@ mod tests {
         assert_eq!(
             skills.len(),
             1,
-            "README.md must not appear as a plugin skill, got: {:?}",
+            "invalid-yaml-frontmatter file must not appear as a plugin skill, got: {:?}",
             names
         );
         assert_eq!(names[0], "myplugin");
