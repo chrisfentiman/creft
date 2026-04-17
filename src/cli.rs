@@ -51,7 +51,7 @@ pub(crate) enum Command {
     Settings(SettingsCommand),
     Up {
         system: Option<String>,
-        global: bool,
+        local: bool,
     },
     Init,
     Doctor {
@@ -531,11 +531,11 @@ fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
     let mut system = None;
-    let mut global = false;
+    let mut local = false;
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('g') | Long("global") => global = true,
+            Short('l') | Long("local") => local = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Up)),
             Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Up)),
             Value(v) if system.is_none() => system = Some(v.string()?),
@@ -549,7 +549,7 @@ fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         }
     }
 
-    Ok(Parsed::Command(Command::Up { system, global }))
+    Ok(Parsed::Command(Command::Up { system, local }))
 }
 
 fn parse_init(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
@@ -727,5 +727,56 @@ mod tests {
             matches!(result, Err(CliError::Usage(_))),
             "-p must be rejected as an unknown flag; got: {result:?}",
         );
+    }
+
+    #[test]
+    fn up_bare_defaults_local_false() {
+        let result = parse_args(&["up"]).unwrap().unwrap();
+        let Parsed::Command(Command::Up { local, .. }) = result else {
+            panic!("expected Command::Up");
+        };
+        assert!(
+            !local,
+            "bare `creft up` must default local=false (global install)"
+        );
+    }
+
+    #[test]
+    fn up_local_long_flag_sets_local_true() {
+        let result = parse_args(&["up", "--local"]).unwrap().unwrap();
+        let Parsed::Command(Command::Up { local, .. }) = result else {
+            panic!("expected Command::Up");
+        };
+        assert!(local, "--local must set local=true");
+    }
+
+    #[test]
+    fn up_local_short_flag_sets_local_true() {
+        let result = parse_args(&["up", "-l"]).unwrap().unwrap();
+        let Parsed::Command(Command::Up { local, .. }) = result else {
+            panic!("expected Command::Up");
+        };
+        assert!(local, "-l must set local=true");
+    }
+
+    #[test]
+    fn up_global_flag_rejected() {
+        let result = parse_args(&["up", "--global"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "--global must be rejected as an unknown flag; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn up_system_with_local_flag_parses_both() {
+        let result = parse_args(&["up", "--local", "claude-code"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Up { system, local }) = result else {
+            panic!("expected Command::Up");
+        };
+        assert_eq!(system.as_deref(), Some("claude-code"));
+        assert!(local, "--local must set local=true even with a system arg");
     }
 }

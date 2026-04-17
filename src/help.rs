@@ -175,7 +175,7 @@ Examples:
   creft remove hello
   creft remove gh issue-body";
 
-/// Extended description shown by `creft up --help`, listing supported AI coding systems and install locations.
+/// Extended description shown by `creft up --docs`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
 Install creft into your coding AI tools.
 
@@ -186,11 +186,14 @@ and updates when creft updates -- no need to re-run `creft up`.
 For other tools (Cursor, Windsurf, Aider, Copilot, Codex), writes a static
 instruction file. Run `creft up` again after upgrading creft to refresh.
 
+By default, installs globally (~/.claude/settings.json, etc.). Use --local
+to install in the current project directory instead.
+
 Examples:
-  creft up                  Auto-detect and install for all found systems
-  creft up claude-code      Install for Claude Code only
-  creft up cursor           Install for Cursor only
-  creft up -g claude-code   Install globally (~/.claude/settings.json)
+  creft up                  Install globally for all supported systems
+  creft up claude-code      Install globally for Claude Code only
+  creft up --local          Auto-detect and install for systems in this project
+  creft up -l cursor        Install Cursor in this project only
 
 Supported Systems:
   claude-code    .claude/settings.json (session start hook)
@@ -429,8 +432,9 @@ Installs creft into your coding AI tools. Hook-based for Claude Code and
 Gemini; static instruction file for Cursor, Windsurf, Aider, Copilot, Codex.
 
 Examples:
-  creft up                  Auto-detect and install for all found systems
-  creft up claude-code      Install for Claude Code only
+  creft up                  Install globally for all supported systems
+  creft up claude-code      Install globally for Claude Code only
+  creft up --local          Auto-detect and install for systems in this project
 
 Run 'creft up --docs' for the full reference.";
 
@@ -913,8 +917,8 @@ mod renderer {
             "creft up [system] [OPTIONS]",
             UP_LONG_ABOUT,
             &[(
-                "--global, -g",
-                "Install globally (~/.claude/skills/creft/ etc.)",
+                "--local, -l",
+                "Install in this project only (auto-detect systems in CWD)",
             )],
         )
     }
@@ -1087,8 +1091,8 @@ mod renderer {
             "creft up [system] [OPTIONS]",
             UP_SHORT_ABOUT,
             &[(
-                "--global, -g",
-                "Install globally (~/.claude/skills/creft/ etc.)",
+                "--local, -l",
+                "Install in this project only (auto-detect systems in CWD)",
             )],
         )
     }

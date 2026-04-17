@@ -131,73 +131,25 @@ const VERSION_MARKER: &str = concat!("<!-- creft:", env!("CARGO_PKG_VERSION"), "
 /// The creft instruction content — teaches the LLM about creft.
 const CREFT_INSTRUCTIONS: &str = concat!(
     "\
-# creft -- Executable Skills for AI Agents
+# creft
 
-creft saves reusable commands as markdown files and runs them as CLI
-subcommands. Skills persist between sessions -- create once, use from any
-directory, on any machine. LLM blocks call AI providers (claude, gemini,
-codex, ollama) as pipeline steps.
+CLI that runs markdown-defined commands as subcommands. Commands persist
+between sessions -- create once, use everywhere.
 
-## When to create a skill
+## When to use creft
 
-  Run once, never again:              run inline, don't make a skill
-  Run again, or share with the team:  make it a skill
-  Pipe output to an LLM:              use an LLM block in the skill
+  Reusable workflow       creft <name> [args] [--flags]
+  Check what exists       creft list
+  Drill into namespace    creft list <namespace>
+  Understand a command    creft <name> --help
+  See full definition     creft show <name>
+  Save a new command      creft add --help (for format reference)
 
-## Discovering skills
+## Decision triggers
 
-  creft list                      Show all skills, grouped by namespace
-  creft list <namespace>          Drill into a namespace
-  creft <skill> --help            See what a skill does and what it accepts
-  creft show <skill>              Read the full skill definition
-
-## Running skills
-
-  creft <name> [args...] [--flags...]
-
-  --dry-run     Preview rendered blocks without executing
-  --verbose     Print rendered blocks to stderr before execution
-
-## Creating skills
-
-  creft add <<'EOF'
-  ---
-  name: deploy
-  description: Deploys the app to staging or production.
-  args:
-    - name: env
-  ---
-
-  ```bash
-  echo \"Deploying to {{env}}...\"
-  ```
-
-  ```llm
-  Confirm deployment to {{env}} succeeded.
-  ```
-  EOF
-
-Run `creft add --help` for the complete format reference.
-
-## Managing skills
-
-  creft show <name>               View full definition
-  creft show --blocks <name>      View code blocks only
-  creft remove <name>             Remove a skill
-  creft add --force <<'EOF'       Update an existing skill
-
-## Plugins
-
-  creft plugin install <git-url>            Install a plugin
-  creft plugin activate <plugin>/<cmd>      Activate a command
-  creft plugin list                         List installed plugins
-
-## Skill storage
-
-  Local:   .creft/ in the project directory (travels with the repo)
-  Global:  ~/.creft/ (available everywhere)
-
-Local skills shadow global ones with the same name.
+  Want to run a project task?     Check `creft list` first -- it may exist
+  Repeating a shell recipe?       Save it: `creft add <<'EOF' ... EOF`
+  Need a command's syntax?        Run `creft <name> --help`, not memory
 ",
     concat!("<!-- creft:", env!("CARGO_PKG_VERSION"), " -->"),
     "\n"
@@ -974,11 +926,20 @@ mod tests {
     }
 
     #[test]
-    fn test_instructions_contain_llm_block_awareness() {
-        // The instructions must document LLM blocks so agents know to use them.
+    fn test_instructions_contain_discovery_commands() {
+        // The instructions must teach agents how to discover what exists before
+        // reaching for memory or running a command blindly.
         assert!(
-            CREFT_INSTRUCTIONS.contains("llm"),
-            "CREFT_INSTRUCTIONS must document LLM block support"
+            CREFT_INSTRUCTIONS.contains("creft list"),
+            "CREFT_INSTRUCTIONS must include the creft list discovery command"
+        );
+        assert!(
+            CREFT_INSTRUCTIONS.contains("creft add"),
+            "CREFT_INSTRUCTIONS must include the creft add creation command"
+        );
+        assert!(
+            CREFT_INSTRUCTIONS.contains("creft show"),
+            "CREFT_INSTRUCTIONS must include the creft show command"
         );
     }
 
@@ -1724,6 +1685,20 @@ mod tests {
         assert!(
             SESSION_SKILL_CONTENT.contains("creft show"),
             "skill output must include show command"
+        );
+    }
+
+    #[test]
+    fn ensure_session_skill_content_has_dynamic_availability_check() {
+        // The skill must check for creft on PATH before running creft list,
+        // so that harnesses without creft in their environment fail silently.
+        assert!(
+            SESSION_SKILL_CONTENT.contains("command -v creft"),
+            "skill must guard creft list with a command -v check"
+        );
+        assert!(
+            SESSION_SKILL_CONTENT.contains("creft list"),
+            "skill must include dynamic creft list invocation"
         );
     }
 

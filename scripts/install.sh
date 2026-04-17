@@ -179,7 +179,15 @@ verify_checksum() {
 # --- Install ---
 
 install_creft() {
-    local version tag target tarball_name tarball_url checksum_url install_dir
+    local version tag target tarball_name tarball_url checksum_url install_dir is_upgrade
+
+    # Detect an existing installation before the new binary lands.
+    # ~/.creft/ is created by `creft up`; its presence means creft was previously set up.
+    if [ -d "${HOME}/.creft" ] || command -v creft >/dev/null 2>&1; then
+        is_upgrade=1
+    else
+        is_upgrade=0
+    fi
 
     # Resolve version
     if [ -n "${CREFT_VERSION:-}" ]; then
@@ -231,8 +239,14 @@ install_creft() {
 
     check_path "$install_dir"
 
-    # Show welcome on first install — use full path since install_dir may not be on PATH yet
-    "${install_dir}/creft" _creft welcome || true
+    if [ "$is_upgrade" = "1" ]; then
+        # Upgrade: rebootstrap hooks and skills so they match the new binary version.
+        info "bootstrapping hooks and skills..."
+        "${install_dir}/creft" up || warn "creft up failed — run 'creft up' manually to finish setup"
+    else
+        # Fresh install: show welcome and let the user run 'creft up' when ready.
+        "${install_dir}/creft" _creft welcome || true
+    fi
 }
 
 # --- PATH check ---

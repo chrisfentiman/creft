@@ -8,73 +8,38 @@ description: Output creft context for session initialization. Used by hook-based
 # Harnesses that support hooks call this at session start
 # and inject the output into the agent's context.
 
+# Static section: what creft is and when to reach for it.
 cat <<'CREFT_CONTEXT'
-# creft -- Executable Skills for AI Agents
+# creft
 
-creft saves reusable commands as markdown files and runs them as CLI
-subcommands. Skills persist between sessions -- create once, use from any
-directory, on any machine. LLM blocks call AI providers (claude, gemini,
-codex, ollama) as pipeline steps.
+CLI that runs markdown-defined commands as subcommands. Commands persist
+between sessions -- create once, use everywhere.
 
-## When to create a skill
+## When to use creft
 
-  Run once, never again:              run inline, don't make a skill
-  Run again, or share with the team:  make it a skill
-  Pipe output to an LLM:              use an LLM block in the skill
+  Reusable workflow       creft <name> [args] [--flags]
+  Check what exists       creft list
+  Drill into namespace    creft list <namespace>
+  Understand a command    creft <name> --help
+  See full definition     creft show <name>
+  Save a new command      creft add --help (for format reference)
 
-## Discovering skills
+## Decision triggers
 
-  creft list                      Show all skills, grouped by namespace
-  creft list <namespace>          Drill into a namespace
-  creft <skill> --help            See what a skill does and what it accepts
-  creft show <skill>              Read the full skill definition
-
-## Running skills
-
-  creft <name> [args...] [--flags...]
-
-  --dry-run     Preview rendered blocks without executing
-  --verbose     Print rendered blocks to stderr before execution
-
-## Creating skills
-
-  creft add <<'EOF'
-  ---
-  name: deploy
-  description: Deploys the app to staging or production.
-  args:
-    - name: env
-  ---
-
-  ```bash
-  echo "Deploying to {{env}}..."
-  ```
-
-  ```llm
-  Confirm deployment to {{env}} succeeded.
-  ```
-  EOF
-
-Run `creft add --help` for the complete format reference.
-
-## Managing skills
-
-  creft show <name>               View full definition
-  creft show --blocks <name>      View code blocks only
-  creft remove <name>             Remove a skill
-  creft add --force <<'EOF'       Update an existing skill
-
-## Plugins
-
-  creft plugin install <git-url>            Install a plugin
-  creft plugin activate <plugin>/<cmd>      Activate a command
-  creft plugin list                         List installed plugins
-
-## Skill storage
-
-  Local:   .creft/ in the project directory (travels with the repo)
-  Global:  ~/.creft/ (available everywhere)
-
-Local skills shadow global ones with the same name.
+  Want to run a project task?     Check `creft list` first -- it may exist
+  Repeating a shell recipe?       Save it: `creft add <<'EOF' ... EOF`
+  Need a command's syntax?        Run `creft <name> --help`, not memory
 CREFT_CONTEXT
+
+# Dynamic listing: show what commands are actually available.
+if command -v creft >/dev/null 2>&1; then
+  echo ""
+  echo "## Installed Commands"
+  echo ""
+  echo "The following commands are available in this environment."
+  echo "Run 'creft <command> --help' for usage details."
+  echo ""
+  # Strip ANSI escapes so the output is clean in agent context.
+  creft list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+fi
 ````
