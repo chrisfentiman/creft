@@ -239,16 +239,14 @@ install_creft() {
 
     check_path "$install_dir"
 
-    if [ "$is_upgrade" = "0" ]; then
-        # Fresh install: show welcome before bootstrapping so the user has context.
+    if [ "$is_upgrade" = "1" ]; then
+        # Upgrade: rebootstrap hooks and skills so they match the new binary version.
+        info "bootstrapping hooks and skills..."
+        "${install_dir}/creft" up || warn "creft up failed — run 'creft up' manually to finish setup"
+    else
+        # Fresh install: show welcome and let the user run 'creft up' when ready.
         "${install_dir}/creft" _creft welcome || true
     fi
-
-    # Always rebootstrap hooks and session skills so they match the installed binary.
-    # On a fresh install this performs the initial setup; on an upgrade it updates
-    # any hooks or skills that changed between versions.
-    info "bootstrapping hooks and skills..."
-    "${install_dir}/creft" up || warn "creft up failed — run 'creft up' manually to finish setup"
 }
 
 # --- PATH check ---
