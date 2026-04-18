@@ -30,7 +30,7 @@ impl SearchIndex {
     /// Build an index from a list of `(name, description, text)` tuples.
     ///
     /// Each text is tokenized into whole-token hashes (for exact search) and
-    /// 3-gram hashes (for fuzzy candidate gating). Both sets are combined into
+    /// bigram hashes (for fuzzy candidate gating). Both sets are combined into
     /// a single XOR filter per document. Existing `search` callers are unaffected:
     /// whole-token hashes remain present in every filter.
     ///
@@ -152,15 +152,15 @@ impl SearchIndex {
         self.entries.is_empty()
     }
 
-    /// Query the index for documents that might contain any query n-gram.
+    /// Query the index for documents that might contain any query bigram.
     ///
-    /// Generates 3-grams from the query, then tests each document's filter for
+    /// Generates bigrams from the query, then tests each document's filter for
     /// membership of any gram. Returns entries where at least one gram is probably
     /// present (OR/ANY semantics). This is the candidate gate — the caller scores
     /// and filters the results.
     ///
-    /// Returns an empty vec when the query produces no 3-grams (query tokens all
-    /// shorter than 3 characters).
+    /// Returns an empty vec when the query produces no bigrams (query tokens all
+    /// shorter than 2 characters).
     pub fn search_fuzzy(&self, query: &str) -> Vec<&IndexEntry> {
         let grams = tokenize_ngrams(query);
         if grams.is_empty() {
@@ -435,8 +435,8 @@ mod tests {
     // ── search_fuzzy ──────────────────────────────────────────────────────────
 
     #[test]
-    fn search_fuzzy_returns_candidate_with_shared_ngrams() {
-        // "hered" shares grams {her, ere, red} with "heredoc".
+    fn search_fuzzy_returns_candidate_with_shared_bigrams() {
+        // "hered" shares bigrams {he, er, re, ed} with "heredoc".
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         let results = idx.search_fuzzy("hered");
         assert_eq!(
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn search_fuzzy_returns_candidate_for_typo_query() {
-        // "templete" shares grams {tem, emp, mpl} with "template".
+        // "templete" shares bigrams {te, em, mp, pl} with "template".
         let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
         let results = idx.search_fuzzy("templete");
         assert_eq!(
@@ -460,12 +460,12 @@ mod tests {
     }
 
     #[test]
-    fn search_fuzzy_short_query_returns_empty() {
-        // "ab" produces no 3-grams.
+    fn search_fuzzy_single_char_query_returns_empty() {
+        // "a" produces no bigrams (< 2 chars).
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         assert!(
-            idx.search_fuzzy("ab").is_empty(),
-            "2-char query must produce no fuzzy candidates"
+            idx.search_fuzzy("a").is_empty(),
+            "single-char query must produce no fuzzy candidates"
         );
     }
 
@@ -487,8 +487,8 @@ mod tests {
     #[test]
     fn search_fuzzy_uses_any_gram_semantics() {
         // OR semantics: matching ONE gram is enough to be a candidate.
-        // "templete" and "template" share {tem, emp, mpl}; the document also
-        // has "rollback" which shares no grams with "templete".
+        // "templete" and "template" share bigrams {te, em, mp, pl}; the document also
+        // has "rollback" which shares no bigrams with "templete".
         let idx = SearchIndex::build(&[
             ("doc-a", "desc", "template guide"),
             ("doc-b", "desc", "rollback procedure"),

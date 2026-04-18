@@ -53,21 +53,21 @@ fn split_and_lowercase(text: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|tok| tok.len() >= 2)
 }
 
-/// Generate all contiguous 3-character substrings of a single lowercase token.
+/// Generate all contiguous 2-character substrings of a single lowercase token.
 ///
-/// "exit" → \["exi", "xit"\]
-/// "ab"   → \[\] (too short)
-/// "abc"  → \["abc"\]
+/// "exit" → \["ex", "xi", "it"\]
+/// "ab"   → \["ab"\]
+/// "a"    → \[\] (too short)
 ///
-/// The returned substrings borrow from `token`. Tokens shorter than 3 characters
+/// The returned substrings borrow from `token`. Tokens shorter than 2 characters
 /// produce no grams; they are already covered by whole-token hashes.
 fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
     let chars: Vec<(usize, char)> = token.char_indices().collect();
     let len = chars.len();
-    (0..len.saturating_sub(2)).map(move |i| {
+    (0..len.saturating_sub(1)).map(move |i| {
         let start = chars[i].0;
-        let end = if i + 3 < len {
-            chars[i + 3].0
+        let end = if i + 2 < len {
+            chars[i + 2].0
         } else {
             token.len()
         };
@@ -75,18 +75,18 @@ fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Generate 3-gram hashes from text.
+/// Generate bigram hashes from text.
 ///
 /// Splits text into tokens using the same rules as `tokenize` (split on
 /// non-alphanumeric/underscore/hyphen, lowercase, filter >= 2 chars), then
-/// for each token of length >= 3, generates all contiguous 3-character
+/// for each token of length >= 2, generates all contiguous 2-character
 /// substrings and hashes each one.
 ///
-/// Tokens shorter than 3 characters produce no grams (they are already
+/// Tokens shorter than 2 characters produce no grams (they are already
 /// covered by whole-token hashes in the combined filter).
 ///
 /// Duplicate grams across tokens are deduplicated. For example, "exit" and
-/// "exits" both contain the gram "exi" — it appears once in the output.
+/// "exits" both contain the gram "it" — it appears once in the output.
 pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     let mut hashes: Vec<u64> = split_and_lowercase(text)
         .flat_map(|tok| {
@@ -102,7 +102,7 @@ pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     hashes
 }
 
-/// Extract the set of 3-gram strings from text.
+/// Extract the set of bigram strings from text.
 ///
 /// Same tokenization rules as `tokenize_ngrams`, but returns the actual
 /// gram strings instead of hashes. Used by `tversky_score` for set
@@ -121,7 +121,7 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 
 /// Compute the Tversky similarity between a query and a document token.
 ///
-/// Generates 3-gram sets from both strings and computes:
+/// Generates bigram sets from both strings and computes:
 ///
 /// ```text
 /// |intersection| / (|intersection| + a * |query_only| + b * |doc_only|)
@@ -133,7 +133,7 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 /// "hered" scores 1.0 against "heredoc") and penalizes only the query's
 /// unmatched grams (typos reduce the score proportionally).
 ///
-/// Returns 0.0 when either input produces no 3-grams.
+/// Returns 0.0 when either input produces no bigrams.
 pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
     let query_grams = gram_set(query);
     let doc_grams = gram_set(document);
@@ -159,20 +159,20 @@ pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
 /// Score a multi-word query against a document's full text.
 ///
 /// For each query word (split on non-alphanumeric/underscore/hyphen, lowercase,
-/// length >= 3), computes `tversky_score` against every word in the document
+/// length >= 2), computes `tversky_score` against every word in the document
 /// text that meets the same length threshold, and takes the best per-word score.
 /// Returns the average of per-word best scores.
 ///
 /// A document that contains good matches for all query words scores close to 1.0.
 /// A document that matches only some words scores proportionally lower.
 ///
-/// Returns 0.0 when the query is empty or all query words are shorter than 3
-/// characters (no grams can be generated to compare).
+/// Returns 0.0 when the query is empty or all query words are shorter than 2
+/// characters (no bigrams can be generated to compare).
 pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
     let query_words: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .map(|w| w.to_lowercase())
-        .filter(|w| w.len() >= 3)
+        .filter(|w| w.len() >= 2)
         .collect();
 
     if query_words.is_empty() {
@@ -182,7 +182,7 @@ pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
     let doc_words: Vec<String> = document_text
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .map(|w| w.to_lowercase())
-        .filter(|w| w.len() >= 3)
+        .filter(|w| w.len() >= 2)
         .collect();
 
     if doc_words.is_empty() {
@@ -317,20 +317,21 @@ mod tests {
     fn ngrams_from_token_yields_sliding_window() {
         let token = "exit";
         let grams: Vec<&str> = ngrams_from_token(token).collect();
-        assert_eq!(grams, vec!["exi", "xit"]);
+        assert_eq!(grams, vec!["ex", "xi", "it"]);
     }
 
     #[test]
-    fn ngrams_from_token_exactly_three_chars_yields_one_gram() {
+    fn ngrams_from_token_exactly_two_chars_yields_one_gram() {
+        let token = "ab";
+        let grams: Vec<&str> = ngrams_from_token(token).collect();
+        assert_eq!(grams, vec!["ab"]);
+    }
+
+    #[test]
+    fn ngrams_from_token_three_chars_yields_two_grams() {
         let token = "abc";
         let grams: Vec<&str> = ngrams_from_token(token).collect();
-        assert_eq!(grams, vec!["abc"]);
-    }
-
-    #[test]
-    fn ngrams_from_token_two_chars_yields_nothing() {
-        let grams: Vec<&str> = ngrams_from_token("ab").collect();
-        assert!(grams.is_empty());
+        assert_eq!(grams, vec!["ab", "bc"]);
     }
 
     #[test]
@@ -342,26 +343,27 @@ mod tests {
     // ── tokenize_ngrams ───────────────────────────────────────────────────────
 
     #[test]
-    fn tokenize_ngrams_four_char_token_produces_two_hashes() {
+    fn tokenize_ngrams_four_char_token_produces_three_hashes() {
         let hashes = tokenize_ngrams("exit");
-        assert_eq!(hashes.len(), 2, "exit -> {{exi, xit}}");
+        assert_eq!(hashes.len(), 3, "exit -> {{ex, xi, it}}");
     }
 
     #[test]
-    fn tokenize_ngrams_five_char_token_produces_three_hashes() {
+    fn tokenize_ngrams_five_char_token_produces_four_hashes() {
         let hashes = tokenize_ngrams("hello");
-        assert_eq!(hashes.len(), 3, "hello -> {{hel, ell, llo}}");
+        assert_eq!(hashes.len(), 4, "hello -> {{he, el, ll, lo}}");
     }
 
     #[test]
-    fn tokenize_ngrams_two_char_token_produces_no_hashes() {
-        assert!(tokenize_ngrams("ab").is_empty());
+    fn tokenize_ngrams_two_char_token_produces_one_hash() {
+        let hashes = tokenize_ngrams("ab");
+        assert_eq!(hashes.len(), 1, "ab -> {{ab}}");
     }
 
     #[test]
-    fn tokenize_ngrams_three_char_token_produces_one_hash() {
+    fn tokenize_ngrams_three_char_token_produces_two_hashes() {
         let hashes = tokenize_ngrams("abc");
-        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes.len(), 2, "abc -> {{ab, bc}}");
     }
 
     #[test]
@@ -382,8 +384,8 @@ mod tests {
 
     #[test]
     fn tokenize_ngrams_multi_word_produces_grams_from_both_tokens() {
-        // "hello world" should produce grams from "hello" (3) and "world" (3)
-        // but "world" grams: wor, orl, rld -- no overlap with "hello" grams
+        // "hello world" should produce grams from "hello" (4) and "world" (4)
+        // "hello" grams: he, el, ll, lo; "world" grams: wo, or, rl, ld — no overlap
         let both = tokenize_ngrams("hello world");
         let hello = tokenize_ngrams("hello");
         let world = tokenize_ngrams("world");
@@ -400,19 +402,19 @@ mod tests {
     }
 
     #[test]
-    fn tokenize_ngrams_short_tokens_after_split_produce_no_grams() {
+    fn tokenize_ngrams_short_tokens_after_split_produce_grams() {
         // "it's a test!" splits to: "it", "s", "a", "test"
-        // Only "test" and "it" survive the >= 2 char filter.
-        // "it" has 2 chars -> no grams. "test" has 4 chars -> 2 grams.
+        // "it" and "test" survive the >= 2 char filter; "s" and "a" are dropped.
+        // "it" (2 chars) -> 1 gram: {it}. "test" (4 chars) -> 3 grams: {te, es, st}.
         let hashes = tokenize_ngrams("it's a test!");
-        assert_eq!(hashes.len(), 2, "only 'test' produces grams: tes, est");
+        assert_eq!(hashes.len(), 4, "'it' produces {{it}}; 'test' produces {{te, es, st}}");
     }
 
     // ── gram_set ──────────────────────────────────────────────────────────────
 
     #[rstest]
-    #[case::exit("exit", vec!["exi", "xit"])]
-    #[case::heredoc("heredoc", vec!["her", "ere", "red", "edo", "doc"])]
+    #[case::exit("exit", vec!["ex", "xi", "it"])]
+    #[case::heredoc("heredoc", vec!["he", "er", "re", "ed", "do", "oc"])]
     fn gram_set_produces_expected_grams(#[case] input: &str, #[case] expected: Vec<&str>) {
         let result = gram_set(input);
         let expected_set: HashSet<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -420,8 +422,9 @@ mod tests {
     }
 
     #[test]
-    fn gram_set_two_char_input_is_empty() {
-        assert!(gram_set("ab").is_empty());
+    fn gram_set_two_char_input_yields_one_gram() {
+        let result = gram_set("ab");
+        assert_eq!(result, HashSet::from(["ab".to_owned()]));
     }
 
     #[test]
@@ -438,8 +441,8 @@ mod tests {
 
     #[test]
     fn tversky_score_partial_recall_query_fully_contained_in_doc() {
-        // "hered" grams: {her, ere, red}; "heredoc" grams: {her, ere, red, edo, doc}
-        // intersection=3, query_only=0 -> score = 3/3 = 1.0
+        // "hered" bigrams: {he, er, re, ed}; "heredoc" bigrams: {he, er, re, ed, do, oc}
+        // intersection=4, query_only=0 -> score = 4/4 = 1.0
         let score = tversky_score("hered", "heredoc");
         assert_eq!(score, 1.0);
     }
@@ -452,19 +455,20 @@ mod tests {
 
     #[test]
     fn tversky_score_typo_returns_partial_score() {
-        // "templete" grams: {tem, emp, mpl, ple, let, ete}
-        // "template" grams: {tem, emp, mpl, pla, lat, ate}
-        // intersection = {tem, emp, mpl} = 3, query_only = 3 -> score = 3/6 = 0.5
+        // "templete" bigrams: {te, em, mp, pl, le, et}
+        // "template" bigrams: {te, em, mp, pl, la, at}
+        // intersection = {te, em, mp, pl} = 4, query_only = {le, et} = 2 -> score = 4/6 = 2/3
         let score = tversky_score("templete", "template");
-        assert_eq!(score, 0.5);
+        assert_eq!(score, 4.0 / 6.0);
     }
 
     #[test]
-    fn tversky_score_single_transposition_four_char_token_returns_zero() {
-        // "ecit" grams: {eci, cit}; "exit" grams: {exi, xit}
-        // intersection = 0 -> score = 0.0
+    fn tversky_score_single_transposition_four_char_token_shares_one_bigram() {
+        // "ecit" bigrams: {ec, ci, it}; "exit" bigrams: {ex, xi, it}
+        // intersection = {it} = 1, query_only = {ec, ci} = 2 -> score = 1/3
+        // Bigrams catch the shared "it" that trigrams miss entirely.
         let score = tversky_score("ecit", "exit");
-        assert_eq!(score, 0.0);
+        assert_eq!(score, 1.0 / 3.0);
     }
 
     #[test]
@@ -473,8 +477,8 @@ mod tests {
     }
 
     #[test]
-    fn tversky_score_query_too_short_for_grams_returns_zero() {
-        // "ab" produces no grams -> 0.0
+    fn tversky_score_no_shared_bigrams_returns_zero() {
+        // "ab" bigrams: {ab}; "heredoc" bigrams: {he, er, re, ed, do, oc} — no overlap
         assert_eq!(tversky_score("ab", "heredoc"), 0.0);
     }
 
@@ -490,7 +494,8 @@ mod tests {
     #[test]
     fn tversky_score_is_asymmetric() {
         // With a=1.0, b=0.0 the score is not symmetric.
-        // tversky("hered", "heredoc") = 1.0 but tversky("heredoc", "hered") < 1.0
+        // "hered" bigrams are a subset of "heredoc" bigrams, so forward = 1.0.
+        // "heredoc" has bigrams {do, oc} not in "hered", so reverse < 1.0.
         let forward = tversky_score("hered", "heredoc");
         let reverse = tversky_score("heredoc", "hered");
         assert_eq!(forward, 1.0);
@@ -508,9 +513,11 @@ mod tests {
 
     #[test]
     fn score_query_multi_word_averages_per_word_best_scores() {
-        // "hered" -> "heredoc" = 1.0; "templete" -> "template" = 0.5; average = 0.75
+        // "hered" bigrams fully contained in "heredoc" bigrams -> 1.0
+        // "templete" vs "template": intersection=4, query_only=2 -> 4/6 = 2/3
+        // average = (1.0 + 4/6) / 2
         let score = score_query("hered templete", "the heredoc template guide");
-        assert_eq!(score, 0.75);
+        assert_eq!(score, (1.0 + 4.0 / 6.0) / 2.0);
     }
 
     #[test]
@@ -520,9 +527,9 @@ mod tests {
     }
 
     #[test]
-    fn score_query_short_query_word_returns_zero() {
-        // "ab" is < 3 chars, so no query words remain after filtering
-        let score = score_query("ab", "anything");
+    fn score_query_single_char_query_word_returns_zero() {
+        // "a" is < 2 chars and is filtered out, leaving no query words
+        let score = score_query("a", "anything");
         assert_eq!(score, 0.0);
     }
 
