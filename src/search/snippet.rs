@@ -22,6 +22,34 @@ pub(crate) struct SnippetLine {
     pub is_match: bool,
 }
 
+/// Extract snippets from document text using fuzzy-matched document words.
+///
+/// On the fuzzy search path, the original query terms are misspelled and will
+/// not appear as substrings of any document line. This function accepts
+/// `matched_words` — the document-side tokens that scored highest against each
+/// query word during Tversky scoring — and uses those for substring matching
+/// instead.
+///
+/// When `matched_words` is empty (all query words scored 0.0), falls back to
+/// `query_terms` so the caller never silently drops results.
+///
+/// All other behaviour (context lines, merge, empty-input) is identical to
+/// [`extract_snippets`].
+pub(crate) fn extract_snippets_fuzzy(
+    text: &str,
+    query_terms: &[&str],
+    matched_words: &[String],
+    context: usize,
+) -> Vec<Snippet> {
+    if matched_words.is_empty() {
+        // No fuzzy matches scored > 0.0 — use the original terms as a best-effort.
+        extract_snippets(text, query_terms, context)
+    } else {
+        let words_as_strs: Vec<&str> = matched_words.iter().map(String::as_str).collect();
+        extract_snippets(text, &words_as_strs, context)
+    }
+}
+
 /// A search result paired with its extracted snippets, ready for rendering.
 pub(crate) struct SnippetResult {
     pub name: String,
@@ -592,5 +620,78 @@ mod tests {
             !styled.contains("creft_exit to"),
             "the term 'exit' inside 'creft_exit' must be wrapped in bold, breaking the plain sequence"
         );
+    }
+
+    // ── extract_snippets_fuzzy ────────────────────────────────────────────────
+
+    #[test]
+    fn fuzzy_snippets_use_matched_words_not_query_terms() {
+        // "ecit" is a typo for "exit" — it is not a substring of any line in the doc.
+        // extract_snippets with &["ecit"] would return nothing.
+        // extract_snippets_fuzzy with matched_words=["exit"] must find the line.
+        let text = "call the exit code when done\n";
+        let query_terms = &["ecit"];
+        let matched_words = vec!["exit".to_owned()];
+
+        let direct_snippets = extract_snippets(text, query_terms, 0);
+        assert!(
+            direct_snippets.is_empty(),
+            "sanity: 'ecit' is not a substring of any line — direct extract must return nothing"
+        );
+
+        let fuzzy_snippets = extract_snippets_fuzzy(text, query_terms, &matched_words, 0);
+        assert_eq!(
+            fuzzy_snippets.len(),
+            1,
+            "fuzzy extract must find the line via matched word 'exit'"
+        );
+        assert!(
+            fuzzy_snippets[0].lines[0].is_match,
+            "the found line must be marked as a match"
+        );
+        assert_eq!(
+            fuzzy_snippets[0].lines[0].text,
+            "call the exit code when done"
+        );
+    }
+
+    #[test]
+    fn fuzzy_snippets_fallback_to_query_terms_when_no_matched_words() {
+        // When matched_words is empty (all query words scored 0.0), fall back to
+        // the original query terms so callers don't silently drop results.
+        let text = "the heredoc template guide\n";
+        let snippets = extract_snippets_fuzzy(text, &["heredoc"], &[], 0);
+        assert_eq!(
+            snippets.len(),
+            1,
+            "empty matched_words must fall back to query_terms for matching"
+        );
+    }
+
+    #[test]
+    fn fuzzy_snippets_no_match_returns_empty() {
+        // Matched words that don't appear in the document produce no snippets.
+        let text = "alpha beta gamma\n";
+        let snippets = extract_snippets_fuzzy(text, &["zzz"], &["qqq".to_owned()], 0);
+        assert!(
+            snippets.is_empty(),
+            "matched words absent from document must produce no snippets"
+        );
+    }
+
+    #[test]
+    fn fuzzy_snippets_context_lines_work_same_as_extract_snippets() {
+        // Context behavior is unchanged — the fuzzy variant delegates to extract_snippets.
+        let text = "alpha\nbeta\nexit\ndelta\nepsilon\n";
+        let matched_words = vec!["exit".to_owned()];
+        let snippets = extract_snippets_fuzzy(text, &["ecit"], &matched_words, 1);
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(
+            snippets[0].lines.len(),
+            3,
+            "context=1 must include one line above and below"
+        );
+        let texts: Vec<&str> = snippets[0].lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["beta", "exit", "delta"]);
     }
 }

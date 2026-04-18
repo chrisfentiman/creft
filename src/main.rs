@@ -223,11 +223,17 @@ fn dispatch_docs_search(
                     .into_iter()
                     .filter(|e| e.name == cli_name)
                     .filter_map(|e| {
-                        let score = search::tokenize::score_query(query, &docs_text);
+                        let (score, matched_words) =
+                            search::tokenize::score_query_with_matches(query, &docs_text);
                         if score < search::FUZZY_THRESHOLD {
                             return None;
                         }
-                        let snippets = search::snippet::extract_snippets(&docs_text, &terms, 2);
+                        let snippets = search::snippet::extract_snippets_fuzzy(
+                            &docs_text,
+                            &terms,
+                            &matched_words,
+                            2,
+                        );
                         Some((
                             score,
                             search::snippet::SnippetResult {

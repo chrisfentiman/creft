@@ -14,8 +14,8 @@ use crate::model::{AppContext, Scope};
 use crate::store as skill_store;
 
 use self::index::IndexEntry;
-use self::snippet::{SnippetResult, extract_snippets};
-use self::tokenize::score_query;
+use self::snippet::{SnippetResult, extract_snippets, extract_snippets_fuzzy};
+use self::tokenize::score_query_with_matches;
 
 const SNIPPET_CONTEXT: usize = 2;
 pub(crate) const FUZZY_THRESHOLD: f64 = 0.2;
@@ -118,12 +118,13 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
                 };
                 let Some(text) = text else { continue };
 
-                let score = score_query(query, &text);
+                let (score, matched_words) = score_query_with_matches(query, &text);
                 if score < FUZZY_THRESHOLD {
                     continue;
                 }
 
-                let snippets = extract_snippets(&text, &terms, SNIPPET_CONTEXT);
+                let snippets =
+                    extract_snippets_fuzzy(&text, &terms, &matched_words, SNIPPET_CONTEXT);
                 scored.push((
                     score,
                     SnippetResult {
@@ -445,6 +446,32 @@ mod tests {
 
         let results = search_all_indexes(&ctx, "xyzxyzxyz");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_all_indexes_fuzzy_results_have_non_empty_snippets() {
+        // End-to-end regression for the snippet extraction bug: when the query is a
+        // typo (e.g. "ecit" for "exit"), the original query term is not a substring
+        // of any document line, so the literal-substring path returns no snippets.
+        // The fuzzy path must use matched document words for extraction instead.
+        let (ctx, _tmp) = make_ctx();
+
+        let body = "call the exit code when done";
+        write_skill_file(&ctx, Scope::Global, "ns", "leaf", body);
+        let idx = SearchIndex::build(&[("ns leaf", "A skill", body)]);
+        write_index_file(&ctx, Scope::Global, "ns.idx", &idx);
+
+        // "ecit" typo — no exact index match, fuzzy path kicks in.
+        let results = search_all_indexes(&ctx, "ecit");
+
+        assert!(
+            !results.is_empty(),
+            "fuzzy path must return a result for 'ecit' matching 'exit'"
+        );
+        assert!(
+            !results[0].snippets.is_empty(),
+            "fuzzy result must have non-empty snippets — matched word 'exit' appears on the line"
+        );
     }
 
     #[test]

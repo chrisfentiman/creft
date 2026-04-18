@@ -169,6 +169,24 @@ pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
 /// Returns 0.0 when the query is empty or all query words are shorter than 2
 /// characters (no bigrams can be generated to compare).
 pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
+    score_query_with_matches(query, document_text).0
+}
+
+/// Score a multi-word query and return the best-matching document word per query word.
+///
+/// Same scoring logic as [`score_query`], but also returns the document word that
+/// achieved the highest Tversky score for each query word. The returned words are
+/// in document-normalized form (lowercased), one per query word that produced a
+/// score > 0.0.
+///
+/// These matched words are real tokens from the document, so they appear as
+/// substrings of document lines and can be used for snippet extraction on the
+/// fuzzy path — unlike the original (possibly misspelled) query terms, which may
+/// not be substrings of any line.
+///
+/// Returns `(0.0, vec![])` when the query is empty or all query words are shorter
+/// than 2 characters.
+pub(crate) fn score_query_with_matches(query: &str, document_text: &str) -> (f64, Vec<String>) {
     let query_words: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .map(|w| w.to_lowercase())
@@ -176,7 +194,7 @@ pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
         .collect();
 
     if query_words.is_empty() {
-        return 0.0;
+        return (0.0, Vec::new());
     }
 
     let doc_words: Vec<String> = document_text
@@ -186,20 +204,37 @@ pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
         .collect();
 
     if doc_words.is_empty() {
-        return 0.0;
+        return (0.0, Vec::new());
     }
 
-    let total: f64 = query_words
-        .iter()
-        .map(|qw| {
-            doc_words
-                .iter()
-                .map(|dw| tversky_score(qw, dw))
-                .fold(0.0_f64, f64::max)
-        })
-        .sum();
+    let mut total = 0.0_f64;
+    let mut matched_words: Vec<String> = Vec::with_capacity(query_words.len());
 
-    total / query_words.len() as f64
+    for qw in &query_words {
+        let (best_score, best_word) = doc_words.iter().map(|dw| (tversky_score(qw, dw), dw)).fold(
+            (0.0_f64, None),
+            |(best_s, best_w), (s, dw)| {
+                if s > best_s {
+                    (s, Some(dw))
+                } else {
+                    (best_s, best_w)
+                }
+            },
+        );
+        total += best_score;
+        if let Some(word) = best_word
+            && best_score > 0.0
+        {
+            matched_words.push(word.clone());
+        }
+    }
+
+    // Deduplicate matched words — different query words may map to the same
+    // document word, and we only need each match target once for snippet extraction.
+    matched_words.sort_unstable();
+    matched_words.dedup();
+
+    (total / query_words.len() as f64, matched_words)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -407,7 +442,11 @@ mod tests {
         // "it" and "test" survive the >= 2 char filter; "s" and "a" are dropped.
         // "it" (2 chars) -> 1 gram: {it}. "test" (4 chars) -> 3 grams: {te, es, st}.
         let hashes = tokenize_ngrams("it's a test!");
-        assert_eq!(hashes.len(), 4, "'it' produces {{it}}; 'test' produces {{te, es, st}}");
+        assert_eq!(
+            hashes.len(),
+            4,
+            "'it' produces {{it}}; 'test' produces {{te, es, st}}"
+        );
     }
 
     // ── gram_set ──────────────────────────────────────────────────────────────
@@ -543,5 +582,84 @@ mod tests {
     fn score_query_empty_document_returns_zero() {
         let score = score_query("heredoc", "");
         assert_eq!(score, 0.0);
+    }
+
+    // ── score_query_with_matches ──────────────────────────────────────────────
+
+    #[test]
+    fn score_query_with_matches_returns_same_score_as_score_query() {
+        // score_query delegates to score_query_with_matches; scores must agree.
+        let doc = "the heredoc template guide";
+        let query = "hered templete";
+        let (score, _) = score_query_with_matches(query, doc);
+        assert_eq!(score, score_query(query, doc));
+    }
+
+    #[test]
+    fn score_query_with_matches_returns_best_matching_doc_word() {
+        // "ecit" best matches "exit" (score 1/3, the only word with any gram overlap).
+        // The matched word must be "exit", not the query typo "ecit".
+        let (score, matched) = score_query_with_matches("ecit", "call the exit code");
+        assert!(score > 0.0, "ecit must score > 0.0 against 'exit'");
+        assert!(
+            matched.contains(&"exit".to_owned()),
+            "matched words must contain 'exit', got {:?}",
+            matched
+        );
+        assert!(
+            !matched.contains(&"ecit".to_owned()),
+            "matched words must not contain the query typo 'ecit'"
+        );
+    }
+
+    #[test]
+    fn score_query_with_matches_multi_word_returns_one_match_per_query_word() {
+        // "hered" → "heredoc"; "templete" → "template"
+        let (_, matched) = score_query_with_matches("hered templete", "the heredoc template guide");
+        assert!(
+            matched.contains(&"heredoc".to_owned()),
+            "must match 'heredoc' for query word 'hered'"
+        );
+        assert!(
+            matched.contains(&"template".to_owned()),
+            "must match 'template' for query word 'templete'"
+        );
+    }
+
+    #[test]
+    fn score_query_with_matches_deduplicates_same_doc_word() {
+        // Two query words both best-match the same document word — only one copy.
+        let (_, matched) = score_query_with_matches("roollback roollback", "rollback procedure");
+        let rollback_count = matched.iter().filter(|w| w.as_str() == "rollback").count();
+        assert_eq!(
+            rollback_count, 1,
+            "duplicate matched words must be deduplicated"
+        );
+    }
+
+    #[test]
+    fn score_query_with_matches_empty_query_returns_empty_matches() {
+        let (score, matched) = score_query_with_matches("", "anything here");
+        assert_eq!(score, 0.0);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn score_query_with_matches_empty_document_returns_empty_matches() {
+        let (score, matched) = score_query_with_matches("heredoc", "");
+        assert_eq!(score, 0.0);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn score_query_with_matches_zero_score_words_excluded_from_matches() {
+        // "zzz" has no bigram overlap with any word in the document.
+        // The matched words list must be empty even though doc words exist.
+        let (score, matched) = score_query_with_matches("zzz", "nothing matches here");
+        assert_eq!(score, 0.0);
+        assert!(
+            matched.is_empty(),
+            "words with 0.0 score must not appear in matched words"
+        );
     }
 }
