@@ -182,8 +182,8 @@ fn read_str(data: &[u8], pos: &mut usize, len: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::tokenize::{tokenize, tokenize_ngrams};
+    use super::*;
     use pretty_assertions::assert_eq;
 
     fn build_three_doc_index() -> SearchIndex {

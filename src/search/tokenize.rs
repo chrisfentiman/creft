@@ -17,10 +17,7 @@ use std::collections::HashSet;
 /// by the XOR filter internally. FNV-1a is fast for short strings and produces
 /// good distribution for filter construction.
 pub(crate) fn tokenize(text: &str) -> Vec<u64> {
-    let mut hashes: Vec<u64> = text
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .map(|tok| tok.to_lowercase())
-        .filter(|tok| tok.len() >= 2)
+    let mut hashes: Vec<u64> = split_and_lowercase(text)
         .map(|tok| hash_token(&tok))
         .collect();
 
@@ -50,7 +47,6 @@ fn hash_token(token: &str) -> u64 {
 /// boundaries, lowercase each piece, and discard tokens shorter than 2 characters.
 ///
 /// This is the common first step for `tokenize`, `tokenize_ngrams`, and `gram_set`.
-#[allow(dead_code)]
 fn split_and_lowercase(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .map(|tok| tok.to_lowercase())
@@ -65,13 +61,16 @@ fn split_and_lowercase(text: &str) -> impl Iterator<Item = String> + '_ {
 ///
 /// The returned substrings borrow from `token`. Tokens shorter than 3 characters
 /// produce no grams; they are already covered by whole-token hashes.
-#[allow(dead_code)]
 fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
     let chars: Vec<(usize, char)> = token.char_indices().collect();
     let len = chars.len();
     (0..len.saturating_sub(2)).map(move |i| {
         let start = chars[i].0;
-        let end = if i + 3 < len { chars[i + 3].0 } else { token.len() };
+        let end = if i + 3 < len {
+            chars[i + 3].0
+        } else {
+            token.len()
+        };
         &token[start..end]
     })
 }
@@ -88,8 +87,6 @@ fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
 ///
 /// Duplicate grams across tokens are deduplicated. For example, "exit" and
 /// "exits" both contain the gram "exi" — it appears once in the output.
-// Wired into SearchIndex::build; will be called from fuzzy dispatch in Stage 2.
-#[allow(dead_code)]
 pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     let mut hashes: Vec<u64> = split_and_lowercase(text)
         .flat_map(|tok| {
@@ -112,7 +109,6 @@ pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
 /// comparison.
 ///
 /// Returns a `HashSet` for O(1) intersection operations.
-// Called by tversky_score; will be called from fuzzy dispatch in Stage 2.
 #[allow(dead_code)]
 pub(crate) fn gram_set(text: &str) -> HashSet<String> {
     let mut grams = HashSet::new();
@@ -139,7 +135,6 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 /// unmatched grams (typos reduce the score proportionally).
 ///
 /// Returns 0.0 when either input produces no 3-grams.
-// Called from fuzzy dispatch in Stage 2.
 #[allow(dead_code)]
 pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
     let query_grams = gram_set(query);
