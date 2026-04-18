@@ -42,9 +42,9 @@ pub(crate) struct RuntimeIndex {
     pub is_global: bool,
     /// Raw documents accumulated by successive `creft_index` calls.
     /// Each entry is `(document_name, content)`. The document name is a
-    /// sequential label (e.g., `"doc_0"`, `"doc_1"`) — runtime documents
-    /// have no user-visible identity. Search results for runtime indexes
-    /// return the index name, not per-document names.
+    /// sequential label (e.g., `"doc_0"`, `"doc_1"`) used as a key into the
+    /// XOR filter. Search results look up the matched document name here and
+    /// return the original content, not the internal label.
     pub documents: Vec<(String, String)>,
 }
 

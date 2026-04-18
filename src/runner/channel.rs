@@ -680,9 +680,9 @@ fn handle_index_message(
                 documents: Vec::new(),
             });
 
-        // Append the new document with a sequential label. The label is only
-        // used internally by the XOR filter construction; search results for
-        // runtime indexes return the index name, not these per-document labels.
+        // Append the new document with a sequential label used as the XOR
+        // filter key. Search resolves hit labels back to their content via
+        // the documents list, so the label is never exposed to callers.
         let doc_name = format!("doc_{}", runtime_index.documents.len());
         runtime_index.documents.push((doc_name, content.to_owned()));
         runtime_index.is_global = global;
@@ -735,9 +735,18 @@ fn handle_search_message(
 
     let results = if let Ok(map) = runtime_indexes.lock() {
         if let Some(runtime_index) = map.get(&qualified) {
+            // Build a lookup from sequential doc name (e.g. "doc_0") to its
+            // original content so that search hits resolve to what was indexed,
+            // not the internal document identifier.
+            let content_by_name: HashMap<&str, &str> = runtime_index
+                .documents
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_str()))
+                .collect();
+
             let hits = runtime_index.index.search(query);
             hits.iter()
-                .map(|entry| entry.name.as_str())
+                .filter_map(|entry| content_by_name.get(entry.name.as_str()).copied())
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {
@@ -1834,6 +1843,42 @@ printf '%s' "$_resp"
         assert!(
             !parsed["results"].as_str().unwrap_or("").is_empty(),
             "search for 'rollback' must return a non-empty results string after indexing"
+        );
+    }
+
+    /// handle_search_message returns the indexed content, not the internal doc label.
+    ///
+    /// Verifies the fix for the bug where `creft_search` returned `"doc_0"` instead
+    /// of the actual content that was passed to `creft_index`.
+    #[test]
+    fn handle_search_message_returns_content_not_doc_id() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "recipes",
+            "Chocolate cake needs cocoa powder.",
+            false,
+            "cook skill",
+            None,
+            &indexes,
+        );
+        let response = super::handle_search_message(
+            "s1",
+            "chocolate",
+            "recipes",
+            "cook skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s1");
+        let results = parsed["results"].as_str().unwrap_or("");
+        assert!(
+            results.contains("Chocolate cake needs cocoa powder."),
+            "results must contain the original indexed content, not a doc ID like 'doc_0'; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_0"),
+            "results must not contain internal doc ID 'doc_0'; got: {results}"
         );
     }
 
