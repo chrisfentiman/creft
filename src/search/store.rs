@@ -218,7 +218,7 @@ fn write_index(
 }
 
 /// Write bytes to a path atomically via a temp file and rename.
-fn write_index_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), CreftError> {
+pub(crate) fn write_index_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), CreftError> {
     let dir = path.parent().unwrap_or(path);
     // Write to a temp file in the same directory, then atomically rename.
     let tmp_path = dir.join(format!(
