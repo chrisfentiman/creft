@@ -97,7 +97,11 @@ creft_search() {
   local _creft_response
   read -r _creft_response <&4
   case "$_creft_response" in
-    *'"error"'*) ;;
+    *'"error"'*)
+      printf 'creft_search: %s\n' "$(printf '%s' "$_creft_response" \
+        | sed 's/.*"error":"\([^"]*\)".*/\1/' \
+        | sed 's/\\n/\n/g')" >&2
+      ;;
     *) printf '%s' "$_creft_response" \
          | sed 's/.*"results":"\([^"]*\)".*/\1/' \
          | sed 's/\\n/\n/g' ;;
@@ -162,6 +166,8 @@ def creft_search(query, name):
         _line = _creft_fd4.readline().strip()
         _resp = _creft_json.loads(_line)
         if "error" in _resp:
+            import sys
+            print(f"creft_search: {_resp['error']}", file=sys.stderr)
             return ""
         return _resp.get("results", "").replace("\\n", "\n")
     except (OSError, ValueError):
@@ -226,7 +232,10 @@ function creft_search(query, name) {
   const n = _creft_fs.readSync(4, buf, 0, buf.length);
   try {
     const resp = JSON.parse(buf.slice(0, n).toString().trim());
-    if (resp.error) return '';
+    if (resp.error) {
+      try { process.stderr.write('creft_search: ' + resp.error + '\n'); } catch(e) {}
+      return '';
+    }
     return (resp.results || '').replace(/\\n/g, '\n');
   } catch(e) { return ''; }
 }
@@ -530,6 +539,80 @@ mod tests {
         assert!(
             p.contains("readSync(4"),
             "node creft_search must use readSync on fd 4"
+        );
+    }
+
+    // ── creft_search error surfacing ──────────────────────────────────────────
+
+    /// Bash creft_search redirects error output to stderr rather than stdout.
+    #[test]
+    fn bash_creft_search_error_case_writes_to_stderr() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(
+            p.contains(">&2"),
+            "bash creft_search error case must redirect to stderr with >&2"
+        );
+    }
+
+    /// Bash creft_search extracts the error field from the JSON response rather
+    /// than printing raw JSON to stderr.
+    #[test]
+    fn bash_creft_search_error_case_extracts_error_field() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        // The sed pattern that extracts the error field value.
+        assert!(
+            p.contains(r#""error":"\([^"]*\)""#),
+            "bash creft_search must extract the error field with sed"
+        );
+    }
+
+    /// Bash creft_search prefixes the error message with `creft_search:`.
+    #[test]
+    fn bash_creft_search_error_message_is_prefixed() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(
+            p.contains("creft_search: %s"),
+            "bash creft_search error must be prefixed with 'creft_search:'"
+        );
+    }
+
+    /// Python creft_search writes to stderr on error.
+    #[test]
+    fn python_creft_search_error_case_writes_to_stderr() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(
+            p.contains("sys.stderr"),
+            "python creft_search error case must write to sys.stderr"
+        );
+    }
+
+    /// Python creft_search prefixes the error message with `creft_search:`.
+    #[test]
+    fn python_creft_search_error_message_is_prefixed() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(
+            p.contains("creft_search:"),
+            "python creft_search error must be prefixed with 'creft_search:'"
+        );
+    }
+
+    /// Node creft_search writes to stderr on error.
+    #[test]
+    fn node_creft_search_error_case_writes_to_stderr() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("process.stderr"),
+            "node creft_search error case must write to process.stderr"
+        );
+    }
+
+    /// Node creft_search prefixes the error message with `creft_search:`.
+    #[test]
+    fn node_creft_search_error_message_is_prefixed() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("'creft_search: '"),
+            "node creft_search error must be prefixed with 'creft_search:'"
         );
     }
 }
