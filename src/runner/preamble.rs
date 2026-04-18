@@ -115,6 +115,7 @@ def creft_prompt(question, choices=""):
 def creft_exit(code=0):
     _creft_write({"type": "exit", "code": int(code)})
     import sys
+    sys.stdout.flush()
     sys.exit(0)
 # -- end creft runtime bindings --
 "#;
@@ -155,7 +156,14 @@ function creft_prompt(question, choices) {
 }
 function creft_exit(code) {
   _creft_write({type:'exit',code:typeof code === 'number' ? code : 0});
-  process.exit(0);
+  // process.exit() terminates Node before its async stdout buffer drains,
+  // silently dropping output when the write queue exceeds the OS pipe buffer.
+  // Defer exit until stdout is flushed to prevent data loss.
+  if (process.stdout.writableLength > 0) {
+    process.stdout.once('drain', function() { process.exit(0); });
+  } else {
+    process.exit(0);
+  }
 }
 // -- end creft runtime bindings --
 "#;
@@ -308,6 +316,39 @@ mod tests {
         assert!(
             p.contains("def creft_status(message, progress=None)"),
             "python creft_status must accept progress=None"
+        );
+    }
+
+    /// Node creft_exit defers process.exit until stdout drains rather than
+    /// terminating immediately, preventing silent data loss when the write queue
+    /// exceeds the OS pipe buffer.
+    #[test]
+    fn node_preamble_creft_exit_defers_exit_until_stdout_drains() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("writableLength"),
+            "node creft_exit must check process.stdout.writableLength before exiting"
+        );
+        assert!(
+            p.contains("drain"),
+            "node creft_exit must defer process.exit until the drain event fires"
+        );
+    }
+
+    /// Python creft_exit flushes stdout before sys.exit to prevent data loss.
+    #[test]
+    fn python_preamble_creft_exit_flushes_stdout() {
+        let p = for_language("python").expect("python must have a preamble");
+        // The flush must appear before the sys.exit call.
+        let flush_pos = p
+            .find("sys.stdout.flush()")
+            .expect("python creft_exit must call sys.stdout.flush()");
+        let exit_pos = p
+            .find("sys.exit(0)")
+            .expect("python creft_exit must call sys.exit(0)");
+        assert!(
+            flush_pos < exit_pos,
+            "sys.stdout.flush() must precede sys.exit(0) in python creft_exit"
         );
     }
 
