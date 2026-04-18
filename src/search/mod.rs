@@ -3,6 +3,12 @@
 //! Provides text tokenization, XOR filter construction, and a searchable
 //! index format for fast approximate set membership queries across skill docs.
 
+// These modules are wired into the binary in later stages (index lifecycle and
+// CLI search). Until then, their public items are unused from the binary's
+// perspective but exercised fully by the module's own tests.
+#[allow(dead_code)]
 pub(crate) mod index;
+#[allow(dead_code)]
 pub(crate) mod tokenize;
+#[allow(dead_code)]
 pub(crate) mod xor;

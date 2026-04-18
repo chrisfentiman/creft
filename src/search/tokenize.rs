@@ -1,32 +1,23 @@
-// The public API of this module is consumed by search/index.rs and later stages.
-// The items are unused from the binary's perspective until the index is wired in.
-#![allow(dead_code)]
-
 /// Tokenize text into a set of 64-bit hashes.
 ///
-/// Splits on whitespace, then for each word strips non-alphanumeric characters
-/// (retaining `_` and `-` within tokens), lowercases the result, filters tokens
-/// shorter than 2 chars, and hashes each unique token to a `u64` using FNV-1a.
+/// Splits on whitespace and punctuation boundaries — any character that is
+/// neither alphanumeric, `_`, nor `-` is a delimiter. Each resulting token is
+/// lowercased, filtered to at least 2 characters, and hashed to a `u64` using
+/// FNV-1a. Duplicate tokens are deduplicated; order is unspecified.
 ///
 /// Examples:
 /// - `"Hello World"` → 2 hashes
-/// - `"it's a test!"` → hashes for `"its"` and `"test"` (`"a"` is 1 char, stripped)
+/// - `"hello,world"` → 2 hashes (`","` is a punctuation boundary)
 /// - `"rollback-plan"` → 1 hash (hyphen kept within token)
+/// - `"it's a test!"` → hashes for `"it"` and `"test"` (`"s"` and `"a"` are < 2 chars)
 ///
 /// The hash function is FNV-1a (64-bit), separate from the SplitMix64 used
 /// by the XOR filter internally. FNV-1a is fast for short strings and produces
 /// good distribution for filter construction.
 pub(crate) fn tokenize(text: &str) -> Vec<u64> {
     let mut hashes: Vec<u64> = text
-        .split_whitespace()
-        .map(|word| {
-            // Strip non-alphanumeric chars that are not _ or - from each word,
-            // then lowercase the result.
-            word.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .collect::<String>()
-                .to_lowercase()
-        })
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|tok| tok.to_lowercase())
         .filter(|tok| tok.len() >= 2)
         .map(|tok| hash_token(&tok))
         .collect();
@@ -74,19 +65,29 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_stripped_and_short_tokens_excluded() {
-        // "it's a test!" -> "its", "a" (stripped, len 1), "test"
-        // "a" is 1 char -> excluded; "its" and "test" remain
+    fn punctuation_splits_into_separate_tokens() {
+        // "it's a test!" splits on ' and ! and spaces:
+        // raw pieces -> ["it", "s", "a", "test", ""], filtered to >= 2 chars
+        // -> ["it", "test"] (2 hashes)
         let hashes = tokenize("it's a test!");
-        // "its" and "test" — not "a"
         assert_eq!(hashes.len(), 2);
-        // Those two hashes should match hashing "its" and "test" individually
-        let its = tokenize("its");
+        let it = tokenize("it");
         let test = tokenize("test");
-        assert_eq!(its.len(), 1);
+        assert_eq!(it.len(), 1);
         assert_eq!(test.len(), 1);
-        assert!(hashes.contains(&its[0]));
+        assert!(hashes.contains(&it[0]));
         assert!(hashes.contains(&test[0]));
+    }
+
+    #[test]
+    fn punctuation_boundary_splits_adjacent_words() {
+        // "hello,world" has no space but the comma is a delimiter
+        let hashes = tokenize("hello,world");
+        assert_eq!(hashes.len(), 2);
+        let hello = tokenize("hello");
+        let world = tokenize("world");
+        assert!(hashes.contains(&hello[0]));
+        assert!(hashes.contains(&world[0]));
     }
 
     #[test]
@@ -115,7 +116,7 @@ mod tests {
 
     #[rstest]
     #[case("ab", 1)]
-    #[case("a", 0)]  // 1 char -> excluded
+    #[case("a", 0)] // 1 char -> excluded
     #[case("", 0)]
     fn min_token_length_two_chars(#[case] input: &str, #[case] expected: usize) {
         assert_eq!(tokenize(input).len(), expected);

@@ -1,8 +1,3 @@
-// The public API of this module is consumed by later stages (index lifecycle,
-// preamble functions, CLI search). Items are unused from the binary's
-// perspective until those stages are wired in.
-#![allow(dead_code)]
-
 use super::{tokenize::tokenize, xor::Xor8Filter};
 
 /// A single document's entry in a search index.
@@ -101,7 +96,9 @@ impl SearchIndex {
         let mut pos = 0;
 
         let entry_count = read_u32(data, &mut pos)? as usize;
-        let mut entries = Vec::with_capacity(entry_count);
+        // Cap the pre-allocation to avoid OOM on a corrupt entry_count. The loop's
+        // `?` propagation still bounds actual entries pushed to the real count.
+        let mut entries = Vec::with_capacity(entry_count.min(4096));
 
         for _ in 0..entry_count {
             let name_len = read_u16(data, &mut pos)? as usize;
@@ -114,7 +111,11 @@ impl SearchIndex {
             let filter_bytes = read_bytes(data, &mut pos, filter_len)?;
             let filter = Xor8Filter::from_bytes(filter_bytes)?;
 
-            entries.push(IndexEntry { name, description, filter });
+            entries.push(IndexEntry {
+                name,
+                description,
+                filter,
+            });
         }
 
         // Reject trailing bytes — malformed or appended garbage.
@@ -170,9 +171,21 @@ mod tests {
 
     fn build_three_doc_index() -> SearchIndex {
         SearchIndex::build(&[
-            ("deploy rollback", "Roll back a deployment", "rollback procedure steps template"),
-            ("deploy push", "Push a build to an environment", "push build artifact to environment"),
-            ("aws copy", "Copy S3 objects", "copy objects between buckets placeholder"),
+            (
+                "deploy rollback",
+                "Roll back a deployment",
+                "rollback procedure steps template",
+            ),
+            (
+                "deploy push",
+                "Push a build to an environment",
+                "push build artifact to environment",
+            ),
+            (
+                "aws copy",
+                "Copy S3 objects",
+                "copy objects between buckets placeholder",
+            ),
         ])
     }
 
@@ -198,7 +211,11 @@ mod tests {
         let idx = build_three_doc_index();
         // "template" is only in "deploy rollback"; "placeholder" is only in "aws copy"
         let results = idx.search("template placeholder");
-        assert_eq!(results.len(), 0, "AND semantics: no doc contains both tokens");
+        assert_eq!(
+            results.len(),
+            0,
+            "AND semantics: no doc contains both tokens"
+        );
     }
 
     #[test]
@@ -246,10 +263,16 @@ mod tests {
         let bytes = idx.to_bytes();
         let restored = SearchIndex::from_bytes(&bytes).expect("round-trip should succeed");
 
-        let original_results: Vec<&str> =
-            idx.search("template").iter().map(|e| e.name.as_str()).collect();
-        let restored_results: Vec<&str> =
-            restored.search("template").iter().map(|e| e.name.as_str()).collect();
+        let original_results: Vec<&str> = idx
+            .search("template")
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        let restored_results: Vec<&str> = restored
+            .search("template")
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
 
         assert_eq!(original_results, restored_results);
     }
@@ -267,7 +290,8 @@ mod tests {
     fn empty_index_round_trips_correctly() {
         let idx = SearchIndex::build(&[]);
         let bytes = idx.to_bytes();
-        let restored = SearchIndex::from_bytes(&bytes).expect("empty index round-trip should succeed");
+        let restored =
+            SearchIndex::from_bytes(&bytes).expect("empty index round-trip should succeed");
         assert!(restored.is_empty());
         assert!(restored.search("anything").is_empty());
     }

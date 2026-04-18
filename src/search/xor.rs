@@ -1,7 +1,3 @@
-// The public API of this module is consumed by search/index.rs (Stage 2).
-// The items are unused from the binary's perspective until that stage is wired in.
-#![allow(dead_code)]
-
 /// An immutable Xor8 filter for approximate set membership testing.
 ///
 /// Constructed from a set of `u64` keys. Membership queries never produce
