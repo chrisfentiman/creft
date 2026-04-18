@@ -1,10 +1,15 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal as _, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use crate::namespace;
+use crate::search::index::SearchIndex;
 use crate::wrap::MAX_WIDTH;
+
+use super::RuntimeIndex;
 
 /// File descriptor number for the block → creft message channel.
 pub(super) const CONTROL_FD: i32 = 3;
@@ -156,9 +161,9 @@ pub(crate) type ExitSignal = Arc<std::sync::Mutex<Option<i32>>>;
 /// dropped by the reader thread.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type")]
-// `choices` on the Prompt variant is part of the wire protocol and will
-// be consumed by the stage 4 prompt handler. Suppress the dead-code lint
-// here rather than removing a protocol field.
+// `choices` on the Prompt variant is part of the wire protocol consumed by
+// the prompt handler. The `global` field on Index controls access control.
+// Suppress the dead-code lint rather than removing protocol fields.
 #[allow(dead_code)]
 pub(crate) enum ChannelMessage {
     #[serde(rename = "print")]
@@ -182,6 +187,28 @@ pub(crate) enum ChannelMessage {
         /// Process exit code. 0 = success (pipeline skip), non-zero = failure.
         #[serde(default)]
         code: i32,
+    },
+    #[serde(rename = "index")]
+    Index {
+        /// Sub-index name (local to the skill's namespace).
+        name: String,
+        /// Content to tokenize and add to the named sub-index.
+        content: String,
+        /// Whether this index is queryable from other namespaces.
+        /// Default: false (namespace-isolated).
+        #[serde(default)]
+        global: bool,
+    },
+    #[serde(rename = "search")]
+    Search {
+        /// Request ID for matching the response (same pattern as Prompt).
+        id: String,
+        /// Search query string.
+        query: String,
+        /// Sub-index name. Local name (no dots) resolves within the caller's
+        /// namespace. Dotted name is a cross-namespace reference checked against
+        /// the access registry.
+        name: String,
     },
 }
 
@@ -459,6 +486,21 @@ impl TerminalWriter {
     }
 }
 
+/// Context for handling `creft_index` and `creft_search` messages on the side channel.
+///
+/// Carried into the reader thread when a skill is executing. The thread uses
+/// `skill_name` to derive the caller's namespace for name qualification, and
+/// `runtime_indexes` to store indexes created by `creft_index` and query them
+/// for `creft_search` requests.
+pub(crate) struct SearchContext {
+    /// Fully-qualified name of the skill being executed.
+    pub skill_name: String,
+    /// Plugin name extracted from the skill's source, if any.
+    pub plugin: Option<String>,
+    /// Shared runtime indexes keyed by fully-qualified name.
+    pub runtime_indexes: Arc<std::sync::Mutex<HashMap<String, RuntimeIndex>>>,
+}
+
 /// Spawn a reader thread that drains the control pipe and renders messages.
 ///
 /// The thread reads NDJSON lines from `control_reader` until EOF (the child
@@ -467,9 +509,13 @@ impl TerminalWriter {
 ///
 /// - `Print` — rendered immediately via `writer.print`.
 /// - `Status` — rendered via `writer.status` (overwrites the previous status).
-/// - `Prompt` — in stage 3, `prompt_tx` is always `None`; the reader writes
-///   an empty response to `response_writer` so the child does not deadlock on
-///   its `read(&4)` call, and logs the question as a print message.
+/// - `Prompt` — when `prompt_tx` is `None`, writes an empty response so the
+///   child does not deadlock on its `read(<&4)` call, and logs the question
+///   as a print message.
+/// - `Index` — when `search_ctx` is `Some`, qualifies the name and builds an
+///   in-memory `SearchIndex`. Fire-and-forget; no response is written.
+/// - `Search` — when `search_ctx` is `Some`, resolves the name against the
+///   access registry, queries the index, and writes a JSON response on fd 4.
 ///
 /// Malformed JSON lines are silently skipped.
 ///
@@ -481,6 +527,7 @@ pub(crate) fn spawn_reader(
     prompt_tx: Option<std::sync::mpsc::Sender<ChannelMessage>>,
     mut response_writer: Option<File>,
     exit_signal: Option<ExitSignal>,
+    search_ctx: Option<SearchContext>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("creft-channel-reader".to_owned())
@@ -517,15 +564,15 @@ pub(crate) fn spawn_reader(
                         choices,
                     } => {
                         if let Some(tx) = &prompt_tx {
-                            // Stage 4: forward to the prompt handler thread.
+                            // Forward to the prompt handler thread.
                             let _ = tx.send(ChannelMessage::Prompt {
                                 id,
                                 question,
                                 choices,
                             });
                         } else {
-                            // Stage 3 / pipe-chain context: log the question and
-                            // write an empty response so the child doesn't hang.
+                            // Pipe-chain context: log the question and write an
+                            // empty response so the child doesn't hang.
                             writer.print(&question);
                             if let Some(ref mut rw) = response_writer {
                                 let response = format!("{{\"id\":\"{id}\",\"value\":\"\"}}\n");
@@ -541,6 +588,43 @@ pub(crate) fn spawn_reader(
                             *slot = Some(code);
                         }
                     }
+                    ChannelMessage::Index {
+                        name,
+                        content,
+                        global,
+                    } => {
+                        if let Some(ref ctx) = search_ctx {
+                            handle_index_message(
+                                &name,
+                                &content,
+                                global,
+                                &ctx.skill_name,
+                                ctx.plugin.as_deref(),
+                                &ctx.runtime_indexes,
+                            );
+                        }
+                    }
+                    ChannelMessage::Search { id, query, name } => {
+                        if let Some(ref ctx) = search_ctx {
+                            let response = handle_search_message(
+                                &id,
+                                &query,
+                                &name,
+                                &ctx.skill_name,
+                                ctx.plugin.as_deref(),
+                                &ctx.runtime_indexes,
+                            );
+                            if let Some(ref mut rw) = response_writer {
+                                let _ = rw.write_all(response.as_bytes());
+                                let _ = rw.flush();
+                            }
+                        } else if let Some(ref mut rw) = response_writer {
+                            // No search context — return empty results rather than hanging.
+                            let response = format!("{{\"id\":\"{id}\",\"results\":\"\"}}\n");
+                            let _ = rw.write_all(response.as_bytes());
+                            let _ = rw.flush();
+                        }
+                    }
                 }
             }
 
@@ -548,6 +632,132 @@ pub(crate) fn spawn_reader(
             writer.clear_status();
         })
         .expect("failed to spawn channel reader thread")
+}
+
+/// Escape a string for safe interpolation into a JSON string value.
+///
+/// Replaces the five characters that break JSON string literals:
+/// - `\` → `\\` (must be first to avoid double-escaping)
+/// - `"` → `\"`
+/// - tab → `\t`
+/// - newline → `\n`
+/// - carriage return → `\r`
+fn json_escape_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Handle a `creft_index` message: qualify the name, accumulate the document,
+/// rebuild the `SearchIndex`, and store the result in `runtime_indexes`.
+///
+/// Called from the reader thread when an `Index` message arrives on fd 3.
+/// Fire-and-forget — no response is written to fd 4.
+///
+/// When called multiple times with the same qualified name, each call appends
+/// a new document to the index rather than replacing it. The `SearchIndex` is
+/// rebuilt from all accumulated documents on every call. The `is_global` flag
+/// is updated to the value from the most recent call (last-write-wins).
+fn handle_index_message(
+    name: &str,
+    content: &str,
+    global: bool,
+    skill_name: &str,
+    plugin: Option<&str>,
+    runtime_indexes: &std::sync::Mutex<HashMap<String, RuntimeIndex>>,
+) {
+    let ns = namespace::skill_namespace(skill_name);
+    let qualified = namespace::qualify(name, ns, plugin);
+
+    if let Ok(mut map) = runtime_indexes.lock() {
+        let runtime_index = map
+            .entry(qualified.clone())
+            .or_insert_with(|| RuntimeIndex {
+                index: SearchIndex::build(&[]),
+                is_global: global,
+                documents: Vec::new(),
+            });
+
+        // Append the new document with a sequential label used as the XOR
+        // filter key. Search resolves hit labels back to their content via
+        // the documents list, so the label is never exposed to callers.
+        let doc_name = format!("doc_{}", runtime_index.documents.len());
+        runtime_index.documents.push((doc_name, content.to_owned()));
+        runtime_index.is_global = global;
+
+        // Rebuild the index from all accumulated documents. The number of
+        // runtime documents per index is small (a skill typically indexes
+        // 1–10 documents per invocation), so rebuilding is negligible.
+        let doc_triples: Vec<(&str, &str, &str)> = runtime_index
+            .documents
+            .iter()
+            .map(|(n, c)| (n.as_str(), "", c.as_str()))
+            .collect();
+        runtime_index.index = SearchIndex::build(&doc_triples);
+    }
+}
+
+/// Handle a `creft_search` message: resolve the name, query the index, and
+/// return a JSON response string to be written to fd 4.
+///
+/// If access is denied for a cross-namespace reference, the response contains
+/// an `error` field. If no matching index exists or the query returns no
+/// results, the `results` field is an empty string.
+fn handle_search_message(
+    id: &str,
+    query: &str,
+    name: &str,
+    skill_name: &str,
+    plugin: Option<&str>,
+    runtime_indexes: &std::sync::Mutex<HashMap<String, RuntimeIndex>>,
+) -> String {
+    let ns = namespace::skill_namespace(skill_name);
+
+    // Build a transient access registry from the current runtime indexes.
+    let mut registry = namespace::AccessRegistry::new();
+    if let Ok(map) = runtime_indexes.lock() {
+        for (qualified_name, runtime_index) in map.iter() {
+            if runtime_index.is_global {
+                registry.mark_global(qualified_name);
+            }
+        }
+    }
+
+    let qualified = match namespace::resolve(name, ns, plugin, &registry) {
+        Ok(q) => q,
+        Err(e) => {
+            let msg = e.to_string().replace('"', "\\\"");
+            return format!("{{\"id\":\"{id}\",\"error\":\"{msg}\"}}\n");
+        }
+    };
+
+    let results = if let Ok(map) = runtime_indexes.lock() {
+        if let Some(runtime_index) = map.get(&qualified) {
+            // Build a lookup from sequential doc name (e.g. "doc_0") to its
+            // original content so that search hits resolve to what was indexed,
+            // not the internal document identifier.
+            let content_by_name: HashMap<&str, &str> = runtime_index
+                .documents
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_str()))
+                .collect();
+
+            let hits = runtime_index.index.search(query);
+            hits.iter()
+                .filter_map(|entry| content_by_name.get(entry.name.as_str()).copied())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let escaped_results = json_escape_string(&results);
+    format!("{{\"id\":\"{id}\",\"results\":\"{escaped_results}\"}}\n")
 }
 
 /// Handle a prompt request by rendering it to the terminal and collecting user
@@ -619,14 +829,7 @@ pub(crate) fn handle_prompt(
     // not touch stderr and does not need the terminal lock.
     drop(g);
 
-    // Escape the answer for JSON: backslash and double-quote need escaping.
-    let escaped = answer
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-
+    let escaped = json_escape_string(&answer);
     let response = format!("{{\"id\":\"{id}\",\"value\":\"{escaped}\"}}\n");
     let _ = response_writer.write_all(response.as_bytes());
     let _ = response_writer.flush();
@@ -664,6 +867,7 @@ pub(crate) fn spawn_prompt_handler(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
@@ -1203,7 +1407,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None, None);
 
         let status = child.wait().unwrap();
         assert!(status.success(), "bash must exit successfully");
@@ -1249,7 +1453,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None, None);
 
         child.wait().unwrap();
         handle
@@ -1294,7 +1498,7 @@ mod tests {
         ch.close_child_ends();
 
         let writer = Arc::new(super::TerminalWriter::new());
-        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None);
+        let handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer, None, None);
 
         let status = child.wait().unwrap();
         assert!(status.success());
@@ -1355,6 +1559,7 @@ printf '%s' "$_resp"
             ctrl_reader,
             Arc::clone(&writer),
             Some(prompt_tx),
+            None,
             None,
             None,
         );
@@ -1457,5 +1662,675 @@ printf '%s' "$_resp"
             uncapped.width(),
             "max_width larger than terminal width must have no effect"
         );
+    }
+
+    // ── ChannelMessage::Index deserialization ─────────────────────────────────
+
+    /// An Index message with explicit global:true deserializes correctly.
+    #[test]
+    fn channel_message_index_with_global_true_deserializes() {
+        let json = r#"{"type":"index","name":"beta","content":"some docs","global":true}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Index {
+                name,
+                content,
+                global,
+            } => {
+                assert_eq!(name, "beta");
+                assert_eq!(content, "some docs");
+                assert!(global, "global field must be true when set to true");
+            }
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    /// An Index message without global field defaults to false.
+    #[test]
+    fn channel_message_index_without_global_defaults_false() {
+        let json = r#"{"type":"index","name":"beta","content":"some docs"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Index {
+                name,
+                content,
+                global,
+            } => {
+                assert_eq!(name, "beta");
+                assert_eq!(content, "some docs");
+                assert!(!global, "missing global field must default to false");
+            }
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    /// An Index message with global:false deserializes correctly.
+    #[test]
+    fn channel_message_index_with_global_false_deserializes() {
+        let json = r#"{"type":"index","name":"configs","content":"data","global":false}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Index { global, .. } => {
+                assert!(!global, "global field must be false when set to false");
+            }
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    // ── ChannelMessage::Search deserialization ────────────────────────────────
+
+    /// A well-formed Search message deserializes to the Search variant.
+    #[test]
+    fn channel_message_search_deserializes() {
+        let json = r#"{"type":"search","id":"s1","query":"rollback","name":"beta"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Search { id, query, name } => {
+                assert_eq!(id, "s1");
+                assert_eq!(query, "rollback");
+                assert_eq!(name, "beta");
+            }
+            other => panic!("expected Search, got {other:?}"),
+        }
+    }
+
+    // ── handle_index_message / handle_search_message unit tests ──────────────
+
+    fn make_runtime_indexes() -> Arc<std::sync::Mutex<HashMap<String, super::super::RuntimeIndex>>>
+    {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// handle_index_message qualifies the name using the skill's namespace and
+    /// inserts it into runtime_indexes keyed by the qualified name.
+    #[test]
+    fn handle_index_message_qualifies_name_with_namespace() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "beta",
+            "rollback procedure",
+            false,
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        let map = indexes.lock().unwrap();
+        assert!(
+            map.contains_key("deploy.beta"),
+            "index must be stored under the qualified name 'deploy.beta'; got keys: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// handle_index_message with global:true marks the index as globally accessible.
+    #[test]
+    fn handle_index_message_global_flag_propagates() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "configs",
+            "shared data",
+            true,
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("deploy.configs")
+            .expect("deploy.configs must be in the map");
+        assert!(
+            entry.is_global,
+            "is_global must be true when global:true was sent"
+        );
+    }
+
+    /// handle_index_message with global:false marks the index as namespace-local.
+    #[test]
+    fn handle_index_message_without_global_is_local() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message("private", "secret", false, "test skill", None, &indexes);
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("test.private")
+            .expect("test.private must be in the map");
+        assert!(
+            !entry.is_global,
+            "is_global must be false when global:false was sent"
+        );
+    }
+
+    /// handle_search_message returns empty results when no index exists for the name.
+    #[test]
+    fn handle_search_message_returns_empty_when_no_index() {
+        let indexes = make_runtime_indexes();
+        let response = super::handle_search_message(
+            "r1",
+            "rollback",
+            "beta",
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "r1");
+        assert_eq!(parsed["results"], "");
+    }
+
+    /// handle_search_message returns results after handle_index_message populates the index.
+    #[test]
+    fn handle_search_message_returns_results_after_index() {
+        let indexes = make_runtime_indexes();
+        // Index a document containing "rollback".
+        super::handle_index_message(
+            "beta",
+            "rollback deployment procedure",
+            false,
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        let response = super::handle_search_message(
+            "r1",
+            "rollback",
+            "beta",
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "r1");
+        // Results should be non-empty — the indexed content should appear.
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search for 'rollback' must return a non-empty results string after indexing"
+        );
+    }
+
+    /// handle_search_message returns the indexed content, not the internal doc label.
+    ///
+    /// Verifies the fix for the bug where `creft_search` returned `"doc_0"` instead
+    /// of the actual content that was passed to `creft_index`.
+    #[test]
+    fn handle_search_message_returns_content_not_doc_id() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "recipes",
+            "Chocolate cake needs cocoa powder.",
+            false,
+            "cook skill",
+            None,
+            &indexes,
+        );
+        let response = super::handle_search_message(
+            "s1",
+            "chocolate",
+            "recipes",
+            "cook skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s1");
+        let results = parsed["results"].as_str().unwrap_or("");
+        assert!(
+            results.contains("Chocolate cake needs cocoa powder."),
+            "results must contain the original indexed content, not a doc ID like 'doc_0'; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_0"),
+            "results must not contain internal doc ID 'doc_0'; got: {results}"
+        );
+    }
+
+    /// Cross-namespace search is denied when the target index is not global.
+    #[test]
+    fn handle_search_message_cross_namespace_denied_when_not_global() {
+        let indexes = make_runtime_indexes();
+        // Index in "deploy" namespace, not global.
+        super::handle_index_message(
+            "configs",
+            "deploy configs",
+            false,
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        // Search from "test" namespace using dotted name (cross-namespace reference).
+        let response = super::handle_search_message(
+            "r2",
+            "configs",
+            "deploy.configs",
+            "test skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "r2");
+        assert!(
+            parsed.get("error").is_some(),
+            "cross-namespace access to a non-global index must return an error field"
+        );
+        let error_msg = parsed["error"].as_str().unwrap_or("");
+        assert!(
+            error_msg.contains("access denied"),
+            "error message must contain 'access denied'; got: {error_msg}"
+        );
+    }
+
+    /// Cross-namespace search succeeds when the target index is global.
+    #[test]
+    fn handle_search_message_cross_namespace_succeeds_when_global() {
+        let indexes = make_runtime_indexes();
+        // Index in "deploy" namespace with global:true.
+        super::handle_index_message(
+            "configs",
+            "shared configuration data",
+            true,
+            "deploy rollback",
+            None,
+            &indexes,
+        );
+        // Search from "test" namespace — should be allowed because index is global.
+        let response = super::handle_search_message(
+            "r3",
+            "configuration",
+            "deploy.configs",
+            "test skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "r3");
+        assert!(
+            parsed.get("error").is_none(),
+            "cross-namespace access to a global index must not return an error"
+        );
+    }
+
+    /// Plugin context is included in the qualified name when present.
+    #[test]
+    fn handle_index_message_includes_plugin_in_qualified_name() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "beta",
+            "content",
+            false,
+            "deploy rollback",
+            Some("acme"),
+            &indexes,
+        );
+        let map = indexes.lock().unwrap();
+        assert!(
+            map.contains_key("acme.deploy.beta"),
+            "plugin skill index must be stored under 'acme.deploy.beta'; got: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── spawn_reader with search context ─────────────────────────────────────
+
+    /// A bash block calling creft_index followed by creft_search receives a
+    /// non-empty response containing the indexed content's name.
+    #[test]
+    fn spawn_reader_handles_index_then_search_round_trip() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        // Bash script: index content, then search for a term in it.
+        // The response is the raw JSON line from fd 4.
+        let script = r#"
+printf '{"type":"index","name":"beta","content":"rollback deployment","global":false}\n' >&3
+_id="search_test_1"
+printf '{"type":"search","id":"%s","query":"rollback","name":"beta"}\n' "$_id" >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            cmd.pre_exec(move || {
+                if libc::dup2(ctrl_w_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if ctrl_w_fd != 3 {
+                    libc::close(ctrl_w_fd);
+                }
+                if libc::dup2(resp_r_fd, 4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if resp_r_fd != 4 {
+                    libc::close(resp_r_fd);
+                }
+                Ok(())
+            });
+        }
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let indexes = make_runtime_indexes();
+        let search_ctx = Some(super::SearchContext {
+            skill_name: "deploy rollback".to_owned(),
+            plugin: None,
+            runtime_indexes: Arc::clone(&indexes),
+        });
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        let reader_handle = super::spawn_reader(
+            ctrl_reader,
+            writer,
+            None,
+            resp_writer_file,
+            None,
+            search_ctx,
+        );
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "search_test_1");
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search after index must return non-empty results; got response: {stdout}"
+        );
+    }
+
+    /// A bash block calling creft_search before creft_index returns empty results.
+    #[test]
+    fn spawn_reader_search_with_no_index_returns_empty() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+_id="search_test_2"
+printf '{"type":"search","id":"%s","query":"rollback","name":"beta"}\n' "$_id" >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            cmd.pre_exec(move || {
+                if libc::dup2(ctrl_w_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if ctrl_w_fd != 3 {
+                    libc::close(ctrl_w_fd);
+                }
+                if libc::dup2(resp_r_fd, 4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if resp_r_fd != 4 {
+                    libc::close(resp_r_fd);
+                }
+                Ok(())
+            });
+        }
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let indexes = make_runtime_indexes();
+        let search_ctx = Some(super::SearchContext {
+            skill_name: "deploy rollback".to_owned(),
+            plugin: None,
+            runtime_indexes: Arc::clone(&indexes),
+        });
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        let reader_handle = super::spawn_reader(
+            ctrl_reader,
+            writer,
+            None,
+            resp_writer_file,
+            None,
+            search_ctx,
+        );
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "search_test_2");
+        assert_eq!(
+            parsed["results"].as_str().unwrap_or("non-empty"),
+            "",
+            "search with no prior index must return empty results"
+        );
+    }
+
+    // ── document accumulation tests ───────────────────────────────────────────
+
+    /// Two calls to handle_index_message with the same name accumulate both
+    /// documents: the RuntimeIndex contains 2 entries after the second call.
+    #[test]
+    fn handle_index_message_accumulates_documents_across_calls() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "first document about rollback",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "second document about deployment",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("deploy.docs")
+            .expect("deploy.docs must be in the map");
+        assert_eq!(
+            entry.documents.len(),
+            2,
+            "two creft_index calls to the same name must accumulate 2 documents"
+        );
+    }
+
+    /// After two calls with distinct tokens, searching for a token from the
+    /// first document still returns results (the first document is not lost).
+    #[test]
+    fn handle_index_message_first_document_searchable_after_second_call() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response =
+            super::handle_search_message("s1", "rollback", "docs", "deploy skill", None, &indexes);
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s1");
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search for token from first document must return results after second call; got: {response}"
+        );
+    }
+
+    /// After two calls with distinct tokens, searching for a token from the
+    /// second document returns results.
+    #[test]
+    fn handle_index_message_second_document_searchable_after_accumulation() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response = super::handle_search_message(
+            "s2",
+            "deployment",
+            "docs",
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s2");
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search for token from second document must return results; got: {response}"
+        );
+    }
+
+    /// After two calls with distinct content, searching returns the original content
+    /// strings, not the internal doc labels (`"doc_0"`, `"doc_1"`).
+    ///
+    /// Verifies the content-resolution fix holds for the multi-document path: a
+    /// regression in the `filter_map` would pass the non-empty assertions above
+    /// but fail here by returning `"doc_0"` or `"doc_1"` instead of real content.
+    #[test]
+    fn handle_search_message_multi_document_returns_content_not_doc_labels() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response =
+            super::handle_search_message("s1", "rollback", "docs", "deploy skill", None, &indexes);
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        let results = parsed["results"].as_str().unwrap_or("");
+        assert!(
+            results.contains("rollback procedure guide"),
+            "results must contain the original content from the first document, not an internal label; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_0"),
+            "results must not expose internal doc label 'doc_0'; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_1"),
+            "results must not expose internal doc label 'doc_1'; got: {results}"
+        );
+    }
+
+    /// The is_global flag reflects the most recent call (last-write-wins).
+    #[test]
+    fn handle_index_message_is_global_last_write_wins() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message("docs", "content one", false, "deploy skill", None, &indexes);
+        super::handle_index_message("docs", "content two", true, "deploy skill", None, &indexes);
+
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("deploy.docs")
+            .expect("deploy.docs must be in the map");
+        assert!(
+            entry.is_global,
+            "is_global must reflect the most recent call (true); last-write-wins"
+        );
+    }
+
+    // ── json_escape_string tests ──────────────────────────────────────────────
+
+    /// Entry names containing double-quotes produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_double_quote() {
+        let escaped = super::json_escape_string("name with \"quotes\"");
+        assert_eq!(escaped, r#"name with \"quotes\""#);
+        // Verify the escaped string produces valid JSON when embedded.
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "name with \"quotes\"");
+    }
+
+    /// Entry names containing backslashes produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_backslash() {
+        let escaped = super::json_escape_string("path\\to\\file");
+        assert_eq!(escaped, "path\\\\to\\\\file");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "path\\to\\file");
+    }
+
+    /// Entry names containing newlines produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_newline() {
+        let escaped = super::json_escape_string("line one\nline two");
+        assert_eq!(escaped, "line one\\nline two");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "line one\nline two");
+    }
+
+    /// Entry names containing tabs produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_tab() {
+        let escaped = super::json_escape_string("col\there");
+        assert_eq!(escaped, "col\\there");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "col\there");
+    }
+
+    /// json_escape_string is a no-op for plain ASCII content.
+    #[test]
+    fn json_escape_string_passthrough_for_plain_ascii() {
+        let s = "deploy rollback configuration";
+        assert_eq!(super::json_escape_string(s), s);
     }
 }

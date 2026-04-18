@@ -1,5 +1,6 @@
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::search;
 use crate::setup;
 
 pub fn cmd_up(ctx: &AppContext, system: Option<String>, local: bool) -> Result<(), CreftError> {
@@ -68,5 +69,12 @@ pub fn cmd_up(ctx: &AppContext, system: Option<String>, local: bool) -> Result<(
 
     eprintln!();
     eprintln!("done. creft bootstraps itself at session start.");
+
+    // Rebuild all skill indexes and the built-in docs index so search
+    // reflects the current state after an up.
+    if let Err(e) = search::store::rebuild_all_indexes(ctx) {
+        eprintln!("warning: could not rebuild search indexes: {}", e);
+    }
+
     Ok(())
 }

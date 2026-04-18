@@ -2,6 +2,7 @@ use yansi::Paint;
 
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::search;
 use crate::wrap::{MAX_WIDTH, wrap_description};
 use crate::{model, registry};
 
@@ -65,6 +66,13 @@ pub fn cmd_plugin_activate(ctx: &AppContext, target: &str, global: bool) -> Resu
     };
     registry::activate(ctx, target, scope)?;
     eprintln!("activated: {target}");
+
+    // Rebuild indexes so activated plugin skills are immediately searchable.
+    // A failed rebuild does not prevent the activation from succeeding.
+    if let Err(e) = search::store::rebuild_all_indexes(ctx) {
+        eprintln!("warning: could not rebuild search indexes after activation: {e}");
+    }
+
     Ok(())
 }
 
@@ -75,6 +83,13 @@ pub fn cmd_plugin_deactivate(
 ) -> Result<(), CreftError> {
     registry::deactivate(ctx, target, global)?;
     eprintln!("deactivated: {target}");
+
+    // Rebuild indexes so deactivated plugin skills no longer appear in search.
+    // A failed rebuild does not prevent the deactivation from succeeding.
+    if let Err(e) = search::store::rebuild_all_indexes(ctx) {
+        eprintln!("warning: could not rebuild search indexes after deactivation: {e}");
+    }
+
     Ok(())
 }
 

@@ -608,6 +608,7 @@ pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
 
     use super::*;
 
@@ -630,6 +631,7 @@ mod tests {
     /// The footer text is the user-visible message that tells them how to see the
     /// rest: `(showing 20 of 100 — use 'creft list --all' to see all)`.
     #[test]
+    #[serial]
     fn truncation_footer_shown_when_entries_exceed_limit() {
         yansi::disable();
         let entries = synthetic_namespace_entries(100);
@@ -648,6 +650,7 @@ mod tests {
     /// When all entries fit within the limit there is nothing to truncate,
     /// so the footer must not appear.
     #[test]
+    #[serial]
     fn truncation_footer_absent_when_entries_fit_within_limit() {
         yansi::disable();
         let entries = synthetic_namespace_entries(15);
@@ -666,6 +669,7 @@ mod tests {
     ///
     /// Non-TTY output is piped or redirected; all entries are always shown.
     #[test]
+    #[serial]
     fn no_truncation_when_display_limit_is_none() {
         yansi::disable();
         let entries = synthetic_namespace_entries(200);
@@ -698,6 +702,7 @@ mod tests {
     /// These structural elements mirror the root listing so that the namespace
     /// output feels like a natural subset rather than a bare dump.
     #[test]
+    #[serial]
     fn namespace_listing_contains_required_structural_elements() {
         yansi::disable();
         let entries = synthetic_namespace_entries(3);
@@ -732,6 +737,7 @@ mod tests {
     /// The root listing renders tagline → Usage → Commands/Skills → flags → footer.
     /// Namespace listing must follow the same ordering so both feel like the same UI.
     #[test]
+    #[serial]
     fn namespace_listing_usage_appears_before_skills_header() {
         yansi::disable();
         let entries = synthetic_namespace_entries(2);
@@ -753,6 +759,7 @@ mod tests {
     /// the `See 'creft ... --help'` footer so the user knows which namespace they
     /// are viewing.
     #[test]
+    #[serial]
     fn namespace_listing_includes_namespace_name_in_usage_and_footer() {
         yansi::disable();
         let entries = synthetic_namespace_entries(2);
@@ -775,6 +782,7 @@ mod tests {
     /// The tagline mirrors the root listing so the namespace output feels like a
     /// natural subset of the top-level help rather than a bare command dump.
     #[test]
+    #[serial]
     fn namespace_listing_includes_tagline() {
         yansi::disable();
         let entries = synthetic_namespace_entries(2);
@@ -793,6 +801,7 @@ mod tests {
     /// When a user drills into `creft artifacts`, a skill named `artifacts cleanup`
     /// must appear as `cleanup` — the namespace prefix is implicit from context.
     #[test]
+    #[serial]
     fn namespace_listing_strips_namespace_prefix_from_skill_names() {
         yansi::disable();
 

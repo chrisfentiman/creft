@@ -5,7 +5,9 @@ use crate::frontmatter;
 use crate::markdown;
 pub use crate::model::find_local_root_from;
 use crate::model::{AppContext, CommandDef, NamespaceEntry, ParsedCommand, Scope, SkillSource};
+use crate::namespace::skill_namespace;
 use crate::registry::{self, ActivationEntry};
+use crate::search;
 
 const RESERVED: &[&str] = &[
     "add",
@@ -149,6 +151,16 @@ pub fn save(
 
     let output = frontmatter::serialize(&def, &body)?;
     std::fs::write(&path, output)?;
+
+    // Rebuild the namespace index so search reflects the new skill immediately.
+    // A failed rebuild does not prevent the save from succeeding.
+    let ns = skill_namespace(&def.name).to_owned();
+    if let Err(e) = search::store::rebuild_namespace_index(ctx, &ns, scope) {
+        eprintln!(
+            "warning: could not rebuild search index for '{}': {}",
+            ns, e
+        );
+    }
 
     Ok(def.name)
 }
@@ -404,6 +416,16 @@ pub fn remove_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<(), Creft
                 break;
             }
         }
+    }
+
+    // Rebuild the namespace index without the removed skill.
+    // A failed rebuild does not prevent the removal from succeeding.
+    let ns = skill_namespace(name).to_owned();
+    if let Err(e) = search::store::rebuild_namespace_index(ctx, &ns, scope) {
+        eprintln!(
+            "warning: could not rebuild search index for '{}': {}",
+            ns, e
+        );
     }
 
     Ok(())

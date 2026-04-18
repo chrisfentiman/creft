@@ -15,6 +15,10 @@ pub(crate) enum Parsed {
     Help(BuiltinHelp),
     /// A specific built-in's `--docs` page (full reference).
     Docs(BuiltinHelp),
+    /// A specific built-in's `--docs` page filtered by a search query.
+    DocsSearch(BuiltinHelp, String),
+    /// Cross-source `--docs` search from the root level.
+    DocsSearchAll(String),
     /// Global `--help`: the two-section listing (requires the skill registry).
     RootHelp,
     /// `--version`: print the version string and exit.
@@ -118,6 +122,25 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
         None => return Ok(Some(Parsed::RootHelp)),
         Some(Long("help") | Short('h')) => return Ok(Some(Parsed::RootHelp)),
         Some(Long("version") | Short('V')) => return Ok(Some(Parsed::Version)),
+        Some(Long("docs")) => {
+            // `creft --docs <query>` or `creft --docs=<query>` → cross-source search.
+            // `creft --docs` (bare) → root listing.
+            if let Some(val) = parser.optional_value() {
+                return Ok(Some(Parsed::DocsSearchAll(val.string()?)));
+            }
+            match parser.next()? {
+                Some(Value(v)) => return Ok(Some(Parsed::DocsSearchAll(v.string()?))),
+                Some(arg) => {
+                    // A flag follows --docs: treat as bare --docs (root listing).
+                    // The flag is consumed here; it is not re-inserted. For root-level
+                    // --docs the only valid follow-on is a query value, so an unexpected
+                    // flag is treated as "no query" and we return RootHelp.
+                    drop(arg);
+                    return Ok(Some(Parsed::RootHelp));
+                }
+                None => return Ok(Some(Parsed::RootHelp)),
+            }
+        }
         Some(Value(v)) => v.string()?,
         Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
     };
@@ -142,6 +165,33 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
 
 // ── Per-command parsers ───────────────────────────────────────────────────────
 
+/// Parse `--docs` with an optional query value.
+///
+/// Handles both `--docs=query` (value attached via `=`) and `--docs query`
+/// (value as a separate argument). When a query follows, returns
+/// [`Parsed::DocsSearch`]. When `--docs` is bare or followed by another flag,
+/// returns [`Parsed::Docs`].
+///
+/// Must be called after `Long("docs")` has been matched but before the next
+/// call to `parser.next()`. Calling `parser.optional_value()` first drains any
+/// `=value` that lexopt stored internally — failing to do so would cause the
+/// subsequent `parser.next()` to return an `UnexpectedValue` error.
+fn docs_or_search(parser: &mut lexopt::Parser, which: BuiltinHelp) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    // Check for `--docs=query` form first.
+    if let Some(val) = parser.optional_value() {
+        return Ok(Parsed::DocsSearch(which, val.string()?));
+    }
+    // Check for `--docs query` form: peek at the next token.
+    match parser.next()? {
+        Some(Value(v)) => Ok(Parsed::DocsSearch(which, v.string()?)),
+        // A flag follows --docs: bare --docs, not a search.
+        Some(_) => Ok(Parsed::Docs(which)),
+        None => Ok(Parsed::Docs(which)),
+    }
+}
+
 fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
@@ -163,7 +213,7 @@ fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             Long("no-validate") => no_validate = true,
             Short('g') | Long("global") => global = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Add)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Add)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Add),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
     }
@@ -193,7 +243,7 @@ fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             Long("all") => all = true,
             Long("names") | Short('n') => names = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::List)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::List)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::List),
             Value(v) => namespace.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
@@ -218,7 +268,7 @@ fn parse_show(parser: &mut lexopt::Parser, initial_blocks: bool) -> Result<Parse
         match arg {
             Long("blocks") => blocks = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Show)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Show)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Show),
             Value(v) => name.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
@@ -237,7 +287,7 @@ fn parse_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         match arg {
             Short('g') | Long("global") => global = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Remove)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Remove)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Remove),
             Value(v) => name.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
@@ -257,7 +307,7 @@ fn parse_plugin(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             })));
         }
         Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Plugin)),
-        Some(Long("docs")) => return Ok(Parsed::Docs(BuiltinHelp::Plugin)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Plugin),
         Some(Value(v)) => v.string()?,
         Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
     };
@@ -282,7 +332,7 @@ fn parse_plugin_install(parser: &mut lexopt::Parser) -> Result<Parsed, CliError>
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginInstall)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginInstall)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginInstall),
             Value(v) if source.is_none() => source = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -310,7 +360,7 @@ fn parse_plugin_update(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> 
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginUpdate)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginUpdate)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginUpdate),
             Value(v) if name.is_none() => name = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -335,7 +385,7 @@ fn parse_plugin_uninstall(parser: &mut lexopt::Parser) -> Result<Parsed, CliErro
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginUninstall)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginUninstall)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginUninstall),
             Value(v) if name.is_none() => name = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -365,7 +415,7 @@ fn parse_plugin_activate(parser: &mut lexopt::Parser) -> Result<Parsed, CliError
         match arg {
             Short('g') | Long("global") => global = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginActivate)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginActivate)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginActivate),
             Value(v) if target.is_none() => target = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -396,7 +446,7 @@ fn parse_plugin_deactivate(parser: &mut lexopt::Parser) -> Result<Parsed, CliErr
         match arg {
             Short('g') | Long("global") => global = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginDeactivate)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginDeactivate)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginDeactivate),
             Value(v) if target.is_none() => target = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -424,7 +474,7 @@ fn parse_plugin_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginList)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginList)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginList),
             Value(v) if name.is_none() => name = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -449,7 +499,7 @@ fn parse_plugin_search(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> 
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::PluginSearch)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::PluginSearch)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::PluginSearch),
             Value(v) => query.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
@@ -467,7 +517,7 @@ fn parse_settings(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         // Bare `creft settings` shows current settings.
         None => return Ok(Parsed::Command(Command::Settings(SettingsCommand::Show))),
         Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Settings)),
-        Some(Long("docs")) => return Ok(Parsed::Docs(BuiltinHelp::Settings)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Settings),
         Some(Value(v)) => v.string()?,
         Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
     };
@@ -485,7 +535,7 @@ fn parse_settings_show(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> 
     if let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SettingsShow)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::SettingsShow)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::SettingsShow),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
     }
@@ -502,7 +552,7 @@ fn parse_settings_set(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SettingsSet)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::SettingsSet)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::SettingsSet),
             Value(v) if key.is_none() => key = Some(v.string()?),
             Value(v) if value.is_none() => value = Some(v.string()?),
             Value(v) => {
@@ -537,7 +587,7 @@ fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         match arg {
             Short('l') | Long("local") => local = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Up)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Up)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Up),
             Value(v) if system.is_none() => system = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -558,7 +608,7 @@ fn parse_init(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     if let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Init)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Init)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Init),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
     }
@@ -574,7 +624,7 @@ fn parse_doctor(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Doctor)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Doctor)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Doctor),
             Value(v) => name.push(v.string()?),
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
@@ -591,7 +641,7 @@ fn parse_completions(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     while let Some(arg) = parser.next()? {
         match arg {
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Completions)),
-            Long("docs") => return Ok(Parsed::Docs(BuiltinHelp::Completions)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Completions),
             Value(v) if shell.is_none() => shell = Some(v.string()?),
             Value(v) => {
                 return Err(CliError::Usage(format!(
@@ -778,5 +828,70 @@ mod tests {
         };
         assert_eq!(system.as_deref(), Some("claude-code"));
         assert!(local, "--local must set local=true even with a system arg");
+    }
+
+    // ── docs search (Stage 6) ─────────────────────────────────────────────────
+
+    #[test]
+    fn docs_with_query_returns_docs_search_variant() {
+        let result = parse_args(&["add", "--docs", "template"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::DocsSearch(crate::help::BuiltinHelp::Add, ref q) if q == "template"),
+            "add --docs template must return DocsSearch(Add, \"template\"); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn docs_equals_form_returns_docs_search_variant() {
+        let result = parse_args(&["add", "--docs=template"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::DocsSearch(crate::help::BuiltinHelp::Add, ref q) if q == "template"),
+            "add --docs=template must return DocsSearch(Add, \"template\"); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn docs_followed_by_flag_returns_docs_not_search() {
+        let result = parse_args(&["add", "--docs", "--force"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::Add)),
+            "add --docs --force must return Docs(Add) (flag is not a query); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn root_docs_with_query_returns_docs_search_all() {
+        let result = parse_args(&["--docs", "env"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::DocsSearchAll(ref q) if q == "env"),
+            "--docs env must return DocsSearchAll(\"env\"); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn root_docs_bare_returns_root_help() {
+        let result = parse_args(&["--docs"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::RootHelp),
+            "bare --docs must return RootHelp; got: {result:?}",
+        );
+    }
+
+    #[rstest]
+    #[case::add("add", crate::help::BuiltinHelp::Add)]
+    #[case::list("list", crate::help::BuiltinHelp::List)]
+    #[case::show("show", crate::help::BuiltinHelp::Show)]
+    #[case::remove("remove", crate::help::BuiltinHelp::Remove)]
+    #[case::up("up", crate::help::BuiltinHelp::Up)]
+    #[case::doctor("doctor", crate::help::BuiltinHelp::Doctor)]
+    fn docs_search_variant_per_command(
+        #[case] cmd: &str,
+        #[case] expected: crate::help::BuiltinHelp,
+    ) {
+        let result = parse_args(&[cmd, "--docs", "query"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::DocsSearch(ref v, ref q) if *v == expected && q == "query"),
+            "{cmd} --docs query must return DocsSearch({expected:?}, \"query\"); got: {result:?}",
+        );
     }
 }

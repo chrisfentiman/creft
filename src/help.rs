@@ -649,6 +649,75 @@ pub(crate) enum BuiltinHelp {
     Completions,
 }
 
+impl BuiltinHelp {
+    /// The CLI command name for this built-in, matching the entry name stored in `_builtin.idx`.
+    ///
+    /// Used by `DocsSearch` dispatch to filter index results to the specific
+    /// built-in the user queried, and by `rebuild_builtin_index` to name
+    /// entries in the index.
+    pub(crate) fn cli_name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::List => "list",
+            Self::Show => "show",
+            Self::Remove => "remove",
+            Self::Plugin => "plugin",
+            Self::PluginInstall => "plugin install",
+            Self::PluginUpdate => "plugin update",
+            Self::PluginUninstall => "plugin uninstall",
+            Self::PluginActivate => "plugin activate",
+            Self::PluginDeactivate => "plugin deactivate",
+            Self::PluginList => "plugin list",
+            Self::PluginSearch => "plugin search",
+            Self::Settings => "settings",
+            Self::SettingsShow => "settings show",
+            Self::SettingsSet => "settings set",
+            Self::Up => "up",
+            Self::Init => "init",
+            Self::Doctor => "doctor",
+            Self::Completions => "completions",
+        }
+    }
+
+    /// Look up a variant by its CLI name.
+    ///
+    /// Returns `None` if the name doesn't match any variant.
+    pub(crate) fn from_cli_name(name: &str) -> Option<BuiltinHelp> {
+        Self::all_variants()
+            .iter()
+            .find(|v| v.cli_name() == name)
+            .copied()
+    }
+
+    /// All `BuiltinHelp` variants in declaration order.
+    ///
+    /// Used by the index lifecycle to iterate over all built-in commands
+    /// when building `_builtin.idx`.
+    pub(crate) fn all_variants() -> &'static [BuiltinHelp] {
+        &[
+            Self::Add,
+            Self::List,
+            Self::Show,
+            Self::Remove,
+            Self::Plugin,
+            Self::PluginInstall,
+            Self::PluginUpdate,
+            Self::PluginUninstall,
+            Self::PluginActivate,
+            Self::PluginDeactivate,
+            Self::PluginList,
+            Self::PluginSearch,
+            Self::Settings,
+            Self::SettingsShow,
+            Self::SettingsSet,
+            Self::Up,
+            Self::Init,
+            Self::Doctor,
+            Self::Completions,
+        ]
+    }
+}
+
 /// Render the short help page for a built-in command (`--help`).
 ///
 /// Returns 10-15 lines: one-line description, usage, a single example, and a
@@ -1125,6 +1194,7 @@ mod renderer {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
 
     use super::*;
 
@@ -1205,6 +1275,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_add_contains_usage_line() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1216,6 +1287,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_show_contains_blocks_flag() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Show);
@@ -1249,6 +1321,7 @@ mod tests {
     ];
 
     #[test]
+    #[serial]
     fn all_render_docs_contain_usage_line() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1262,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_contain_usage_line() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1275,6 +1349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_contain_docs_footer() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1288,6 +1363,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_under_20_lines() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1302,6 +1378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_disabled_produces_no_ansi() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1313,6 +1390,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_short_disabled_produces_no_ansi() {
         yansi::disable();
         let output = render_short(BuiltinHelp::Add);
@@ -1324,6 +1402,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_enabled_produces_ansi_bold_on_headers() {
         yansi::enable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1334,6 +1413,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_docs_output_contains_built_in_tag() {
         yansi::disable();
         let variants = [

@@ -1,0 +1,551 @@
+use super::{
+    tokenize::{query_ngrams, tokenize, tokenize_ngrams},
+    xor::Xor8Filter,
+};
+
+/// A single document's entry in a search index.
+///
+/// Associates a document name (skill name, built-in command name) with
+/// the XOR filter built from its tokenized content.
+#[derive(Debug)]
+pub(crate) struct IndexEntry {
+    /// The document identifier (e.g., "deploy rollback", "creft add").
+    pub name: String,
+    /// Short description for display in search results.
+    pub description: String,
+    /// The XOR filter built from the document's tokenized content.
+    pub filter: Xor8Filter,
+}
+
+/// A collection of document entries searchable by token membership.
+///
+/// The index is immutable after construction. To update, rebuild the
+/// entire index for the namespace.
+#[derive(Debug)]
+pub(crate) struct SearchIndex {
+    entries: Vec<IndexEntry>,
+}
+
+impl SearchIndex {
+    /// Build an index from a list of `(name, description, text)` tuples.
+    ///
+    /// Each text is tokenized into whole-token hashes (for exact search) and
+    /// trigram hashes (for fuzzy candidate gating). Both sets are combined into
+    /// a single XOR filter per document. Existing `search` callers are unaffected:
+    /// whole-token hashes remain present in every filter.
+    ///
+    /// Documents with no tokens (empty text) are included with an empty
+    /// filter that rejects all queries.
+    pub fn build(documents: &[(&str, &str, &str)]) -> Self {
+        let entries = documents
+            .iter()
+            .map(|&(name, description, text)| {
+                let mut all_keys = tokenize(text);
+                all_keys.extend(tokenize_ngrams(text));
+                all_keys.sort_unstable();
+                all_keys.dedup();
+                IndexEntry {
+                    name: name.to_owned(),
+                    description: description.to_owned(),
+                    filter: Xor8Filter::build(&all_keys),
+                }
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Query the index for documents that might contain all query tokens.
+    ///
+    /// Tokenizes the query, then tests each document's filter for membership
+    /// of every query token. Returns entries where all tokens are probably
+    /// present (AND semantics). False positives are possible (~0.39% per
+    /// token per document).
+    ///
+    /// An empty query returns all entries.
+    // Called by tests and the upcoming --docs search implementation.
+    #[allow(dead_code)]
+    pub fn search(&self, query: &str) -> Vec<&IndexEntry> {
+        let tokens = tokenize(query);
+        if tokens.is_empty() {
+            return self.entries.iter().collect();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| tokens.iter().all(|&tok| entry.filter.contains(tok)))
+            .collect()
+    }
+
+    /// Serialize the index to bytes.
+    ///
+    /// Format:
+    /// `[entry_count: u32 LE]`
+    /// For each entry:
+    ///   `[name_len: u16 LE][name: UTF-8 bytes]`
+    ///   `[desc_len: u16 LE][desc: UTF-8 bytes]`
+    ///   `[filter_len: u32 LE][filter: bytes from Xor8Filter::to_bytes()]`
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        for entry in &self.entries {
+            let name_bytes = entry.name.as_bytes();
+            let desc_bytes = entry.description.as_bytes();
+            let filter_bytes = entry.filter.to_bytes();
+
+            out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(&(desc_bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(desc_bytes);
+            out.extend_from_slice(&(filter_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&filter_bytes);
+        }
+        out
+    }
+
+    /// Deserialize an index from bytes.
+    ///
+    /// Returns `None` if the data is malformed or truncated.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut pos = 0;
+
+        let entry_count = read_u32(data, &mut pos)? as usize;
+        // Cap the pre-allocation to avoid OOM on a corrupt entry_count. The loop's
+        // `?` propagation still bounds actual entries pushed to the real count.
+        let mut entries = Vec::with_capacity(entry_count.min(4096));
+
+        for _ in 0..entry_count {
+            let name_len = read_u16(data, &mut pos)? as usize;
+            let name = read_str(data, &mut pos, name_len)?;
+
+            let desc_len = read_u16(data, &mut pos)? as usize;
+            let description = read_str(data, &mut pos, desc_len)?;
+
+            let filter_len = read_u32(data, &mut pos)? as usize;
+            let filter_bytes = read_bytes(data, &mut pos, filter_len)?;
+            let filter = Xor8Filter::from_bytes(filter_bytes)?;
+
+            entries.push(IndexEntry {
+                name,
+                description,
+                filter,
+            });
+        }
+
+        // Reject trailing bytes — malformed or appended garbage.
+        if pos != data.len() {
+            return None;
+        }
+
+        Some(Self { entries })
+    }
+
+    /// Number of entries in the index.
+    // Called by tests; will be used by search result rendering.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the index has no entries.
+    // Called by tests.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Query the index for documents that contain enough query grams to be
+    /// plausible candidates.
+    ///
+    /// Generates variable-length grams from the query (bigrams for short query
+    /// tokens, trigrams for longer ones), then counts how many of the query's
+    /// grams each document's filter contains. An entry passes when the fraction
+    /// of matching grams meets a minimum ratio threshold — this is the count
+    /// filter from the q-gram literature, expressed as a ratio to handle the
+    /// variable gram-set sizes that arise from mixed bigram/trigram queries.
+    ///
+    /// The ratio threshold (0.25) is intentionally permissive: the Tversky
+    /// scoring step that follows this gate applies the real precision cutoff.
+    /// The gate's job is to eliminate documents with no meaningful gram overlap,
+    /// not to make the final relevance decision.
+    ///
+    /// Returns an empty vec when the query produces no grams.
+    pub fn search_fuzzy(&self, query: &str) -> Vec<&IndexEntry> {
+        let grams = query_ngrams(query);
+        if grams.is_empty() {
+            return Vec::new();
+        }
+        let n = grams.len();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                let matching = grams.iter().filter(|&&g| entry.filter.contains(g)).count();
+                // Ratio-based threshold: at least 25% of the query's grams must
+                // be present in the document. This adapts naturally to queries
+                // that produce small gram sets (e.g., a 4-char token with bigrams
+                // produces 3 grams; 1 match = 33% > 25%).
+                matching as f64 / n as f64 >= 0.25
+            })
+            .collect()
+    }
+}
+
+// ── deserialization helpers ───────────────────────────────────────────────────
+
+fn read_u32(data: &[u8], pos: &mut usize) -> Option<u32> {
+    let bytes = data.get(*pos..*pos + 4)?;
+    *pos += 4;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn read_u16(data: &[u8], pos: &mut usize) -> Option<u16> {
+    let bytes = data.get(*pos..*pos + 2)?;
+    *pos += 2;
+    Some(u16::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let bytes = data.get(*pos..*pos + len)?;
+    *pos += len;
+    Some(bytes)
+}
+
+fn read_str(data: &[u8], pos: &mut usize, len: usize) -> Option<String> {
+    let bytes = read_bytes(data, pos, len)?;
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::super::tokenize::{tokenize, tokenize_ngrams};
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn build_three_doc_index() -> SearchIndex {
+        SearchIndex::build(&[
+            (
+                "deploy rollback",
+                "Roll back a deployment",
+                "rollback procedure steps template",
+            ),
+            (
+                "deploy push",
+                "Push a build to an environment",
+                "push build artifact to environment",
+            ),
+            (
+                "aws copy",
+                "Copy S3 objects",
+                "copy objects between buckets placeholder",
+            ),
+        ])
+    }
+
+    // ── build + search ────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_query_returns_all_entries() {
+        let idx = build_three_doc_index();
+        let results = idx.search("");
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn single_token_query_returns_matching_documents() {
+        let idx = build_three_doc_index();
+        let results = idx.search("template");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "deploy rollback");
+    }
+
+    #[test]
+    fn multi_token_query_and_semantics() {
+        let idx = build_three_doc_index();
+        // "template" is only in "deploy rollback"; "placeholder" is only in "aws copy"
+        let results = idx.search("template placeholder");
+        assert_eq!(
+            results.len(),
+            0,
+            "AND semantics: no doc contains both tokens"
+        );
+    }
+
+    #[test]
+    fn multi_token_query_matching_single_document() {
+        let idx = build_three_doc_index();
+        let results = idx.search("template rollback");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "deploy rollback");
+    }
+
+    #[test]
+    fn empty_index_returns_no_results() {
+        let idx = SearchIndex::build(&[]);
+        assert!(idx.search("anything").is_empty());
+        assert!(idx.search("").is_empty());
+    }
+
+    #[test]
+    fn document_with_no_tokens_excluded_from_token_queries() {
+        let idx = SearchIndex::build(&[
+            ("empty doc", "An empty document", ""),
+            ("real doc", "A real document", "rollback procedure"),
+        ]);
+        // Empty query returns all
+        assert_eq!(idx.search("").len(), 2);
+        // Token query should NOT return the empty doc
+        let results = idx.search("rollback");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "real doc");
+    }
+
+    // ── serialization round-trip ──────────────────────────────────────────────
+
+    #[test]
+    fn round_trip_preserves_entry_count() {
+        let idx = build_three_doc_index();
+        let bytes = idx.to_bytes();
+        let restored = SearchIndex::from_bytes(&bytes).expect("round-trip should succeed");
+        assert_eq!(restored.len(), 3);
+    }
+
+    #[test]
+    fn round_trip_preserves_search_behavior() {
+        let idx = build_three_doc_index();
+        let bytes = idx.to_bytes();
+        let restored = SearchIndex::from_bytes(&bytes).expect("round-trip should succeed");
+
+        let original_results: Vec<&str> = idx
+            .search("template")
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        let restored_results: Vec<&str> = restored
+            .search("template")
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+
+        assert_eq!(original_results, restored_results);
+    }
+
+    #[test]
+    fn round_trip_preserves_names_and_descriptions() {
+        let idx = SearchIndex::build(&[("my skill", "A short description", "some content here")]);
+        let bytes = idx.to_bytes();
+        let restored = SearchIndex::from_bytes(&bytes).expect("round-trip should succeed");
+        assert_eq!(restored.entries[0].name, "my skill");
+        assert_eq!(restored.entries[0].description, "A short description");
+    }
+
+    #[test]
+    fn empty_index_round_trips_correctly() {
+        let idx = SearchIndex::build(&[]);
+        let bytes = idx.to_bytes();
+        let restored =
+            SearchIndex::from_bytes(&bytes).expect("empty index round-trip should succeed");
+        assert!(restored.is_empty());
+        assert!(restored.search("anything").is_empty());
+    }
+
+    #[test]
+    fn from_bytes_rejects_empty_slice() {
+        assert!(SearchIndex::from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_data() {
+        let idx = build_three_doc_index();
+        let bytes = idx.to_bytes();
+        // Truncate partway through
+        let truncated = &bytes[..bytes.len() / 2];
+        assert!(SearchIndex::from_bytes(truncated).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_trailing_garbage() {
+        let idx = SearchIndex::build(&[("doc", "desc", "content")]);
+        let mut bytes = idx.to_bytes();
+        bytes.push(0xFF);
+        assert!(SearchIndex::from_bytes(&bytes).is_none());
+    }
+
+    // ── len / is_empty ────────────────────────────────────────────────────────
+
+    #[test]
+    fn len_and_is_empty_reflect_entry_count() {
+        let empty = SearchIndex::build(&[]);
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        let one = SearchIndex::build(&[("doc", "desc", "content")]);
+        assert_eq!(one.len(), 1);
+        assert!(!one.is_empty());
+    }
+
+    // ── combined filter (whole-token + trigram hashes) ───────────────────────
+
+    #[test]
+    fn build_filter_contains_whole_token_hashes() {
+        let idx = SearchIndex::build(&[("doc", "desc", "exit template")]);
+        let entry = &idx.entries[0];
+        for &hash in &tokenize("exit template") {
+            assert!(
+                entry.filter.contains(hash),
+                "filter must contain whole-token hash for 'exit template'"
+            );
+        }
+    }
+
+    #[test]
+    fn build_filter_contains_ngram_hashes() {
+        // "exits" (5 chars) produces trigrams {exi, xit, its}; "exit" alone only
+        // produces 2 trigrams. Use a longer word to ensure the filter check is meaningful.
+        let idx = SearchIndex::build(&[("doc", "desc", "exits")]);
+        let entry = &idx.entries[0];
+        for &hash in &tokenize_ngrams("exits") {
+            assert!(
+                entry.filter.contains(hash),
+                "filter must contain trigram hash for 'exits' grams"
+            );
+        }
+    }
+
+    #[test]
+    fn build_filter_contains_both_whole_token_and_ngram_hashes() {
+        // Verify that both hash sets are present in the same filter.
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc template")]);
+        let entry = &idx.entries[0];
+
+        let whole_tokens = tokenize("heredoc template");
+        let ngram_hashes = tokenize_ngrams("heredoc template");
+
+        for &hash in &whole_tokens {
+            assert!(entry.filter.contains(hash), "missing whole-token hash");
+        }
+        for &hash in &ngram_hashes {
+            assert!(entry.filter.contains(hash), "missing n-gram hash");
+        }
+    }
+
+    #[test]
+    fn exact_search_unchanged_after_combined_filter_build() {
+        // Exact search must still work identically now that the filter contains
+        // additional n-gram hashes alongside whole-token hashes.
+        let idx = build_three_doc_index();
+        let results = idx.search("template");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "deploy rollback");
+    }
+
+    #[test]
+    fn exact_search_and_semantics_unchanged() {
+        let idx = build_three_doc_index();
+        let results = idx.search("template placeholder");
+        assert_eq!(
+            results.len(),
+            0,
+            "AND semantics must be preserved with combined filter"
+        );
+    }
+
+    // ── search_fuzzy ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_fuzzy_returns_candidate_with_shared_trigrams() {
+        // "hered" (5 chars) → query bigrams: trigrams {her,ere,red} (5 >= 5).
+        // "heredoc" filter contains trigrams {her,ere,red,...}.
+        // All 3 query grams match → ratio 3/3=1.0 >= 0.25 → passes.
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
+        let results = idx.search_fuzzy("hered");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'heredoc' must be a candidate for query 'hered'"
+        );
+        assert_eq!(results[0].name, "doc");
+    }
+
+    #[test]
+    fn search_fuzzy_returns_candidate_for_typo_query() {
+        // "templete" (8 chars ≥ 5) → query trigrams {tem,emp,mpl,ple,let,ete} = 6.
+        // "template" filter contains trigrams {tem,emp,mpl,...}.
+        // 3 of 6 query grams match → ratio 0.5 >= 0.25 → passes.
+        let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
+        let results = idx.search_fuzzy("templete");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'template' must be a candidate for 'templete'"
+        );
+    }
+
+    #[test]
+    fn search_fuzzy_single_char_query_returns_empty() {
+        // "a" produces no trigrams (< 3 chars).
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
+        assert!(
+            idx.search_fuzzy("a").is_empty(),
+            "single-char query must produce no fuzzy candidates"
+        );
+    }
+
+    #[test]
+    fn search_fuzzy_empty_query_returns_empty() {
+        let idx = build_three_doc_index();
+        assert!(
+            idx.search_fuzzy("").is_empty(),
+            "empty query must produce no fuzzy candidates"
+        );
+    }
+
+    #[test]
+    fn search_fuzzy_empty_index_returns_empty() {
+        let idx = SearchIndex::build(&[]);
+        assert!(idx.search_fuzzy("hered").is_empty());
+    }
+
+    #[test]
+    fn search_fuzzy_requires_ratio_threshold_not_any_gram() {
+        // Ratio threshold: "rollback" grams share no overlap with "templete" query grams.
+        // "templete" (8 chars) query trigrams: {tem,emp,mpl,ple,let,ete}.
+        // "template" filter has trigrams {tem,emp,mpl,...} → 3/6=0.5 ≥ 0.25 → passes.
+        // "rollback" filter has trigrams {rol,oll,llb,...} → 0/6=0 < 0.25 → rejected.
+        let idx = SearchIndex::build(&[
+            ("doc-a", "desc", "template guide"),
+            ("doc-b", "desc", "rollback procedure"),
+        ]);
+        let results = idx.search_fuzzy("templete");
+        assert_eq!(
+            results.len(),
+            1,
+            "only the document with sufficient gram overlap must be returned"
+        );
+        assert_eq!(results[0].name, "doc-a");
+    }
+
+    #[test]
+    fn search_fuzzy_short_query_bigrams_match_document_via_shared_bigram() {
+        // "ecit" (4 chars, < 5) → query bigrams {ec, ci, it}.
+        // "exit" indexed with bigrams {ex, xi, it}: "it" is in both → 1/3=0.33 ≥ 0.25 → passes.
+        // This verifies that single-substitution typos in 4-char tokens reach the
+        // Tversky scorer instead of being silently rejected at the filter gate.
+        let idx = SearchIndex::build(&[("cmd", "desc", "exit code handling")]);
+        let results = idx.search_fuzzy("ecit");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'exit' must be a candidate for single-substitution query 'ecit'"
+        );
+        assert_eq!(results[0].name, "cmd");
+    }
+
+    #[test]
+    fn exact_search_not_affected_by_fuzzy_method() {
+        // Verifies that adding search_fuzzy didn't break exact search.
+        let idx = build_three_doc_index();
+        let exact = idx.search("template");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].name, "deploy rollback");
+    }
+}

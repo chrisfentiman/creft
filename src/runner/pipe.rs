@@ -1251,6 +1251,7 @@ pub(super) fn run_pipe_chain(
                 None,
                 resp_writer,
                 Some(std::sync::Arc::clone(&signal)),
+                None, // search context not available in pipe-chain mode
             );
             reader_handles.push(handle);
             exit_signals.push(signal);

@@ -454,6 +454,7 @@ fn render_animated(term: &console::Term, use_truecolor: bool) -> Result<(), Cref
 mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
     use rstest::rstest;
+    use serial_test::serial;
 
     use super::*;
 
@@ -528,6 +529,7 @@ mod tests {
     /// Uses `render_static_to_writer` with a `Vec<u8>` to capture the rendered
     /// bytes directly, so the spec's content requirements can be asserted.
     #[test]
+    #[serial]
     fn render_static_output_contains_required_content() {
         // Disable yansi so the output is plain ASCII without ANSI escape codes,
         // making string matching unambiguous.
@@ -575,6 +577,7 @@ mod tests {
     // ── gradient_line ─────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn gradient_line_plain_when_yansi_disabled() {
         yansi::disable();
         let result = gradient_line("hello", GRAD_FROM, GRAD_TO, true);
@@ -587,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gradient_line_contains_ansi_when_yansi_enabled() {
         yansi::enable();
         let result = gradient_line("hello", GRAD_FROM, GRAD_TO, true);
@@ -603,6 +607,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn gradient_line_single_char_uses_from_color() {
         yansi::enable();
         let result = gradient_line("X", GRAD_FROM, GRAD_TO, true);
@@ -651,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn reveal_frame_at_zero_contains_only_spaces_cr_lf_and_cursor_sequences() {
         yansi::disable();
         let frame = build_reveal_frame(0, true);
@@ -665,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn reveal_frame_full_contains_all_logo_characters() {
         yansi::disable();
         let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap();
@@ -700,6 +707,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn underline_frame_at_zero_contains_no_underline_chars() {
         yansi::disable();
         let frame = build_underline_frame(0, 41, true);
@@ -711,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn underline_frame_full_width_contains_expected_count_of_underline_chars() {
         yansi::disable();
         let logo_width = 41usize;
@@ -725,6 +734,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn underline_frame_full_width_gradient_uses_grad_from_and_grad_to() {
         yansi::enable();
         let logo_width = 41usize;
@@ -815,6 +825,7 @@ mod tests {
     // ── paint_fg ─────────────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn paint_fg_truecolor_emits_rgb_sequence() {
         yansi::enable();
         let painted = paint_fg("x", 100, 150, 200, true);
@@ -826,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn paint_fg_fallback_emits_fixed_sequence_not_rgb() {
         yansi::enable();
         let painted = paint_fg("x", 100, 150, 200, false);
@@ -843,6 +855,7 @@ mod tests {
     // ── gradient_line 256-color fallback ──────────────────────────────────
 
     #[test]
+    #[serial]
     fn gradient_line_fallback_emits_no_rgb_sequences() {
         yansi::enable();
         let result = gradient_line("hello", GRAD_FROM, GRAD_TO, false);
@@ -859,6 +872,7 @@ mod tests {
     // ── render_static_to_writer 256-color fallback ────────────────────────
 
     #[test]
+    #[serial]
     fn render_static_to_writer_fallback_emits_fixed_not_rgb_sequences() {
         yansi::enable();
         let mut buf: Vec<u8> = Vec::new();

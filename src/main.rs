@@ -8,9 +8,14 @@ mod frontmatter;
 mod help;
 mod markdown;
 mod model;
+// Namespace module is not yet wired into binary entry points. The public API is
+// exercised by module tests and consumed by search and runtime primitives.
+#[allow(dead_code)]
+mod namespace;
 mod registry;
 mod registry_config;
 mod runner;
+mod search;
 mod settings;
 mod setup;
 mod shell;
@@ -72,6 +77,8 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
             print!("{}", help::render_docs(which));
             Ok(())
         }
+        Some(cli::Parsed::DocsSearch(which, query)) => dispatch_docs_search(ctx, which, &query),
+        Some(cli::Parsed::DocsSearchAll(query)) => dispatch_docs_search_all(ctx, &query),
         Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, false, vec![]),
         Some(cli::Parsed::Version) => {
             println!("{}", help::render_version());
@@ -156,6 +163,138 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             Ok(())
         }
     }
+}
+
+/// Handle `creft <builtin> --docs "<query>"`.
+///
+/// Loads `_builtin.idx`, searches it for the query, filters to the specific
+/// built-in's entry, extracts content snippets, and prints matching lines to
+/// stdout. Prints a no-match message to stderr when nothing is found.
+fn dispatch_docs_search(
+    ctx: &model::AppContext,
+    which: help::BuiltinHelp,
+    query: &str,
+) -> Result<(), CreftError> {
+    let dir = ctx.index_dir_for(model::Scope::Global)?;
+    let path = dir.join("_builtin.idx");
+
+    let index = if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        search::index::SearchIndex::from_bytes(&bytes)
+    } else {
+        None
+    };
+
+    let cli_name = which.cli_name();
+    let no_index_msg = || {
+        eprintln!(
+            "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+            query
+        );
+    };
+
+    match index {
+        Some(idx) => {
+            let terms: Vec<&str> = query.split_whitespace().collect();
+            let docs_text = search::store::strip_code_blocks_plain(&help::render_docs(which));
+
+            let all_matches = idx.search(query);
+            let results: Vec<search::snippet::SnippetResult> = all_matches
+                .into_iter()
+                .filter(|e| e.name == cli_name)
+                .map(|e| {
+                    let snippets = search::snippet::extract_snippets(&docs_text, &terms, 2);
+                    search::snippet::SnippetResult {
+                        name: e.name.clone(),
+                        namespace: "_builtin".to_owned(),
+                        description: e.description.clone(),
+                        snippets,
+                    }
+                })
+                .collect();
+
+            if search::snippet::render_snippet_results(&results, &terms, false)
+                .map(|rendered| print!("{}", rendered))
+                .is_none()
+            {
+                // Exact search found no snippets — try fuzzy fallback.
+                let fuzzy_matches = idx.search_fuzzy(query);
+                let mut scored: Vec<(f64, search::snippet::SnippetResult)> = fuzzy_matches
+                    .into_iter()
+                    .filter(|e| e.name == cli_name)
+                    .filter_map(|e| {
+                        let (score, matched_words) =
+                            search::tokenize::score_query_with_matches(query, &docs_text);
+                        if score < search::FUZZY_THRESHOLD {
+                            return None;
+                        }
+                        let snippets = search::snippet::extract_snippets_fuzzy(
+                            &docs_text,
+                            &terms,
+                            &matched_words,
+                            2,
+                        );
+                        Some((
+                            score,
+                            search::snippet::SnippetResult {
+                                name: e.name.clone(),
+                                namespace: "_builtin".to_owned(),
+                                description: e.description.clone(),
+                                snippets,
+                            },
+                        ))
+                    })
+                    .collect();
+
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                let fuzzy_results: Vec<search::snippet::SnippetResult> =
+                    scored.into_iter().map(|(_, r)| r).collect();
+
+                match search::snippet::render_snippet_results(&fuzzy_results, &terms, false) {
+                    Some(rendered) => print!("{}", rendered),
+                    None => {
+                        eprintln!(
+                            "no documentation matches for \"{}\" (run 'creft up' to rebuild the search index)",
+                            query
+                        );
+                    }
+                }
+            }
+        }
+        None => no_index_msg(),
+    }
+    Ok(())
+}
+
+/// Handle `creft --docs "<query>"`.
+///
+/// Searches all `.idx` files (including `_builtin.idx`) across all scopes,
+/// extracts content snippets for each match, and prints results grouped by
+/// namespace. Prints a no-match message to stderr when nothing is found.
+fn dispatch_docs_search_all(ctx: &model::AppContext, query: &str) -> Result<(), CreftError> {
+    let results = search::search_all_indexes(ctx, query);
+    let terms: Vec<&str> = query.split_whitespace().collect();
+
+    // Determine whether the index has been built at all for the no-match message.
+    let index_exists = ctx
+        .index_dir_for(model::Scope::Global)
+        .map(|d| d.join("_builtin.idx").exists())
+        .unwrap_or(false);
+
+    match search::snippet::render_snippet_results(&results, &terms, true) {
+        Some(rendered) => print!("{}", rendered),
+        None => {
+            if index_exists {
+                eprintln!("no documentation matches for \"{}\"", query);
+            } else {
+                eprintln!(
+                    "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                    query
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handle `creft help [<name>...]`.

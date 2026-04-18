@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -5,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
+use crate::search::index::SearchIndex;
 
 mod blocks;
 #[cfg(unix)]
@@ -17,6 +19,34 @@ mod substitute;
 
 pub(crate) use self::blocks::spawn_block;
 pub(crate) use self::substitute::substitute;
+
+/// A runtime search index with its access control flag.
+///
+/// Created by `creft_index` during skill execution. Accumulates documents
+/// across multiple calls to the same index name: each call appends a new
+/// document and rebuilds the XOR filter from all accumulated content.
+/// Not persisted to disk — runtime indexes are ephemeral, scoped to a
+/// single skill invocation.
+///
+/// The `is_global` flag is set from the most recent `creft_index` call's
+/// `global` field. When `true`, other namespaces may query this index via
+/// `creft_search` using a dotted name. When `false`, only the owning
+/// namespace may query it.
+#[derive(Debug)]
+pub(crate) struct RuntimeIndex {
+    /// The current search index, rebuilt from `documents` on every
+    /// `creft_index` call.
+    pub index: SearchIndex,
+    /// Whether this index is queryable from other namespaces.
+    /// Set from the most recent `creft_index` call's `global` flag.
+    pub is_global: bool,
+    /// Raw documents accumulated by successive `creft_index` calls.
+    /// Each entry is `(document_name, content)`. The document name is a
+    /// sequential label (e.g., `"doc_0"`, `"doc_1"`) used as a key into the
+    /// XOR filter. Search results look up the matched document name here and
+    /// return the original content, not the internal label.
+    pub documents: Vec<(String, String)>,
+}
 
 /// Execution context for a single skill invocation.
 ///
@@ -50,6 +80,32 @@ pub(crate) struct RunContext {
     /// instead of the block's declared language tag. Set from shell detection
     /// at skill invocation time. `None` means use block language literally.
     shell_preference: Option<String>,
+
+    /// The fully-qualified name of the skill being executed.
+    ///
+    /// Used to derive the caller's namespace and plugin context for namespace
+    /// resolution when handling `creft_index` and `creft_search` messages.
+    /// Empty string when no specific skill is being executed (e.g., dry-run
+    /// previews outside of skill invocation).
+    pub(crate) skill_name: String,
+
+    /// Plugin name when the skill is sourced from an activated plugin.
+    ///
+    /// `Some(name)` when the skill comes from `SkillSource::Plugin(name)`.
+    /// `None` for user-owned and package skills. Passed to `SearchContext`
+    /// so that `namespace::qualify` produces fully-qualified names with the
+    /// plugin prefix (e.g., `acme.deploy.beta` instead of `deploy.beta`).
+    pub(crate) plugin: Option<String>,
+
+    /// Runtime indexes created by `creft_index` during this execution.
+    ///
+    /// Keyed by fully-qualified name (e.g., `"deploy.beta"`, `"acme.deploy.beta"`).
+    /// Access control is enforced per-index via the `is_global` flag on `RuntimeIndex`.
+    ///
+    /// `Arc` is required because `RunContext` derives `Clone` and `Mutex` does not
+    /// implement `Clone`. All clones of a `RunContext` share the same index map,
+    /// so indexes created in one execution phase are visible in subsequent phases.
+    pub(crate) runtime_indexes: Arc<std::sync::Mutex<HashMap<String, RuntimeIndex>>>,
 }
 
 impl RunContext {
@@ -67,7 +123,30 @@ impl RunContext {
             verbose,
             dry_run,
             shell_preference: None,
+            skill_name: String::new(),
+            plugin: None,
+            runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the fully-qualified skill name for namespace resolution.
+    ///
+    /// Used by `creft_index` and `creft_search` to derive the caller's namespace
+    /// when qualifying or resolving resource names.
+    pub(crate) fn with_skill_name(mut self, name: impl Into<String>) -> Self {
+        self.skill_name = name.into();
+        self
+    }
+
+    /// Set the plugin name when the skill is sourced from an activated plugin.
+    ///
+    /// Pass `Some(plugin_name)` for `SkillSource::Plugin` skills. Pass `None`
+    /// for user-owned and package skills. The plugin name is threaded through
+    /// to `SearchContext` so that `namespace::qualify` produces correctly
+    /// prefixed names (e.g., `acme.deploy.beta` for plugin `acme`).
+    pub(crate) fn with_plugin(mut self, plugin: Option<String>) -> Self {
+        self.plugin = plugin;
+        self
     }
 
     /// Set the caller's shell preference.
@@ -583,14 +662,38 @@ fn execute_block(
         let interactive = stdin_data.is_none();
 
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
+        let search_ctx = Some(channel::SearchContext {
+            skill_name: ctx.skill_name.clone(),
+            plugin: ctx.plugin.clone(),
+            runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+        });
+
+        // Duplicate the response writer fd so both the reader thread (which
+        // handles creft_search responses) and the prompt handler thread (which
+        // handles creft_prompt responses) can write to fd 4 independently.
+        // Without this, creft_search messages have nowhere to send their
+        // response and the bash block hangs forever on `read <&4`.
+        //
+        // SAFETY: resp_writer_fd is a valid, open fd we own. dup(2) returns a
+        // new fd independent of the original; both are valid write ends of the
+        // same pipe. OwnedFd takes ownership and closes on drop.
+        let search_resp_writer: Option<std::fs::File> = {
+            use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+            let raw = unsafe { libc::dup(resp_writer_fd.as_raw_fd()) };
+            if raw < 0 {
+                return Err(CreftError::Io(std::io::Error::last_os_error()));
+            }
+            // SAFETY: dup(2) returned a non-negative fd we own exclusively.
+            Some(unsafe { std::fs::File::from_raw_fd(raw) })
+        };
+
         let reader = channel::spawn_reader(
             ctrl_reader,
             std::sync::Arc::clone(&writer),
             Some(prompt_tx),
-            // The reader does not write responses directly — the prompt
-            // handler thread owns the response writer.
-            None,
+            search_resp_writer,
             Some(Arc::clone(&exit_signal)),
+            search_ctx,
         );
         let prompter =
             channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
@@ -754,13 +857,19 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    let ctx = RunContext::new(
-        ctx.cancel_arc(),
-        ctx.cwd().to_path_buf(),
-        extended_env,
-        ctx.is_verbose(),
-        ctx.is_dry_run(),
-    );
+    // Preserve skill_name, plugin, and runtime_indexes from the original context
+    // so that creft_index / creft_search work correctly in skills with multiple blocks.
+    let ctx = RunContext {
+        cancel: ctx.cancel_arc(),
+        cwd: ctx.cwd().to_path_buf(),
+        env: extended_env,
+        verbose: ctx.is_verbose(),
+        dry_run: ctx.is_dry_run(),
+        shell_preference: ctx.shell_preference().map(String::from),
+        skill_name: ctx.skill_name.clone(),
+        plugin: ctx.plugin.clone(),
+        runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+    };
 
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]
@@ -2129,6 +2238,61 @@ mod tests {
         assert!(
             tmp.path().extension().map(|e| e == "py").unwrap_or(false),
             "python blocks must produce .py temp files"
+        );
+    }
+
+    // ── creft_search in single-block mode ────────────────────────────────────
+
+    /// A single-block bash skill that calls creft_index then creft_search must
+    /// receive the search response on fd 4 and complete without hanging.
+    ///
+    /// Before the fix, spawn_reader received None for its response_writer, so
+    /// Search messages were silently dropped and the bash block blocked forever
+    /// on `read <&4`. This test is the regression guard for that bug.
+    #[test]
+    #[cfg(unix)]
+    fn single_block_creft_search_receives_response_without_hanging() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-search".into(),
+                description: "single block with creft_index then creft_search".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![CodeBlock {
+                lang: "bash".into(),
+                // Index some content then search for it. If the response writer
+                // is missing, creft_search hangs forever on read <&4.
+                code: r#"creft_index "docs" "rollback deployment procedure"
+creft_search "rollback" "docs" > /dev/null
+echo "search completed"
+"#
+                .into(),
+                deps: vec![],
+                llm_config: None,
+                llm_parse_error: None,
+            }],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test search");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "single-block creft_search must complete without hanging: {:?}",
+            result
         );
     }
 }

@@ -5,31 +5,43 @@ use yansi::Paint;
 
 use crate::cmd::skill::render_namespace_listing;
 use crate::error::CreftError;
-use crate::model::AppContext;
+use crate::model::{AppContext, Scope, SkillSource};
+use crate::namespace::skill_namespace;
+use crate::search;
 use crate::settings::Settings;
 use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 use crate::{frontmatter, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-    let has_docs = args.iter().any(|a| a == "--docs");
+    let has_docs = args
+        .iter()
+        .any(|a| a == "--docs" || a.starts_with("--docs="));
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+
+    // Extract a query from `--docs <value>` or `--docs=<value>` before filtering.
+    // The returned index (if any) is the position of the query value in `args` for
+    // the space-separated `--docs value` form — that position must be excluded from
+    // `filtered` or the query value would be mistaken for part of the command name.
+    let (docs_query, docs_query_index) = extract_docs_query(args);
 
     // Filter out meta-flags before resolving command name so they are not
     // mistakenly matched as part of the command name or passed as remaining args.
     // If you add a filter here, update RESERVED_FLAG_NAMES in validate.rs.
     let filtered: Vec<String> = args
         .iter()
-        .filter(|a| {
+        .enumerate()
+        .filter(|(i, a)| {
             *a != "--help"
                 && *a != "-h"
-                && *a != "--docs"
+                && !a.starts_with("--docs")
                 && *a != "--dry-run"
                 && *a != "--verbose"
                 && *a != "-v"
+                && Some(*i) != docs_query_index
         })
-        .cloned()
+        .map(|(_, a)| a.clone())
         .collect();
 
     if has_docs {
@@ -38,6 +50,12 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         }
         match store::resolve_command(ctx, &filtered) {
             Ok((name, _, source)) => {
+                // When a search query is present, search the namespace index
+                // rather than rendering the full doc text.
+                if let Some(ref query) = docs_query {
+                    return search_skill_docs(ctx, &name, query);
+                }
+
                 let raw = store::read_raw_from(ctx, &name, &source)?;
                 let rendered = render_skill_docs(&name, &raw);
                 print!("{}", rendered);
@@ -181,8 +199,14 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         .ok()
         .and_then(|p| Settings::load(&p).ok())
         .and_then(|s| s.get("shell").map(str::to_string));
+    let plugin_name = match &source {
+        SkillSource::Plugin(name) => Some(name.clone()),
+        _ => None,
+    };
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
-        .with_shell_preference(shell::detect(settings_shell_pref.as_deref()));
+        .with_shell_preference(shell::detect(settings_shell_pref.as_deref()))
+        .with_skill_name(name.clone())
+        .with_plugin(plugin_name);
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.
@@ -233,6 +257,127 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     }
 
     result
+}
+
+/// Extract the search query from `--docs <value>` or `--docs=<value>` in the raw arg list.
+///
+/// Returns `(query, consumed_index)` where:
+/// - `query` is `None` when `--docs` is bare or the value following `--docs` starts with `-`.
+/// - `consumed_index` is `Some(i)` for the space-separated form (`--docs value`), where `i` is
+///   the index of the query value in `args`. This index must be excluded from the filtered arg
+///   list so the query value is not mistaken for part of the command name. For the equals form
+///   (`--docs=value`), the value is part of the `--docs=` arg itself and `consumed_index` is
+///   `None`.
+fn extract_docs_query(args: &[String]) -> (Option<String>, Option<usize>) {
+    for (i, arg) in args.iter().enumerate() {
+        // `--docs=value` form: value is embedded in the same arg, no separate index to skip.
+        if let Some(query) = arg.strip_prefix("--docs=")
+            && !query.is_empty()
+        {
+            return (Some(query.to_owned()), None);
+        }
+        // `--docs value` form: the query is the next arg; record its index so the caller
+        // can exclude it from command resolution.
+        if arg == "--docs"
+            && let Some(next) = args.get(i + 1)
+            && !next.starts_with('-')
+        {
+            return (Some(next.clone()), Some(i + 1));
+        }
+    }
+    (None, None)
+}
+
+/// Search the namespace index for a skill and render matching entries.
+///
+/// Derives the namespace from the skill name, loads the corresponding index
+/// file, extracts content snippets for each matching entry, and prints them.
+/// Prints a no-match message to stderr if nothing is found.
+fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<(), CreftError> {
+    let ns = skill_namespace(skill_name);
+
+    // Try global scope first, then local scope.
+    let index = load_namespace_index(ctx, ns);
+
+    let terms: Vec<&str> = query.split_whitespace().collect();
+
+    match index {
+        Some(idx) => {
+            let matches = idx.search(query);
+            let results: Vec<search::snippet::SnippetResult> = matches
+                .into_iter()
+                .map(|e| {
+                    let snippets = search::load_skill_text(ctx, &e.name)
+                        .map(|text| search::snippet::extract_snippets(&text, &terms, 2))
+                        .unwrap_or_default();
+                    search::snippet::SnippetResult {
+                        name: e.name.clone(),
+                        namespace: ns.to_owned(),
+                        description: e.description.clone(),
+                        snippets,
+                    }
+                })
+                .collect();
+
+            if search::snippet::render_snippet_results(&results, &terms, false)
+                .map(|rendered| print!("{}", rendered))
+                .is_none()
+            {
+                // Exact search found no snippets — try fuzzy fallback.
+                let fuzzy_matches = idx.search_fuzzy(query);
+                let mut scored: Vec<(f64, search::snippet::SnippetResult)> = fuzzy_matches
+                    .into_iter()
+                    .filter_map(|e| {
+                        let text = search::load_skill_text(ctx, &e.name)?;
+                        let score = search::tokenize::score_query(query, &text);
+                        if score < search::FUZZY_THRESHOLD {
+                            return None;
+                        }
+                        let snippets = search::snippet::extract_snippets(&text, &terms, 2);
+                        Some((
+                            score,
+                            search::snippet::SnippetResult {
+                                name: e.name.clone(),
+                                namespace: ns.to_owned(),
+                                description: e.description.clone(),
+                                snippets,
+                            },
+                        ))
+                    })
+                    .collect();
+
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                let fuzzy_results: Vec<search::snippet::SnippetResult> =
+                    scored.into_iter().map(|(_, r)| r).collect();
+
+                match search::snippet::render_snippet_results(&fuzzy_results, &terms, false) {
+                    Some(rendered) => print!("{}", rendered),
+                    None => {
+                        eprintln!("no documentation matches for \"{}\"", query);
+                    }
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                query
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load a namespace index, trying global scope then local scope.
+///
+/// Returns `None` if neither scope has a readable, valid index.
+fn load_namespace_index(ctx: &AppContext, namespace: &str) -> Option<search::index::SearchIndex> {
+    for scope in &[Scope::Global, Scope::Local] {
+        if let Ok(Some(idx)) = search::store::load_index(ctx, namespace, *scope) {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 /// Render skill documentation from the raw markdown file content.
@@ -400,6 +545,7 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
 
     use super::{collapse_blank_lines, render_skill_docs, strip_code_blocks};
 
@@ -499,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn headers_in_prose_receive_bold_markers() {
         yansi::enable();
         let body = "## Prerequisites\n\nSome text.\n";
@@ -515,6 +662,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn frontmatter_replaced_with_name_description_header() {
         yansi::disable();
         let raw =
@@ -537,6 +685,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn skill_with_only_frontmatter_and_code_produces_header_only() {
         yansi::disable();
         let raw = "---\nname: minimal\ndescription: Minimal skill.\n---\n\n```bash\necho hi\n```\n";
@@ -548,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_ansi_when_yansi_disabled() {
         yansi::disable();
         let raw = "---\nname: skill\ndescription: A skill.\n---\n\n## Header\n\nProse.\n";
@@ -575,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn malformed_frontmatter_falls_back_to_skill_name_header() {
         yansi::disable();
         let raw = "not valid frontmatter\n\nSome prose.\n";
@@ -584,5 +735,114 @@ mod tests {
             "skill name must appear as fallback header"
         );
         yansi::enable();
+    }
+
+    // -- extract_docs_query ---------------------------------------------------
+
+    use super::extract_docs_query;
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_when_no_docs_flag() {
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "rollback"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_for_bare_docs_flag() {
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_space_form_returns_value_and_index() {
+        // `--docs rollback`: query is "rollback" at index 2.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "rollback"]));
+        assert_eq!(query.as_deref(), Some("rollback"));
+        assert_eq!(idx, Some(2));
+    }
+
+    #[test]
+    fn extract_docs_query_equals_form_returns_value_without_index() {
+        // `--docs=rollback`: query is embedded in the flag, no separate index consumed.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs=rollback"]));
+        assert_eq!(query.as_deref(), Some("rollback"));
+        assert!(idx.is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_when_next_arg_is_flag() {
+        // `--docs --force` — the next arg starts with '-', so it's not a query.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "--force"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_handles_multi_word_style_query() {
+        // The shell typically presents this as a single arg.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "roll back"]));
+        assert_eq!(query.as_deref(), Some("roll back"));
+        assert_eq!(idx, Some(2));
+    }
+
+    // -- space-separated form: query value excluded from command resolution ----
+
+    #[test]
+    fn space_form_query_excluded_from_filtered_args() {
+        // When args are ["deploy", "--docs", "rollback"], the filtered vec must
+        // contain only ["deploy"] — not ["deploy", "rollback"] — so that command
+        // resolution looks up "deploy", not "deploy rollback".
+        let args = strs(&["deploy", "--docs", "rollback"]);
+        let (docs_query, docs_query_index) = extract_docs_query(&args);
+        assert_eq!(docs_query.as_deref(), Some("rollback"));
+
+        let filtered: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                *a != "--help"
+                    && *a != "-h"
+                    && !a.starts_with("--docs")
+                    && *a != "--dry-run"
+                    && *a != "--verbose"
+                    && *a != "-v"
+                    && Some(*i) != docs_query_index
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+
+        assert_eq!(filtered, vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn equals_form_query_not_in_filtered_args() {
+        // `--docs=rollback` is excluded because it starts with `--docs`.
+        // No separate query arg to skip.
+        let args = strs(&["deploy", "--docs=rollback"]);
+        let (docs_query, docs_query_index) = extract_docs_query(&args);
+        assert_eq!(docs_query.as_deref(), Some("rollback"));
+
+        let filtered: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                *a != "--help"
+                    && *a != "-h"
+                    && !a.starts_with("--docs")
+                    && *a != "--dry-run"
+                    && *a != "--verbose"
+                    && *a != "-v"
+                    && Some(*i) != docs_query_index
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+
+        assert_eq!(filtered, vec!["deploy".to_string()]);
     }
 }
