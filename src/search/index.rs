@@ -151,6 +151,26 @@ impl SearchIndex {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Query the index for documents that might contain any query n-gram.
+    ///
+    /// Generates 3-grams from the query, then tests each document's filter for
+    /// membership of any gram. Returns entries where at least one gram is probably
+    /// present (OR/ANY semantics). This is the candidate gate — the caller scores
+    /// and filters the results.
+    ///
+    /// Returns an empty vec when the query produces no 3-grams (query tokens all
+    /// shorter than 3 characters).
+    pub fn search_fuzzy(&self, query: &str) -> Vec<&IndexEntry> {
+        let grams = tokenize_ngrams(query);
+        if grams.is_empty() {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| grams.iter().any(|&g| entry.filter.contains(g)))
+            .collect()
+    }
 }
 
 // ── deserialization helpers ───────────────────────────────────────────────────
@@ -410,5 +430,66 @@ mod tests {
             0,
             "AND semantics must be preserved with combined filter"
         );
+    }
+
+    // ── search_fuzzy ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_fuzzy_returns_candidate_with_shared_ngrams() {
+        // "hered" shares grams {her, ere, red} with "heredoc".
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
+        let results = idx.search_fuzzy("hered");
+        assert_eq!(results.len(), 1, "document with 'heredoc' must be a candidate for query 'hered'");
+        assert_eq!(results[0].name, "doc");
+    }
+
+    #[test]
+    fn search_fuzzy_returns_candidate_for_typo_query() {
+        // "templete" shares grams {tem, emp, mpl} with "template".
+        let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
+        let results = idx.search_fuzzy("templete");
+        assert_eq!(results.len(), 1, "document with 'template' must be a candidate for 'templete'");
+    }
+
+    #[test]
+    fn search_fuzzy_short_query_returns_empty() {
+        // "ab" produces no 3-grams.
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
+        assert!(idx.search_fuzzy("ab").is_empty(), "2-char query must produce no fuzzy candidates");
+    }
+
+    #[test]
+    fn search_fuzzy_empty_query_returns_empty() {
+        let idx = build_three_doc_index();
+        assert!(idx.search_fuzzy("").is_empty(), "empty query must produce no fuzzy candidates");
+    }
+
+    #[test]
+    fn search_fuzzy_empty_index_returns_empty() {
+        let idx = SearchIndex::build(&[]);
+        assert!(idx.search_fuzzy("hered").is_empty());
+    }
+
+    #[test]
+    fn search_fuzzy_uses_any_gram_semantics() {
+        // OR semantics: matching ONE gram is enough to be a candidate.
+        // "templete" and "template" share {tem, emp, mpl}; the document also
+        // has "rollback" which shares no grams with "templete".
+        let idx = SearchIndex::build(&[
+            ("doc-a", "desc", "template guide"),
+            ("doc-b", "desc", "rollback procedure"),
+        ]);
+        let results = idx.search_fuzzy("templete");
+        assert_eq!(results.len(), 1, "only the document with gram overlap must be returned");
+        assert_eq!(results[0].name, "doc-a");
+    }
+
+    #[test]
+    fn exact_search_not_affected_by_fuzzy_method() {
+        // Verifies that adding search_fuzzy didn't break exact search.
+        let idx = build_three_doc_index();
+        let exact = idx.search("template");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].name, "deploy rollback");
     }
 }

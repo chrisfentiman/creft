@@ -319,10 +319,45 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
                 })
                 .collect();
 
-            match search::snippet::render_snippet_results(&results, &terms, false) {
-                Some(rendered) => print!("{}", rendered),
-                None => {
-                    eprintln!("no documentation matches for \"{}\"", query);
+            if search::snippet::render_snippet_results(&results, &terms, false)
+                .map(|rendered| print!("{}", rendered))
+                .is_none()
+            {
+                // Exact search found no snippets — try fuzzy fallback.
+                let fuzzy_matches = idx.search_fuzzy(query);
+                let mut scored: Vec<(f64, search::snippet::SnippetResult)> = fuzzy_matches
+                    .into_iter()
+                    .filter_map(|e| {
+                        let text = search::load_skill_text(ctx, &e.name)?;
+                        let score = search::tokenize::score_query(query, &text);
+                        if score < search::FUZZY_THRESHOLD {
+                            return None;
+                        }
+                        let snippets =
+                            search::snippet::extract_snippets(&text, &terms, 2);
+                        Some((
+                            score,
+                            search::snippet::SnippetResult {
+                                name: e.name.clone(),
+                                namespace: ns.to_owned(),
+                                description: e.description.clone(),
+                                snippets,
+                            },
+                        ))
+                    })
+                    .collect();
+
+                scored.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let fuzzy_results: Vec<search::snippet::SnippetResult> =
+                    scored.into_iter().map(|(_, r)| r).collect();
+
+                match search::snippet::render_snippet_results(&fuzzy_results, &terms, false) {
+                    Some(rendered) => print!("{}", rendered),
+                    None => {
+                        eprintln!("no documentation matches for \"{}\"", query);
+                    }
                 }
             }
         }

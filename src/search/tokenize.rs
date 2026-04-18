@@ -109,7 +109,6 @@ pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
 /// comparison.
 ///
 /// Returns a `HashSet` for O(1) intersection operations.
-#[allow(dead_code)]
 pub(crate) fn gram_set(text: &str) -> HashSet<String> {
     let mut grams = HashSet::new();
     for tok in split_and_lowercase(text) {
@@ -135,7 +134,6 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 /// unmatched grams (typos reduce the score proportionally).
 ///
 /// Returns 0.0 when either input produces no 3-grams.
-#[allow(dead_code)]
 pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
     let query_grams = gram_set(query);
     let doc_grams = gram_set(document);
@@ -156,6 +154,52 @@ pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
     }
 
     intersection as f64 / denominator as f64
+}
+
+/// Score a multi-word query against a document's full text.
+///
+/// For each query word (split on non-alphanumeric/underscore/hyphen, lowercase,
+/// length >= 3), computes `tversky_score` against every word in the document
+/// text that meets the same length threshold, and takes the best per-word score.
+/// Returns the average of per-word best scores.
+///
+/// A document that contains good matches for all query words scores close to 1.0.
+/// A document that matches only some words scores proportionally lower.
+///
+/// Returns 0.0 when the query is empty or all query words are shorter than 3
+/// characters (no grams can be generated to compare).
+pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
+    let query_words: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 3)
+        .collect();
+
+    if query_words.is_empty() {
+        return 0.0;
+    }
+
+    let doc_words: Vec<String> = document_text
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 3)
+        .collect();
+
+    if doc_words.is_empty() {
+        return 0.0;
+    }
+
+    let total: f64 = query_words
+        .iter()
+        .map(|qw| {
+            doc_words
+                .iter()
+                .map(|dw| tversky_score(qw, dw))
+                .fold(0.0_f64, f64::max)
+        })
+        .sum();
+
+    total / query_words.len() as f64
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -451,5 +495,46 @@ mod tests {
         let reverse = tversky_score("heredoc", "hered");
         assert_eq!(forward, 1.0);
         assert_ne!(reverse, 1.0, "prototype model is asymmetric");
+    }
+
+    // ── score_query ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn score_query_single_word_best_match_in_document() {
+        // "hered" scores 1.0 against "heredoc"; best doc word is "heredoc"
+        let score = score_query("hered", "this explains the heredoc syntax");
+        assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn score_query_multi_word_averages_per_word_best_scores() {
+        // "hered" -> "heredoc" = 1.0; "templete" -> "template" = 0.5; average = 0.75
+        let score = score_query("hered templete", "the heredoc template guide");
+        assert_eq!(score, 0.75);
+    }
+
+    #[test]
+    fn score_query_no_match_returns_zero() {
+        let score = score_query("zzz", "nothing matches here");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn score_query_short_query_word_returns_zero() {
+        // "ab" is < 3 chars, so no query words remain after filtering
+        let score = score_query("ab", "anything");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn score_query_empty_query_returns_zero() {
+        let score = score_query("", "some document text here");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn score_query_empty_document_returns_zero() {
+        let score = score_query("heredoc", "");
+        assert_eq!(score, 0.0);
     }
 }

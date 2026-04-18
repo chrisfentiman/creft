@@ -15,8 +15,10 @@ use crate::store as skill_store;
 
 use self::index::IndexEntry;
 use self::snippet::{SnippetResult, extract_snippets};
+use self::tokenize::score_query;
 
 const SNIPPET_CONTEXT: usize = 2;
+pub(crate) const FUZZY_THRESHOLD: f64 = 0.2;
 
 /// Search all indexes across all scopes, loading content snippets for matches.
 ///
@@ -30,13 +32,20 @@ const SNIPPET_CONTEXT: usize = 2;
 /// with empty snippets — the caller filters them at render time via
 /// `render_snippet_results`.
 ///
+/// When exact search returns no results, runs a fuzzy fallback using 3-gram
+/// candidate gating and Tversky scoring. Fuzzy results are sorted by score
+/// descending before snippet extraction.
+///
 /// Files that fail to deserialize or whose content cannot be loaded are
 /// skipped silently. When both scopes resolve to the same directory (e.g.
 /// under `CREFT_HOME`), the directory is searched only once.
 pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetResult> {
     let terms: Vec<&str> = query.split_whitespace().collect();
-    let mut results = Vec::new();
     let mut seen_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Load all valid indexes first so we can reuse them for the fuzzy pass
+    // without reading from disk twice.
+    let mut loaded: Vec<(String, self::index::SearchIndex)> = Vec::new();
 
     for scope in &[Scope::Global, Scope::Local] {
         let dir = match ctx.index_dir_for(*scope) {
@@ -44,7 +53,6 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
             Err(_) => continue,
         };
 
-        // Skip if we already searched this resolved directory.
         if seen_dirs.contains(&dir) {
             continue;
         }
@@ -55,8 +63,8 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
             Err(_) => continue,
         };
 
-        for entry in read_dir.flatten() {
-            let path = entry.path();
+        for dir_entry in read_dir.flatten() {
+            let path = dir_entry.path();
             let Some(ext) = path.extension() else {
                 continue;
             };
@@ -64,7 +72,6 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
                 continue;
             }
 
-            // Derive namespace name from filename (strip `.idx` extension).
             let namespace = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -80,16 +87,57 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
                 None => continue,
             };
 
-            for entry in index.search(query) {
-                let snippets = load_snippets_for_entry(ctx, &namespace, entry, &terms);
-                results.push(SnippetResult {
-                    namespace: namespace.clone(),
-                    name: entry.name.clone(),
-                    description: entry.description.clone(),
-                    snippets,
-                });
+            loaded.push((namespace, index));
+        }
+    }
+
+    // Exact search pass (AND semantics on whole-token hashes).
+    let mut results: Vec<SnippetResult> = Vec::new();
+    for (namespace, index) in &loaded {
+        for entry in index.search(query) {
+            let snippets = load_snippets_for_entry(ctx, namespace, entry, &terms);
+            results.push(SnippetResult {
+                namespace: namespace.clone(),
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                snippets,
+            });
+        }
+    }
+
+    // Fuzzy fallback: only runs when exact search found nothing.
+    if results.is_empty() {
+        let mut scored: Vec<(f64, SnippetResult)> = Vec::new();
+
+        for (namespace, index) in &loaded {
+            for entry in index.search_fuzzy(query) {
+                let text = if namespace == "_builtin" {
+                    load_builtin_text(&entry.name)
+                } else {
+                    load_skill_text(ctx, &entry.name)
+                };
+                let Some(text) = text else { continue };
+
+                let score = score_query(query, &text);
+                if score < FUZZY_THRESHOLD {
+                    continue;
+                }
+
+                let snippets = extract_snippets(&text, &terms, SNIPPET_CONTEXT);
+                scored.push((
+                    score,
+                    SnippetResult {
+                        namespace: namespace.clone(),
+                        name: entry.name.clone(),
+                        description: entry.description.clone(),
+                        snippets,
+                    },
+                ));
             }
         }
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        results = scored.into_iter().map(|(_, r)| r).collect();
     }
 
     results
@@ -329,6 +377,46 @@ mod tests {
         // Verify the return type is Vec<SnippetResult> by destructuring.
         let (ctx, _tmp) = make_ctx();
         let results: Vec<SnippetResult> = search_all_indexes(&ctx, "anything");
+        assert!(results.is_empty());
+    }
+
+    // ── fuzzy fallback in search_all_indexes ──────────────────────────────────
+
+    #[test]
+    fn search_all_indexes_exact_not_affected_by_fuzzy_path() {
+        // Exact search must still work: a correctly-typed query must find the doc.
+        let (ctx, _tmp) = make_ctx();
+        let idx = SearchIndex::build(&[("my skill", "A skill", "rollback procedure")]);
+        write_index_file(&ctx, Scope::Global, "ns.idx", &idx);
+
+        // Exact query for "rollback" must succeed without fuzzy involvement.
+        // (The skill file doesn't exist on disk so snippets will be empty, but
+        //  the result entry will be returned — same behavior as before Stage 2.)
+        let results = search_all_indexes(&ctx, "rollback");
+        assert_eq!(results.len(), 1, "exact query must still return the matching entry");
+        assert_eq!(results[0].name, "my skill");
+    }
+
+    #[test]
+    fn search_all_indexes_no_fuzzy_candidates_below_threshold_returns_empty() {
+        // A query that produces no fuzzy matches above the threshold must return empty.
+        let (ctx, _tmp) = make_ctx();
+        let idx = SearchIndex::build(&[("my skill", "A skill", "rollback procedure")]);
+        write_index_file(&ctx, Scope::Global, "ns.idx", &idx);
+
+        // "zzq" has no gram overlap with "rollback" or "procedure".
+        let results = search_all_indexes(&ctx, "zzq");
+        assert!(results.is_empty(), "query with no gram overlap must return empty results");
+    }
+
+    #[test]
+    fn search_all_indexes_no_matches_returns_empty_without_error() {
+        // No infinite loop or panic when both exact and fuzzy find nothing.
+        let (ctx, _tmp) = make_ctx();
+        let idx = SearchIndex::build(&[("my skill", "A skill", "rollback procedure")]);
+        write_index_file(&ctx, Scope::Global, "ns.idx", &idx);
+
+        let results = search_all_indexes(&ctx, "xyzxyzxyz");
         assert!(results.is_empty());
     }
 }
