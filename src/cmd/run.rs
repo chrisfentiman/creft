@@ -291,18 +291,49 @@ fn extract_docs_query(args: &[String]) -> (Option<String>, Option<usize>) {
 /// Search the namespace index for a skill and render matching entries.
 ///
 /// Derives the namespace from the skill name, loads the corresponding index
-/// file, tokenizes the query, and prints matching document names and
-/// descriptions. Prints a no-match message to stderr if nothing is found.
+/// file, extracts content snippets for each matching entry, and prints them.
+/// Prints a no-match message to stderr if nothing is found.
 fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<(), CreftError> {
     let ns = skill_namespace(skill_name);
 
     // Try global scope first, then local scope.
     let index = load_namespace_index(ctx, ns);
 
+    let terms: Vec<&str> = query.split_whitespace().collect();
+
     match index {
         Some(idx) => {
             let matches = idx.search(query);
-            match search::render_search_results(&matches) {
+            let results: Vec<search::snippet::SnippetResult> = matches
+                .into_iter()
+                .map(|e| {
+                    let name_parts: Vec<String> =
+                        e.name.split_whitespace().map(str::to_owned).collect();
+                    let snippets = store::resolve_command(ctx, &name_parts)
+                        .ok()
+                        .and_then(|(resolved_name, _, source)| {
+                            store::read_raw_from(ctx, &resolved_name, &source)
+                                .map_err(|err| {
+                                    eprintln!("warning: could not read '{}': {}", e.name, err);
+                                })
+                                .ok()
+                        })
+                        .map(|raw| {
+                            let description = extract_frontmatter_description(&raw);
+                            let text = search::store::extract_indexable_text(&raw, &description);
+                            search::snippet::extract_snippets(&text, &terms, 2)
+                        })
+                        .unwrap_or_default();
+                    search::snippet::SnippetResult {
+                        name: e.name.clone(),
+                        namespace: ns.to_owned(),
+                        description: e.description.clone(),
+                        snippets,
+                    }
+                })
+                .collect();
+
+            match search::snippet::render_snippet_results(&results, &terms, false) {
                 Some(rendered) => print!("{}", rendered),
                 None => {
                     eprintln!("no documentation matches for \"{}\"", query);
@@ -317,6 +348,26 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
         }
     }
     Ok(())
+}
+
+/// Extract the description field from raw skill markdown without a full parse.
+///
+/// Reads the frontmatter YAML block for the `description:` line. Returns an
+/// empty string when the frontmatter is missing or the field is not present.
+fn extract_frontmatter_description(raw: &str) -> String {
+    let Some(after_open) = raw.strip_prefix("---") else {
+        return String::new();
+    };
+    let Some(close_pos) = after_open.find("\n---") else {
+        return String::new();
+    };
+    let yaml_block = &after_open[..close_pos];
+    for line in yaml_block.lines() {
+        if let Some(rest) = line.strip_prefix("description:") {
+            return rest.trim().to_owned();
+        }
+    }
+    String::new()
 }
 
 /// Load a namespace index, trying global scope then local scope.

@@ -167,9 +167,9 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
 
 /// Handle `creft <builtin> --docs "<query>"`.
 ///
-/// Loads `_builtin.idx`, searches it for the query, then filters results to
-/// entries whose name matches the built-in's CLI name. Prints matches to
-/// stdout; prints a no-match message to stderr when nothing is found.
+/// Loads `_builtin.idx`, searches it for the query, filters to the specific
+/// built-in's entry, extracts content snippets, and prints matching lines to
+/// stdout. Prints a no-match message to stderr when nothing is found.
 fn dispatch_docs_search(
     ctx: &model::AppContext,
     which: help::BuiltinHelp,
@@ -186,15 +186,34 @@ fn dispatch_docs_search(
     };
 
     let cli_name = which.cli_name();
+    let no_index_msg = || {
+        eprintln!(
+            "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+            query
+        );
+    };
+
     match index {
         Some(idx) => {
+            let terms: Vec<&str> = query.split_whitespace().collect();
+            let docs_text = search::store::strip_code_blocks_plain(&help::render_docs(which));
+
             let all_matches = idx.search(query);
-            let filtered: Vec<_> = all_matches
+            let results: Vec<search::snippet::SnippetResult> = all_matches
                 .into_iter()
                 .filter(|e| e.name == cli_name)
+                .map(|e| {
+                    let snippets = search::snippet::extract_snippets(&docs_text, &terms, 2);
+                    search::snippet::SnippetResult {
+                        name: e.name.clone(),
+                        namespace: "_builtin".to_owned(),
+                        description: e.description.clone(),
+                        snippets,
+                    }
+                })
                 .collect();
 
-            match search::render_search_results(&filtered) {
+            match search::snippet::render_snippet_results(&results, &terms, false) {
                 Some(rendered) => print!("{}", rendered),
                 None => {
                     eprintln!(
@@ -204,47 +223,38 @@ fn dispatch_docs_search(
                 }
             }
         }
-        None => {
-            eprintln!(
-                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
-                query
-            );
-        }
+        None => no_index_msg(),
     }
     Ok(())
 }
 
 /// Handle `creft --docs "<query>"`.
 ///
-/// Searches all `.idx` files (including `_builtin.idx`) across all scopes
-/// and prints combined results. Prints a no-match message to stderr when
-/// nothing is found.
+/// Searches all `.idx` files (including `_builtin.idx`) across all scopes,
+/// extracts content snippets for each match, and prints results grouped by
+/// namespace. Prints a no-match message to stderr when nothing is found.
 fn dispatch_docs_search_all(ctx: &model::AppContext, query: &str) -> Result<(), CreftError> {
     let results = search::search_all_indexes(ctx, query);
+    let terms: Vec<&str> = query.split_whitespace().collect();
 
-    if results.is_empty() {
-        let dir = ctx.index_dir_for(model::Scope::Global)?;
-        if dir.join("_builtin.idx").exists() {
-            eprintln!("no documentation matches for \"{}\"", query);
-        } else {
-            eprintln!(
-                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
-                query
-            );
-        }
-        return Ok(());
-    }
+    // Determine whether the index has been built at all for the no-match message.
+    let index_exists = ctx
+        .index_dir_for(model::Scope::Global)
+        .map(|d| d.join("_builtin.idx").exists())
+        .unwrap_or(false);
 
-    // Group by namespace for display: show namespace header before each group.
-    let mut current_ns: Option<&str> = None;
-    let max_name = results.iter().map(|r| r.name.len()).max().unwrap_or(0);
-    for result in &results {
-        if current_ns != Some(result.namespace.as_str()) {
-            current_ns = Some(result.namespace.as_str());
-            println!("[{}]", result.namespace);
+    match search::snippet::render_snippet_results(&results, &terms, true) {
+        Some(rendered) => print!("{}", rendered),
+        None => {
+            if index_exists {
+                eprintln!("no documentation matches for \"{}\"", query);
+            } else {
+                eprintln!(
+                    "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                    query
+                );
+            }
         }
-        let pad = " ".repeat(max_name - result.name.len());
-        println!("  {}{}  {}", result.name, pad, result.description);
     }
     Ok(())
 }

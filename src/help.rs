@@ -679,6 +679,16 @@ impl BuiltinHelp {
         }
     }
 
+    /// Look up a variant by its CLI name.
+    ///
+    /// Returns `None` if the name doesn't match any variant.
+    pub(crate) fn from_cli_name(name: &str) -> Option<BuiltinHelp> {
+        Self::all_variants()
+            .iter()
+            .find(|v| v.cli_name() == name)
+            .copied()
+    }
+
     /// All `BuiltinHelp` variants in declaration order.
     ///
     /// Used by the index lifecycle to iterate over all built-in commands

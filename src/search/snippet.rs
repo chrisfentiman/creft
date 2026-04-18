@@ -5,10 +5,6 @@
 //! those lines with surrounding context into contiguous snippets, and renders
 //! the results for terminal display.
 
-// Stage 2 wires callers into these types and functions; suppress dead_code
-// warnings until that stage lands.
-#![allow(dead_code)]
-
 use yansi::Paint;
 
 /// A contiguous block of lines from a document that contains at least one

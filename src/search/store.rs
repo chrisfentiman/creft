@@ -238,7 +238,7 @@ fn write_index_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), CreftEr
 /// Returns the frontmatter description plus the body with executable code
 /// blocks stripped (plain text, no ANSI). The description is prepended so
 /// that filtering on the description field also matches search terms.
-fn extract_indexable_text(raw_content: &str, description: &str) -> String {
+pub(crate) fn extract_indexable_text(raw_content: &str, description: &str) -> String {
     // Split on the closing frontmatter delimiter `---`.
     // The raw content starts with `---\n<yaml>\n---\n<body>`.
     let body = if let Some(after_open) = raw_content.strip_prefix("---") {
