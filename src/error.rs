@@ -109,17 +109,12 @@ pub enum CreftError {
     #[error("early exit (exit 99)")]
     EarlyExit,
 
-    // Store variants are constructed by store_kv.rs; the channel handler in
-    // Stage 2 is the primary consumer outside that module.
-    #[allow(dead_code)]
     #[error("cannot open store '{name}': {reason}")]
     StoreOpen { name: String, reason: String },
 
-    #[allow(dead_code)]
     #[error("cannot read store '{name}': {reason}")]
     StoreRead { name: String, reason: String },
 
-    #[allow(dead_code)]
     #[error("cannot write store '{name}': {reason}")]
     StoreWrite { name: String, reason: String },
 }

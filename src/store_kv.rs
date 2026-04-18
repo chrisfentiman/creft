@@ -1,8 +1,3 @@
-// Functions in this module are consumed by the channel handler added in Stage 2.
-// Dead code warnings are suppressed here because the public API is complete but
-// the call sites (runner/channel.rs) are added in the next implementation stage.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
@@ -259,22 +254,6 @@ pub(crate) fn load_store_index(dir: &Path, qualified_name: &str) -> Option<Searc
     SearchIndex::from_bytes(&bytes)
 }
 
-/// Returns `true` if the error indicates the database is locked by another
-/// process (`DatabaseAlreadyOpen`).
-///
-/// Used by the channel handler to distinguish retryable contention from
-/// terminal errors like disk full or permission denied.
-pub(crate) fn is_lock_contention(err: &CreftError) -> bool {
-    // We detect contention by checking the source message, because
-    // the CreftError variants use String for the source rather than
-    // carrying the original redb error type.
-    if let CreftError::StoreOpen { reason, .. } = err {
-        // redb's Display for DatabaseAlreadyOpen is "Database already open. Cannot acquire lock."
-        reason.contains("already open") || reason.contains("Already open")
-    } else {
-        false
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -494,35 +473,6 @@ mod tests {
         let index = load_store_index(dir.path(), "deploy.data").unwrap();
         let results = index.search("rollback");
         assert_eq!(results.iter().any(|e| e.name == "config"), true);
-    }
-
-    // ── is_lock_contention ────────────────────────────────────────────────────
-
-    #[test]
-    fn is_lock_contention_true_for_store_open_with_already_open_message() {
-        let err = CreftError::StoreOpen {
-            name: "deploy.data".to_owned(),
-            reason: "Database already open. Cannot acquire lock.".to_owned(),
-        };
-        assert!(is_lock_contention(&err));
-    }
-
-    #[test]
-    fn is_lock_contention_false_for_other_store_open_error() {
-        let err = CreftError::StoreOpen {
-            name: "deploy.data".to_owned(),
-            reason: "Permission denied".to_owned(),
-        };
-        assert!(!is_lock_contention(&err));
-    }
-
-    #[test]
-    fn is_lock_contention_false_for_non_store_open_error() {
-        let err = CreftError::StoreWrite {
-            name: "deploy.data".to_owned(),
-            reason: "disk full".to_owned(),
-        };
-        assert!(!is_lock_contention(&err));
     }
 
     // ── different qualified names do not interfere ────────────────────────────

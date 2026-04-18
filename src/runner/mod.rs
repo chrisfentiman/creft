@@ -81,6 +81,14 @@ pub(crate) struct RunContext {
     /// at skill invocation time. `None` means use block language literally.
     shell_preference: Option<String>,
 
+    /// Directory for persistent key-value stores.
+    ///
+    /// Passed into `PrimitiveContext` when spawning the channel reader thread.
+    /// Populated from `AppContext::store_dir_for(Scope::Global)` at the call site.
+    /// Defaults to an empty path when not set (store operations are no-ops in
+    /// contexts that don't configure a store directory, such as dry-run).
+    pub(crate) store_dir: std::path::PathBuf,
+
     /// The fully-qualified name of the skill being executed.
     ///
     /// Used to derive the caller's namespace and plugin context for namespace
@@ -92,7 +100,7 @@ pub(crate) struct RunContext {
     /// Plugin name when the skill is sourced from an activated plugin.
     ///
     /// `Some(name)` when the skill comes from `SkillSource::Plugin(name)`.
-    /// `None` for user-owned and package skills. Passed to `SearchContext`
+    /// `None` for user-owned and package skills. Passed to `PrimitiveContext`
     /// so that `namespace::qualify` produces fully-qualified names with the
     /// plugin prefix (e.g., `acme.deploy.beta` instead of `deploy.beta`).
     pub(crate) plugin: Option<String>,
@@ -123,10 +131,20 @@ impl RunContext {
             verbose,
             dry_run,
             shell_preference: None,
+            store_dir: std::path::PathBuf::new(),
             skill_name: String::new(),
             plugin: None,
             runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the directory for persistent key-value stores.
+    ///
+    /// Derived from `AppContext::store_dir_for(Scope::Global)` at the call site
+    /// and threaded into `PrimitiveContext` when the channel reader thread is spawned.
+    pub(crate) fn with_store_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.store_dir = dir;
+        self
     }
 
     /// Set the fully-qualified skill name for namespace resolution.
@@ -142,7 +160,7 @@ impl RunContext {
     ///
     /// Pass `Some(plugin_name)` for `SkillSource::Plugin` skills. Pass `None`
     /// for user-owned and package skills. The plugin name is threaded through
-    /// to `SearchContext` so that `namespace::qualify` produces correctly
+    /// to `PrimitiveContext` so that `namespace::qualify` produces correctly
     /// prefixed names (e.g., `acme.deploy.beta` for plugin `acme`).
     pub(crate) fn with_plugin(mut self, plugin: Option<String>) -> Self {
         self.plugin = plugin;
@@ -662,10 +680,11 @@ fn execute_block(
         let interactive = stdin_data.is_none();
 
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
-        let search_ctx = Some(channel::SearchContext {
+        let search_ctx = Some(channel::PrimitiveContext {
             skill_name: ctx.skill_name.clone(),
             plugin: ctx.plugin.clone(),
             runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+            store_dir: ctx.store_dir.clone(),
         });
 
         // Duplicate the response writer fd so both the reader thread (which
@@ -857,8 +876,9 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    // Preserve skill_name, plugin, and runtime_indexes from the original context
-    // so that creft_index / creft_search work correctly in skills with multiple blocks.
+    // Preserve skill_name, plugin, store_dir, and runtime_indexes from the original
+    // context so that creft_index / creft_search / creft_store_* work correctly
+    // in skills with multiple blocks.
     let ctx = RunContext {
         cancel: ctx.cancel_arc(),
         cwd: ctx.cwd().to_path_buf(),
@@ -866,6 +886,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         verbose: ctx.is_verbose(),
         dry_run: ctx.is_dry_run(),
         shell_preference: ctx.shell_preference().map(String::from),
+        store_dir: ctx.store_dir.clone(),
         skill_name: ctx.skill_name.clone(),
         plugin: ctx.plugin.clone(),
         runtime_indexes: Arc::clone(&ctx.runtime_indexes),

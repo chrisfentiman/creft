@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal as _, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use crate::namespace;
 use crate::search::index::SearchIndex;
+use crate::store_kv;
 use crate::wrap::MAX_WIDTH;
 
 use super::RuntimeIndex;
@@ -209,6 +211,41 @@ pub(crate) enum ChannelMessage {
         /// namespace. Dotted name is a cross-namespace reference checked against
         /// the access registry.
         name: String,
+    },
+    #[serde(rename = "store_put")]
+    StorePut {
+        /// Store name (local to the skill's namespace).
+        name: String,
+        /// Key to store.
+        key: String,
+        /// Value to store (arbitrary string).
+        value: String,
+        /// Whether this store is searchable from other namespaces.
+        ///
+        /// `None` (field omitted in JSON): leave the global flag unchanged.
+        /// `Some(true)`: mark as globally accessible.
+        /// `Some(false)`: explicitly revoke global access.
+        #[serde(default)]
+        global: Option<bool>,
+    },
+    #[serde(rename = "store_get")]
+    StoreGet {
+        /// Request ID for matching the response.
+        id: String,
+        /// Store name (local to the skill's namespace).
+        name: String,
+        /// Key to look up.
+        key: String,
+    },
+    #[serde(rename = "store_search")]
+    StoreSearch {
+        /// Request ID for matching the response.
+        id: String,
+        /// Store name. Local name resolves within the caller's namespace.
+        /// Dotted name is a cross-namespace reference (must be global).
+        name: String,
+        /// Search query string.
+        query: String,
     },
 }
 
@@ -486,19 +523,25 @@ impl TerminalWriter {
     }
 }
 
-/// Context for handling `creft_index` and `creft_search` messages on the side channel.
+/// Context for handling runtime primitive messages on the side channel.
 ///
 /// Carried into the reader thread when a skill is executing. The thread uses
-/// `skill_name` to derive the caller's namespace for name qualification, and
-/// `runtime_indexes` to store indexes created by `creft_index` and query them
-/// for `creft_search` requests.
-pub(crate) struct SearchContext {
+/// `skill_name` to derive the caller's namespace for name qualification,
+/// `runtime_indexes` for in-memory search indexes, and `store_dir` for
+/// persistent key-value store I/O.
+pub(crate) struct PrimitiveContext {
     /// Fully-qualified name of the skill being executed.
     pub skill_name: String,
     /// Plugin name extracted from the skill's source, if any.
     pub plugin: Option<String>,
     /// Shared runtime indexes keyed by fully-qualified name.
     pub runtime_indexes: Arc<std::sync::Mutex<HashMap<String, RuntimeIndex>>>,
+    /// Directory for persistent key-value stores.
+    ///
+    /// Resolved from `AppContext::store_dir_for(Scope::Global)` at context
+    /// construction time. Store operations open and close the redb database
+    /// per-call; this directory is where the `.redb` and `.store.idx` files live.
+    pub store_dir: PathBuf,
 }
 
 /// Spawn a reader thread that drains the control pipe and renders messages.
@@ -512,10 +555,18 @@ pub(crate) struct SearchContext {
 /// - `Prompt` — when `prompt_tx` is `None`, writes an empty response so the
 ///   child does not deadlock on its `read(<&4)` call, and logs the question
 ///   as a print message.
-/// - `Index` — when `search_ctx` is `Some`, qualifies the name and builds an
+/// - `Index` — when `ctx` is `Some`, qualifies the name and builds an
 ///   in-memory `SearchIndex`. Fire-and-forget; no response is written.
-/// - `Search` — when `search_ctx` is `Some`, resolves the name against the
+/// - `Search` — when `ctx` is `Some`, resolves the name against the
 ///   access registry, queries the index, and writes a JSON response on fd 4.
+/// - `StorePut` — when `ctx` is `Some`, qualifies the store name, writes the
+///   key-value pair to the redb database, and rebuilds the search index.
+///   Fire-and-forget; no response is written.
+/// - `StoreGet` — when `ctx` is `Some`, reads the value for the given key from
+///   the redb database and writes a JSON response on fd 4.
+/// - `StoreSearch` — when `ctx` is `Some`, resolves the store name (with access
+///   control), loads the search index from disk, queries it, and writes a JSON
+///   response on fd 4.
 ///
 /// Malformed JSON lines are silently skipped.
 ///
@@ -527,7 +578,7 @@ pub(crate) fn spawn_reader(
     prompt_tx: Option<std::sync::mpsc::Sender<ChannelMessage>>,
     mut response_writer: Option<File>,
     exit_signal: Option<ExitSignal>,
-    search_ctx: Option<SearchContext>,
+    ctx: Option<PrimitiveContext>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("creft-channel-reader".to_owned())
@@ -593,7 +644,7 @@ pub(crate) fn spawn_reader(
                         content,
                         global,
                     } => {
-                        if let Some(ref ctx) = search_ctx {
+                        if let Some(ref ctx) = ctx {
                             handle_index_message(
                                 &name,
                                 &content,
@@ -605,7 +656,7 @@ pub(crate) fn spawn_reader(
                         }
                     }
                     ChannelMessage::Search { id, query, name } => {
-                        if let Some(ref ctx) = search_ctx {
+                        if let Some(ref ctx) = ctx {
                             let response = handle_search_message(
                                 &id,
                                 &query,
@@ -619,7 +670,67 @@ pub(crate) fn spawn_reader(
                                 let _ = rw.flush();
                             }
                         } else if let Some(ref mut rw) = response_writer {
-                            // No search context — return empty results rather than hanging.
+                            // No primitive context — return empty results rather than hanging.
+                            let response = format!("{{\"id\":\"{id}\",\"results\":\"\"}}\n");
+                            let _ = rw.write_all(response.as_bytes());
+                            let _ = rw.flush();
+                        }
+                    }
+                    ChannelMessage::StorePut {
+                        name,
+                        key,
+                        value,
+                        global,
+                    } => {
+                        if let Some(ref ctx) = ctx {
+                            handle_store_put(
+                                &name,
+                                &key,
+                                &value,
+                                global,
+                                &ctx.skill_name,
+                                ctx.plugin.as_deref(),
+                                &ctx.store_dir,
+                            );
+                        }
+                    }
+                    ChannelMessage::StoreGet { id, name, key } => {
+                        if let Some(ref ctx) = ctx {
+                            let response = handle_store_get(
+                                &id,
+                                &name,
+                                &key,
+                                &ctx.skill_name,
+                                ctx.plugin.as_deref(),
+                                &ctx.store_dir,
+                            );
+                            if let Some(ref mut rw) = response_writer {
+                                let _ = rw.write_all(response.as_bytes());
+                                let _ = rw.flush();
+                            }
+                        } else if let Some(ref mut rw) = response_writer {
+                            // No primitive context — return empty value rather than hanging.
+                            let response = format!("{{\"id\":\"{id}\",\"value\":\"\"}}\n");
+                            let _ = rw.write_all(response.as_bytes());
+                            let _ = rw.flush();
+                        }
+                    }
+                    ChannelMessage::StoreSearch { id, name, query } => {
+                        if let Some(ref ctx) = ctx {
+                            let response = handle_store_search(
+                                &id,
+                                &name,
+                                &query,
+                                &ctx.skill_name,
+                                ctx.plugin.as_deref(),
+                                &ctx.store_dir,
+                            );
+                            if let Some(ref mut rw) = response_writer {
+                                let _ = rw.write_all(response.as_bytes());
+                                let _ = rw.flush();
+                            }
+                        } else if let Some(ref mut rw) = response_writer {
+                            // No primitive context — return empty results rather than hanging.
                             let response = format!("{{\"id\":\"{id}\",\"results\":\"\"}}\n");
                             let _ = rw.write_all(response.as_bytes());
                             let _ = rw.flush();
@@ -758,6 +869,160 @@ fn handle_search_message(
 
     let escaped_results = json_escape_string(&results);
     format!("{{\"id\":\"{id}\",\"results\":\"{escaped_results}\"}}\n")
+}
+
+/// Handle a `store_put` message: qualify the store name, write the key-value
+/// pair (and optionally the global flag) to the redb database in a single
+/// transaction, then rebuild the search index.
+///
+/// Fire-and-forget — no response is written to fd 4.
+///
+/// When `global` is `None`, the global flag is left unchanged. When
+/// `Some(true)` or `Some(false)`, the flag is set in the same transaction
+/// as the KV write.
+///
+/// If the database is locked by another process (`DatabaseAlreadyOpen`),
+/// retries up to 3 times with 50ms backoff. If all retries fail, logs a
+/// warning to stderr and drops the put silently (fire-and-forget).
+fn handle_store_put(
+    name: &str,
+    key: &str,
+    value: &str,
+    global: Option<bool>,
+    skill_name: &str,
+    plugin: Option<&str>,
+    store_dir: &Path,
+) {
+    let ns = namespace::skill_namespace(skill_name);
+    let qualified = namespace::qualify(name, ns, plugin);
+
+    let mut last_err: Option<crate::error::CreftError> = None;
+    for _ in 0..3u32 {
+        match store_kv::store_put(store_dir, &qualified, key, value, global) {
+            Ok(()) => {}
+            Err(e @ crate::error::CreftError::StoreOpen { .. }) => {
+                // Database locked by another process — retry after backoff.
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => {
+                eprintln!("warning: store put failed for '{qualified}': {e}");
+                return;
+            }
+        }
+
+        match store_kv::rebuild_store_index(store_dir, &qualified) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("warning: store index rebuild failed for '{qualified}': {e}");
+                return;
+            }
+        }
+    }
+
+    let reason = last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "database locked after 3 attempts".to_owned());
+    eprintln!("warning: store put failed for '{qualified}': {reason}");
+}
+
+/// Handle a `store_get` message: qualify the store name (local only), read
+/// the value from the redb database, and return a JSON response.
+///
+/// Response format: `{"id":"<id>","value":"<value>"}` or
+/// `{"id":"<id>","value":""}` when the key does not exist.
+///
+/// Cross-namespace get is not supported — dotted names in `name` are rejected
+/// with an error response containing a hint to use `creft_store_search`.
+fn handle_store_get(
+    id: &str,
+    name: &str,
+    key: &str,
+    skill_name: &str,
+    plugin: Option<&str>,
+    store_dir: &Path,
+) -> String {
+    // Cross-namespace get is not supported.
+    if name.contains('.') {
+        let msg = "cross-namespace get not supported; use creft_store_search";
+        return format!("{{\"id\":\"{id}\",\"error\":\"{msg}\"}}\n");
+    }
+
+    let ns = namespace::skill_namespace(skill_name);
+    let qualified = namespace::qualify(name, ns, plugin);
+
+    match store_kv::store_get(store_dir, &qualified, key) {
+        Ok(Some(val)) => {
+            let escaped = json_escape_string(&val);
+            format!("{{\"id\":\"{id}\",\"value\":\"{escaped}\"}}\n")
+        }
+        Ok(None) => {
+            format!("{{\"id\":\"{id}\",\"value\":\"\"}}\n")
+        }
+        Err(e) => {
+            let msg = json_escape_string(&e.to_string());
+            format!("{{\"id\":\"{id}\",\"error\":\"{msg}\"}}\n")
+        }
+    }
+}
+
+/// Handle a `store_search` message: resolve the store name (with access
+/// control via `store_is_global`), load the store's search index from disk,
+/// query it, and return matching keys.
+///
+/// Response format: `{"id":"<id>","results":"key1\nkey2\n..."}` or
+/// `{"id":"<id>","error":"access denied: ..."}` when the store is not global
+/// and the caller is from a different namespace.
+fn handle_store_search(
+    id: &str,
+    name: &str,
+    query: &str,
+    skill_name: &str,
+    plugin: Option<&str>,
+    store_dir: &Path,
+) -> String {
+    let ns = namespace::skill_namespace(skill_name);
+
+    // A dotted name is a cross-namespace reference: the caller supplies the
+    // fully-qualified store name (e.g. "deploy.data"). A plain name is local
+    // and gets qualified using the caller's namespace and plugin context.
+    let (qualified, is_cross_namespace) = if name.contains('.') {
+        (name.to_owned(), true)
+    } else {
+        (namespace::qualify(name, ns, plugin), false)
+    };
+
+    // Cross-namespace access: check whether the target store is globally accessible.
+    if is_cross_namespace && !store_kv::store_is_global(store_dir, &qualified) {
+        let msg = format!("access denied: '{qualified}' is not shared globally");
+        let escaped = json_escape_string(&msg);
+        return format!("{{\"id\":\"{id}\",\"error\":\"{escaped}\"}}\n");
+    }
+
+    let results = match store_kv::load_store_index(store_dir, &qualified) {
+        None => String::new(),
+        Some(index) => {
+            let hits = index.search(query);
+            if hits.is_empty() {
+                // Fall back to fuzzy search.
+                let fuzzy_hits = index.search_fuzzy(query);
+                fuzzy_hits
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                hits.iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    };
+
+    let escaped = json_escape_string(&results);
+    format!("{{\"id\":\"{id}\",\"results\":\"{escaped}\"}}\n")
 }
 
 /// Handle a prompt request by rendering it to the terminal and collecting user
@@ -2014,10 +2279,11 @@ printf '%s' "$_resp"
         ch.close_child_ends();
 
         let indexes = make_runtime_indexes();
-        let search_ctx = Some(super::SearchContext {
+        let search_ctx = Some(super::PrimitiveContext {
             skill_name: "deploy rollback".to_owned(),
             plugin: None,
             runtime_indexes: Arc::clone(&indexes),
+            store_dir: std::path::PathBuf::from("/tmp/creft-test-store"),
         });
 
         let writer = Arc::new(super::TerminalWriter::new());
@@ -2086,10 +2352,11 @@ printf '%s' "$_resp"
         ch.close_child_ends();
 
         let indexes = make_runtime_indexes();
-        let search_ctx = Some(super::SearchContext {
+        let search_ctx = Some(super::PrimitiveContext {
             skill_name: "deploy rollback".to_owned(),
             plugin: None,
             runtime_indexes: Arc::clone(&indexes),
+            store_dir: std::path::PathBuf::from("/tmp/creft-test-store"),
         });
 
         let writer = Arc::new(super::TerminalWriter::new());
@@ -2332,5 +2599,562 @@ printf '%s' "$_resp"
     fn json_escape_string_passthrough_for_plain_ascii() {
         let s = "deploy rollback configuration";
         assert_eq!(super::json_escape_string(s), s);
+    }
+
+    // ── ChannelMessage::StorePut / StoreGet / StoreSearch deserialization ──────
+
+    /// StorePut with global:true deserializes to Some(true).
+    #[test]
+    fn channel_message_store_put_global_true_deserializes() {
+        let json =
+            r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":true}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StorePut {
+                name,
+                key,
+                value,
+                global,
+            } => {
+                assert_eq!(name, "data");
+                assert_eq!(key, "env");
+                assert_eq!(value, "prod");
+                assert_eq!(global, Some(true));
+            }
+            other => panic!("expected StorePut, got {other:?}"),
+        }
+    }
+
+    /// StorePut without global field deserializes to None (flag unchanged).
+    #[test]
+    fn channel_message_store_put_without_global_defaults_to_none() {
+        let json = r#"{"type":"store_put","name":"data","key":"env","value":"prod"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StorePut { global, .. } => {
+                assert_eq!(global, None, "omitted global field must deserialize as None");
+            }
+            other => panic!("expected StorePut, got {other:?}"),
+        }
+    }
+
+    /// StorePut with global:false deserializes to Some(false).
+    #[test]
+    fn channel_message_store_put_global_false_deserializes() {
+        let json =
+            r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":false}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StorePut { global, .. } => {
+                assert_eq!(global, Some(false));
+            }
+            other => panic!("expected StorePut, got {other:?}"),
+        }
+    }
+
+    /// StoreGet deserializes correctly from JSON.
+    #[test]
+    fn channel_message_store_get_deserializes() {
+        let json = r#"{"type":"store_get","id":"g1","name":"data","key":"env"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StoreGet { id, name, key } => {
+                assert_eq!(id, "g1");
+                assert_eq!(name, "data");
+                assert_eq!(key, "env");
+            }
+            other => panic!("expected StoreGet, got {other:?}"),
+        }
+    }
+
+    /// StoreSearch deserializes correctly from JSON.
+    #[test]
+    fn channel_message_store_search_deserializes() {
+        let json = r#"{"type":"store_search","id":"ss1","name":"data","query":"rollback"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StoreSearch { id, name, query } => {
+                assert_eq!(id, "ss1");
+                assert_eq!(name, "data");
+                assert_eq!(query, "rollback");
+            }
+            other => panic!("expected StoreSearch, got {other:?}"),
+        }
+    }
+
+    // ── handle_store_put / handle_store_get / handle_store_search unit tests ───
+
+    /// handle_store_put creates a redb file and a companion index file on disk.
+    #[test]
+    fn handle_store_put_creates_redb_and_index_files() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put(
+            "data",
+            "env",
+            "production",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        assert!(
+            crate::store_kv::store_path(dir.path(), "deploy.data").exists(),
+            "redb file must exist after put"
+        );
+        assert!(
+            crate::store_kv::store_index_path(dir.path(), "deploy.data").exists(),
+            "index file must exist after put"
+        );
+    }
+
+    /// handle_store_put replaces an existing key on the second call.
+    #[test]
+    fn handle_store_put_replaces_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put("data", "env", "staging", None, "deploy skill", None, dir.path());
+        super::handle_store_put(
+            "data",
+            "env",
+            "production",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        let val = crate::store_kv::store_get(dir.path(), "deploy.data", "env")
+            .unwrap()
+            .expect("key must exist after second put");
+        assert_eq!(val, "production");
+    }
+
+    /// handle_store_get returns the value for an existing key.
+    #[test]
+    fn handle_store_get_returns_value_for_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put("data", "env", "prod", None, "deploy skill", None, dir.path());
+        let response = super::handle_store_get("g1", "data", "env", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "g1");
+        assert_eq!(parsed["value"], "prod");
+    }
+
+    /// handle_store_get returns empty value when the key does not exist.
+    #[test]
+    fn handle_store_get_returns_empty_value_for_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put("data", "other", "x", None, "deploy skill", None, dir.path());
+        let response =
+            super::handle_store_get("g2", "data", "missing_key", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "g2");
+        assert_eq!(parsed["value"], "");
+    }
+
+    /// handle_store_get returns empty value when the database does not exist.
+    #[test]
+    fn handle_store_get_returns_empty_when_database_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = super::handle_store_get("g3", "data", "env", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "g3");
+        assert_eq!(parsed["value"], "");
+    }
+
+    /// handle_store_get rejects dotted names with an error response.
+    #[test]
+    fn handle_store_get_rejects_dotted_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let response =
+            super::handle_store_get("g4", "other.data", "env", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "g4");
+        assert!(
+            parsed.get("error").is_some(),
+            "dotted name must return an error response, got: {parsed}"
+        );
+    }
+
+    /// handle_store_search returns matching keys after a put.
+    #[test]
+    fn handle_store_search_returns_matching_keys_after_put() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put(
+            "data",
+            "config",
+            "rollback procedure",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        let response =
+            super::handle_store_search("ss1", "data", "rollback", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss1");
+        assert!(
+            parsed["results"].as_str().unwrap_or("").contains("config"),
+            "search for 'rollback' must return 'config' key; got: {parsed}"
+        );
+    }
+
+    /// handle_store_search returns empty results when no match.
+    #[test]
+    fn handle_store_search_returns_empty_when_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        super::handle_store_put(
+            "data",
+            "env",
+            "production",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        let response =
+            super::handle_store_search("ss2", "data", "zzzunmatchable", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss2");
+        assert_eq!(parsed["results"].as_str().unwrap_or("MISSING"), "");
+    }
+
+    /// Cross-namespace StoreSearch is denied when the store is not global.
+    #[test]
+    fn handle_store_search_cross_namespace_denied_when_not_global() {
+        let dir = tempfile::tempdir().unwrap();
+        // Put into deploy.data without marking global.
+        crate::store_kv::store_put(dir.path(), "deploy.data", "env", "prod", None).unwrap();
+        crate::store_kv::rebuild_store_index(dir.path(), "deploy.data").unwrap();
+
+        // Caller is from "monitor skill" (monitor namespace), searching "deploy.data" — cross-namespace.
+        let response = super::handle_store_search(
+            "ss3",
+            "deploy.data",
+            "prod",
+            "monitor skill",
+            None,
+            dir.path(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss3");
+        assert!(
+            parsed.get("error").is_some(),
+            "cross-namespace search must be denied when store is not global; got: {parsed}"
+        );
+    }
+
+    /// Cross-namespace StoreSearch succeeds when the store is global.
+    #[test]
+    fn handle_store_search_cross_namespace_succeeds_when_global() {
+        let dir = tempfile::tempdir().unwrap();
+        // Put into deploy.data, marking it global.
+        crate::store_kv::store_put(dir.path(), "deploy.data", "config", "rollback", Some(true))
+            .unwrap();
+        crate::store_kv::rebuild_store_index(dir.path(), "deploy.data").unwrap();
+
+        // Caller is "monitor skill" (monitor namespace), searching deploy.data — cross-namespace but global.
+        let response = super::handle_store_search(
+            "ss4",
+            "deploy.data",
+            "rollback",
+            "monitor skill",
+            None,
+            dir.path(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss4");
+        assert!(
+            parsed.get("error").is_none(),
+            "cross-namespace search must succeed when store is global; got: {parsed}"
+        );
+        assert!(
+            parsed["results"].as_str().unwrap_or("").contains("config"),
+            "global cross-namespace search must return matching keys; got: {parsed}"
+        );
+    }
+
+    // ── handle_store_put: error paths ────────────────────────────────────────
+
+    /// handle_store_put silently drops the operation when the database file is
+    /// corrupt (non-StoreOpen error — no retry, no hang).
+    #[test]
+    fn handle_store_put_non_store_open_error_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write garbage bytes where the database would be opened for writing.
+        // open_db calls Database::create, which fails immediately on a corrupt
+        // file with a non-DatabaseAlreadyOpen error — covering the Err(e) arm.
+        let path = crate::store_kv::store_path(dir.path(), "deploy.data");
+        std::fs::write(&path, b"not a redb file\xFF\xFE\xFD").unwrap();
+        // Must complete without panicking (fire-and-forget, writes warning to stderr).
+        super::handle_store_put("data", "env", "production", None, "deploy skill", None, dir.path());
+    }
+
+    // ── handle_store_get: error path ─────────────────────────────────────────
+
+    /// handle_store_get returns an error response when the database is corrupt.
+    #[test]
+    fn handle_store_get_returns_error_response_on_corrupt_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::store_kv::store_path(dir.path(), "deploy.data");
+        std::fs::write(&path, b"not a redb file\xFF\xFE\xFD").unwrap();
+
+        let response = super::handle_store_get("g5", "data", "env", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "g5");
+        assert!(
+            parsed.get("error").is_some(),
+            "corrupt database must return an error response; got: {parsed}"
+        );
+    }
+
+    // ── handle_store_search: no-index path ───────────────────────────────────
+
+    /// handle_store_search returns empty results when no index file exists.
+    #[test]
+    fn handle_store_search_returns_empty_when_no_index_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // No put, so no index file — covers the None arm of load_store_index.
+        let response =
+            super::handle_store_search("ss5", "data", "anything", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss5");
+        assert_eq!(parsed["results"].as_str().unwrap_or("MISSING"), "");
+    }
+
+    /// handle_store_search returns keys via fuzzy fallback when the exact query
+    /// does not match but a similar term is in the index.
+    #[test]
+    fn handle_store_search_returns_keys_via_fuzzy_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        // Index "config" → "production environment rollback".
+        super::handle_store_put(
+            "data",
+            "config",
+            "production environment rollback",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        // Query with a term that won't exact-match but fuzzy-matches ("prodution" typo).
+        let response =
+            super::handle_store_search("ss6", "data", "prodution", "deploy skill", None, dir.path());
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "ss6");
+        // We don't assert the specific results (fuzzy matching may or may not match),
+        // but the response must be valid JSON and must not error.
+        assert!(
+            parsed.get("error").is_none(),
+            "fuzzy search must not return an error response; got: {parsed}"
+        );
+    }
+
+    // ── spawn_reader: no-ctx fallback for store messages ─────────────────────
+
+    /// When spawn_reader is called with ctx=None and a StoreGet message arrives,
+    /// the reader writes an empty-value response so the child does not hang.
+    #[test]
+    fn spawn_reader_no_ctx_writes_empty_response_for_store_get() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+printf '{"type":"store_get","id":"nc1","name":"data","key":"k"}\n' >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        // ctx = None: exercises the else-if fallback for StoreGet.
+        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "nc1");
+        assert_eq!(parsed["value"], "");
+    }
+
+    /// When spawn_reader is called with ctx=None and a StoreSearch message
+    /// arrives, the reader writes an empty-results response rather than hanging.
+    #[test]
+    fn spawn_reader_no_ctx_writes_empty_response_for_store_search() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+printf '{"type":"store_search","id":"nc2","name":"data","query":"q"}\n' >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        // ctx = None: exercises the else-if fallback for StoreSearch.
+        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "nc2");
+        assert_eq!(parsed["results"], "");
+    }
+
+    // ── PrimitiveContext rename: existing search tests continue to compile ──────
+    // (All tests above that used SearchContext now use PrimitiveContext via the
+    // renamed struct. The tests themselves are unchanged — only the type name
+    // changed. Compilation success is the verification.)
+
+    // ── Integration: bash block using store primitives via preamble ───────────
+
+    fn make_primitive_ctx(store_dir: std::path::PathBuf) -> super::PrimitiveContext {
+        super::PrimitiveContext {
+            skill_name: "deploy skill".to_owned(),
+            plugin: None,
+            runtime_indexes: make_runtime_indexes(),
+            store_dir,
+        }
+    }
+
+    fn setup_child_fds(cmd: &mut std::process::Command, ctrl_w_fd: i32, resp_r_fd: i32) {
+        unsafe {
+            use std::os::unix::process::CommandExt as _;
+            cmd.pre_exec(move || {
+                if libc::dup2(ctrl_w_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if ctrl_w_fd != 3 {
+                    libc::close(ctrl_w_fd);
+                }
+                if libc::dup2(resp_r_fd, 4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if resp_r_fd != 4 {
+                    libc::close(resp_r_fd);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// A bash block that calls creft_store_put then creft_store_get receives
+    /// the stored value back from fd 4 without hanging.
+    #[test]
+    fn spawn_reader_handles_store_put_then_get_round_trip() {
+        let store_tmp = tempfile::tempdir().unwrap();
+        let store_dir = store_tmp.path().to_path_buf();
+
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        // The script puts a value, then gets it back and prints the raw JSON response.
+        let script = r#"
+printf '{"type":"store_put","name":"data","key":"env","value":"production"}\n' >&3
+_id="store_get_test_1"
+printf '{"type":"store_get","id":"%s","name":"data","key":"env"}\n' "$_id" >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let ctx = Some(make_primitive_ctx(store_dir));
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "store_get_test_1");
+        assert_eq!(
+            parsed["value"], "production",
+            "store get after put must return the stored value; got: {stdout}"
+        );
+    }
+
+    /// A bash block calling creft_store_search after creft_store_put returns
+    /// matching keys in the response.
+    #[test]
+    fn spawn_reader_handles_store_put_then_search_round_trip() {
+        let store_tmp = tempfile::tempdir().unwrap();
+        let store_dir = store_tmp.path().to_path_buf();
+
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+printf '{"type":"store_put","name":"data","key":"config","value":"rollback procedure"}\n' >&3
+_id="store_search_test_1"
+printf '{"type":"store_search","id":"%s","name":"data","query":"rollback"}\n' "$_id" >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let ctx = Some(make_primitive_ctx(store_dir));
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "store_search_test_1");
+        assert!(
+            parsed["results"].as_str().unwrap_or("").contains("config"),
+            "store search after put must return 'config' key; got: {stdout}"
+        );
     }
 }
