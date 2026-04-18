@@ -156,7 +156,10 @@ pub fn save(
     // A failed rebuild does not prevent the save from succeeding.
     let ns = skill_namespace(&def.name).to_owned();
     if let Err(e) = search::store::rebuild_namespace_index(ctx, &ns, scope) {
-        eprintln!("warning: could not rebuild search index for '{}': {}", ns, e);
+        eprintln!(
+            "warning: could not rebuild search index for '{}': {}",
+            ns, e
+        );
     }
 
     Ok(def.name)
@@ -419,7 +422,10 @@ pub fn remove_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<(), Creft
     // A failed rebuild does not prevent the removal from succeeding.
     let ns = skill_namespace(name).to_owned();
     if let Err(e) = search::store::rebuild_namespace_index(ctx, &ns, scope) {
-        eprintln!("warning: could not rebuild search index for '{}': {}", ns, e);
+        eprintln!(
+            "warning: could not rebuild search index for '{}': {}",
+            ns, e
+        );
     }
 
     Ok(())
