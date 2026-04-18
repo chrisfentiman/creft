@@ -143,49 +143,36 @@ impl std::error::Error for AccessError {}
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     // ── qualify ───────────────────────────────────────────────────────────────
 
-    #[test]
-    fn qualify_local_name_in_named_namespace() {
-        assert_eq!(qualify("beta", "deploy", None), "deploy.beta");
-    }
-
-    #[test]
-    fn qualify_local_name_in_named_namespace_with_plugin() {
-        assert_eq!(qualify("beta", "deploy", Some("acme")), "acme.deploy.beta");
-    }
-
-    #[test]
-    fn qualify_local_name_in_root_namespace() {
-        assert_eq!(qualify("beta", "", None), "beta");
-    }
-
-    #[test]
-    fn qualify_local_name_in_root_namespace_with_plugin() {
-        assert_eq!(qualify("beta", "", Some("acme")), "acme.beta");
+    #[rstest]
+    #[case::named_namespace("beta", "deploy", None, "deploy.beta")]
+    #[case::named_namespace_with_plugin("beta", "deploy", Some("acme"), "acme.deploy.beta")]
+    #[case::root_namespace("beta", "", None, "beta")]
+    #[case::root_namespace_with_plugin("beta", "", Some("acme"), "acme.beta")]
+    fn qualify_produces_correct_qualified_name(
+        #[case] local_name: &str,
+        #[case] namespace: &str,
+        #[case] plugin: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(qualify(local_name, namespace, plugin), expected);
     }
 
     // ── skill_namespace ───────────────────────────────────────────────────────
 
-    #[test]
-    fn skill_namespace_extracts_first_token_from_two_part_name() {
-        assert_eq!(skill_namespace("deploy rollback"), "deploy");
-    }
-
-    #[test]
-    fn skill_namespace_returns_empty_for_single_token() {
-        assert_eq!(skill_namespace("hello"), "");
-    }
-
-    #[test]
-    fn skill_namespace_extracts_first_token_from_three_part_name() {
-        assert_eq!(skill_namespace("aws s3 copy"), "aws");
-    }
-
-    #[test]
-    fn skill_namespace_returns_empty_for_empty_string() {
-        assert_eq!(skill_namespace(""), "");
+    #[rstest]
+    #[case::two_part_name("deploy rollback", "deploy")]
+    #[case::single_token("hello", "")]
+    #[case::three_part_name("aws s3 copy", "aws")]
+    #[case::empty_string("", "")]
+    fn skill_namespace_extracts_top_level_namespace(
+        #[case] skill_name: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(skill_namespace(skill_name), expected);
     }
 
     // ── resolve — local references ────────────────────────────────────────────
