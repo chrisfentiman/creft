@@ -1,8 +1,3 @@
-// Deserialization helpers and some SearchIndex methods are used in tests and
-// by future stages (5 and 6). The dead_code lint fires here because they are
-// not yet called from binary entry points.
-#![allow(dead_code)]
-
 use super::{tokenize::tokenize, xor::Xor8Filter};
 
 /// A single document's entry in a search index.
@@ -57,6 +52,8 @@ impl SearchIndex {
     /// token per document).
     ///
     /// An empty query returns all entries.
+    // Called by tests and the upcoming --docs search implementation.
+    #[allow(dead_code)]
     pub fn search(&self, query: &str) -> Vec<&IndexEntry> {
         let tokens = tokenize(query);
         if tokens.is_empty() {
@@ -132,11 +129,15 @@ impl SearchIndex {
     }
 
     /// Number of entries in the index.
+    // Called by tests; will be used by search result rendering.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the index has no entries.
+    // Called by tests.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

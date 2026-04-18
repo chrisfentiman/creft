@@ -306,9 +306,7 @@ mod tests {
     }
 
     fn write_skill(ctx: &AppContext, name: &str, description: &str, body: &str) {
-        let content = format!(
-            "---\nname: {name}\ndescription: {description}\n---\n\n{body}"
-        );
+        let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}");
         skill_store::save(ctx, &content, false, Scope::Global).unwrap();
     }
 
@@ -411,7 +409,11 @@ mod tests {
         let index = load_index(&ctx, "deploy", Scope::Global)
             .unwrap()
             .expect("index must exist");
-        assert_eq!(index.len(), 1, "only deploy namespace skills in deploy index");
+        assert_eq!(
+            index.len(),
+            1,
+            "only deploy namespace skills in deploy index"
+        );
     }
 
     // ── rebuild_all_indexes ───────────────────────────────────────────────────
@@ -471,11 +473,7 @@ mod tests {
         let bytes = std::fs::read(dir.join("_builtin.idx")).unwrap();
         let index = SearchIndex::from_bytes(&bytes).unwrap();
 
-        let names: Vec<&str> = index
-            .search("")
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
+        let names: Vec<&str> = index.search("").iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"add"), "builtin index must contain 'add'");
     }
 
@@ -524,6 +522,62 @@ mod tests {
         assert!(
             !results.is_empty(),
             "searching 'plugin' must return at least one builtin"
+        );
+    }
+
+    // ── remove_in index rebuild ───────────────────────────────────────────────
+
+    #[test]
+    fn remove_in_rebuilds_namespace_index_without_removed_skill() {
+        let (ctx, _tmp) = make_ctx();
+        write_skill(
+            &ctx,
+            "deploy rollback",
+            "Roll back a deployment",
+            "rollback procedure steps\n",
+        );
+        write_skill(
+            &ctx,
+            "deploy push",
+            "Push a build to an environment",
+            "push artifact to environment\n",
+        );
+
+        // Explicitly rebuild so the index reflects both skills.
+        rebuild_namespace_index(&ctx, "deploy", Scope::Global).unwrap();
+
+        let index_before = load_index(&ctx, "deploy", Scope::Global)
+            .unwrap()
+            .expect("index must exist before remove");
+        assert_eq!(
+            index_before.len(),
+            2,
+            "index must contain both skills before remove"
+        );
+
+        // Remove one skill — the remove_in implementation rebuilds the index.
+        skill_store::remove_in(&ctx, "deploy rollback", Scope::Global).unwrap();
+
+        let index_after = load_index(&ctx, "deploy", Scope::Global)
+            .unwrap()
+            .expect("index must still exist after remove");
+        assert_eq!(
+            index_after.len(),
+            1,
+            "index must contain only the remaining skill after remove"
+        );
+        let names: Vec<&str> = index_after
+            .search("")
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"deploy push"),
+            "remaining skill 'deploy push' must be in the index"
+        );
+        assert!(
+            !names.contains(&"deploy rollback"),
+            "removed skill 'deploy rollback' must not be in the index"
         );
     }
 
