@@ -503,7 +503,8 @@ mod tests {
     fn round_trip_preserves_false_positive_behavior() {
         let construction: Vec<u64> = (0..50).map(|i| i * 999_983).collect();
         let filter = Xor8Filter::build(&construction);
-        let restored = Xor8Filter::from_bytes(&filter.to_bytes()).unwrap();
+        let restored = Xor8Filter::from_bytes(&filter.to_bytes())
+            .expect("round-trip deserialization should succeed");
 
         let probes: Vec<u64> = (1..=10_000).map(|i| i * 999_983 + 1).collect();
         let fp_before: Vec<u64> = probes
