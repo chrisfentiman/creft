@@ -187,11 +187,15 @@ fn try_build(keys: &[u64], seed: u64, block_length: u32) -> Option<Vec<u8>> {
 
     // Peeling worklists: one per block so we can process block-local singletons.
     let bl = block_length as usize;
-    let mut q0: Vec<u32> = (0..bl as u32).filter(|&i| sets[i as usize].count == 1).collect();
-    let mut q1: Vec<u32> =
-        (bl as u32..(2 * bl) as u32).filter(|&i| sets[i as usize].count == 1).collect();
-    let mut q2: Vec<u32> =
-        ((2 * bl) as u32..(3 * bl) as u32).filter(|&i| sets[i as usize].count == 1).collect();
+    let mut q0: Vec<u32> = (0..bl as u32)
+        .filter(|&i| sets[i as usize].count == 1)
+        .collect();
+    let mut q1: Vec<u32> = (bl as u32..(2 * bl) as u32)
+        .filter(|&i| sets[i as usize].count == 1)
+        .collect();
+    let mut q2: Vec<u32> = ((2 * bl) as u32..(3 * bl) as u32)
+        .filter(|&i| sets[i as usize].count == 1)
+        .collect();
 
     let mut stack: Vec<StackEntry> = Vec::with_capacity(n);
 
@@ -368,7 +372,10 @@ mod tests {
         for range in [1u32, 7, 100, 1000, 65535] {
             for hash in [0u32, 1, 12345, u32::MAX] {
                 let r = reduce(hash, range);
-                assert!(r < range, "reduce({hash}, {range}) = {r} out of [0, {range})");
+                assert!(
+                    r < range,
+                    "reduce({hash}, {range}) = {r} out of [0, {range})"
+                );
             }
         }
     }
@@ -404,7 +411,10 @@ mod tests {
         let keys = [1u64, 2, 3, 4, 5];
         let filter = Xor8Filter::build(&keys);
         for &k in &keys {
-            assert!(filter.contains(k), "construction key {k} not found in filter");
+            assert!(
+                filter.contains(k),
+                "construction key {k} not found in filter"
+            );
         }
     }
 
@@ -499,8 +509,11 @@ mod tests {
         let restored = Xor8Filter::from_bytes(&filter.to_bytes()).unwrap();
 
         let probes: Vec<u64> = (1..=10_000).map(|i| i * 999_983 + 1).collect();
-        let fp_before: Vec<u64> =
-            probes.iter().copied().filter(|&k| filter.contains(k)).collect();
+        let fp_before: Vec<u64> = probes
+            .iter()
+            .copied()
+            .filter(|&k| filter.contains(k))
+            .collect();
         let fp_after: Vec<u64> = probes
             .iter()
             .copied()

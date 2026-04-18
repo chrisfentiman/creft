@@ -1,6 +1,7 @@
 //! Indexed search primitives for creft skill documentation.
 //!
-//! Stage 1 exports the Xor8 filter only. Later stages add tokenization,
-//! index serialization, and disk-based index lifecycle.
+//! Currently provides the [`xor::Xor8Filter`] probabilistic set-membership
+//! filter. Tokenization, index serialization, and disk-based index lifecycle
+//! are planned additions.
 
 pub(crate) mod xor;
