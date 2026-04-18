@@ -77,12 +77,8 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
             print!("{}", help::render_docs(which));
             Ok(())
         }
-        Some(cli::Parsed::DocsSearch(which, query)) => {
-            dispatch_docs_search(ctx, which, &query)
-        }
-        Some(cli::Parsed::DocsSearchAll(query)) => {
-            dispatch_docs_search_all(ctx, &query)
-        }
+        Some(cli::Parsed::DocsSearch(which, query)) => dispatch_docs_search(ctx, which, &query),
+        Some(cli::Parsed::DocsSearchAll(query)) => dispatch_docs_search_all(ctx, &query),
         Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, false, vec![]),
         Some(cli::Parsed::Version) => {
             println!("{}", help::render_version());

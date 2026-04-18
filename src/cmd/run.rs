@@ -14,27 +14,34 @@ use crate::{frontmatter, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-    let has_docs = args.iter().any(|a| a == "--docs" || a.starts_with("--docs="));
+    let has_docs = args
+        .iter()
+        .any(|a| a == "--docs" || a.starts_with("--docs="));
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
 
     // Extract a query from `--docs <value>` or `--docs=<value>` before filtering.
-    let docs_query = extract_docs_query(args);
+    // The returned index (if any) is the position of the query value in `args` for
+    // the space-separated `--docs value` form — that position must be excluded from
+    // `filtered` or the query value would be mistaken for part of the command name.
+    let (docs_query, docs_query_index) = extract_docs_query(args);
 
     // Filter out meta-flags before resolving command name so they are not
     // mistakenly matched as part of the command name or passed as remaining args.
     // If you add a filter here, update RESERVED_FLAG_NAMES in validate.rs.
     let filtered: Vec<String> = args
         .iter()
-        .filter(|a| {
+        .enumerate()
+        .filter(|(i, a)| {
             *a != "--help"
                 && *a != "-h"
                 && !a.starts_with("--docs")
                 && *a != "--dry-run"
                 && *a != "--verbose"
                 && *a != "-v"
+                && Some(*i) != docs_query_index
         })
-        .cloned()
+        .map(|(_, a)| a.clone())
         .collect();
 
     if has_docs {
@@ -254,26 +261,31 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
 
 /// Extract the search query from `--docs <value>` or `--docs=<value>` in the raw arg list.
 ///
-/// Returns `None` when `--docs` is present but bare (no query follows) or
-/// when the value following `--docs` starts with `-` (it is another flag,
-/// not a query).
-fn extract_docs_query(args: &[String]) -> Option<String> {
+/// Returns `(query, consumed_index)` where:
+/// - `query` is `None` when `--docs` is bare or the value following `--docs` starts with `-`.
+/// - `consumed_index` is `Some(i)` for the space-separated form (`--docs value`), where `i` is
+///   the index of the query value in `args`. This index must be excluded from the filtered arg
+///   list so the query value is not mistaken for part of the command name. For the equals form
+///   (`--docs=value`), the value is part of the `--docs=` arg itself and `consumed_index` is
+///   `None`.
+fn extract_docs_query(args: &[String]) -> (Option<String>, Option<usize>) {
     for (i, arg) in args.iter().enumerate() {
-        // `--docs=value` form.
+        // `--docs=value` form: value is embedded in the same arg, no separate index to skip.
         if let Some(query) = arg.strip_prefix("--docs=")
             && !query.is_empty()
         {
-            return Some(query.to_owned());
+            return (Some(query.to_owned()), None);
         }
-        // `--docs value` form: check the next arg.
+        // `--docs value` form: the query is the next arg; record its index so the caller
+        // can exclude it from command resolution.
         if arg == "--docs"
             && let Some(next) = args.get(i + 1)
             && !next.starts_with('-')
         {
-            return Some(next.clone());
+            return (Some(next.clone()), Some(i + 1));
         }
     }
-    None
+    (None, None)
 }
 
 /// Search the namespace index for a skill and render matching entries.
@@ -670,7 +682,7 @@ mod tests {
         yansi::enable();
     }
 
-    // ── extract_docs_query ────────────────────────────────────────────────────
+    // -- extract_docs_query ---------------------------------------------------
 
     use super::extract_docs_query;
 
@@ -680,37 +692,102 @@ mod tests {
 
     #[test]
     fn extract_docs_query_returns_none_when_no_docs_flag() {
-        assert!(extract_docs_query(&strs(&["deploy", "rollback"])).is_none());
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "rollback"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
     }
 
     #[test]
     fn extract_docs_query_returns_none_for_bare_docs_flag() {
-        assert!(extract_docs_query(&strs(&["deploy", "--docs"])).is_none());
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
     }
 
     #[test]
-    fn extract_docs_query_returns_value_after_docs() {
-        let result = extract_docs_query(&strs(&["deploy", "--docs", "rollback"]));
-        assert_eq!(result.as_deref(), Some("rollback"));
+    fn extract_docs_query_space_form_returns_value_and_index() {
+        // `--docs rollback`: query is "rollback" at index 2.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "rollback"]));
+        assert_eq!(query.as_deref(), Some("rollback"));
+        assert_eq!(idx, Some(2));
     }
 
     #[test]
-    fn extract_docs_query_returns_value_from_equals_form() {
-        let result = extract_docs_query(&strs(&["deploy", "--docs=rollback"]));
-        assert_eq!(result.as_deref(), Some("rollback"));
+    fn extract_docs_query_equals_form_returns_value_without_index() {
+        // `--docs=rollback`: query is embedded in the flag, no separate index consumed.
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs=rollback"]));
+        assert_eq!(query.as_deref(), Some("rollback"));
+        assert!(idx.is_none());
     }
 
     #[test]
     fn extract_docs_query_returns_none_when_next_arg_is_flag() {
         // `--docs --force` — the next arg starts with '-', so it's not a query.
-        let result = extract_docs_query(&strs(&["deploy", "--docs", "--force"]));
-        assert!(result.is_none());
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "--force"]));
+        assert!(query.is_none());
+        assert!(idx.is_none());
     }
 
     #[test]
     fn extract_docs_query_handles_multi_word_style_query() {
         // The shell typically presents this as a single arg.
-        let result = extract_docs_query(&strs(&["deploy", "--docs", "roll back"]));
-        assert_eq!(result.as_deref(), Some("roll back"));
+        let (query, idx) = extract_docs_query(&strs(&["deploy", "--docs", "roll back"]));
+        assert_eq!(query.as_deref(), Some("roll back"));
+        assert_eq!(idx, Some(2));
+    }
+
+    // -- space-separated form: query value excluded from command resolution ----
+
+    #[test]
+    fn space_form_query_excluded_from_filtered_args() {
+        // When args are ["deploy", "--docs", "rollback"], the filtered vec must
+        // contain only ["deploy"] — not ["deploy", "rollback"] — so that command
+        // resolution looks up "deploy", not "deploy rollback".
+        let args = strs(&["deploy", "--docs", "rollback"]);
+        let (docs_query, docs_query_index) = extract_docs_query(&args);
+        assert_eq!(docs_query.as_deref(), Some("rollback"));
+
+        let filtered: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                *a != "--help"
+                    && *a != "-h"
+                    && !a.starts_with("--docs")
+                    && *a != "--dry-run"
+                    && *a != "--verbose"
+                    && *a != "-v"
+                    && Some(*i) != docs_query_index
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+
+        assert_eq!(filtered, vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn equals_form_query_not_in_filtered_args() {
+        // `--docs=rollback` is excluded because it starts with `--docs`.
+        // No separate query arg to skip.
+        let args = strs(&["deploy", "--docs=rollback"]);
+        let (docs_query, docs_query_index) = extract_docs_query(&args);
+        assert_eq!(docs_query.as_deref(), Some("rollback"));
+
+        let filtered: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                *a != "--help"
+                    && *a != "-h"
+                    && !a.starts_with("--docs")
+                    && *a != "--dry-run"
+                    && *a != "--verbose"
+                    && *a != "-v"
+                    && Some(*i) != docs_query_index
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+
+        assert_eq!(filtered, vec!["deploy".to_string()]);
     }
 }

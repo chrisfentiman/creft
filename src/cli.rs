@@ -176,10 +176,7 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
 /// call to `parser.next()`. Calling `parser.optional_value()` first drains any
 /// `=value` that lexopt stored internally — failing to do so would cause the
 /// subsequent `parser.next()` to return an `UnexpectedValue` error.
-fn docs_or_search(
-    parser: &mut lexopt::Parser,
-    which: BuiltinHelp,
-) -> Result<Parsed, CliError> {
+fn docs_or_search(parser: &mut lexopt::Parser, which: BuiltinHelp) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
     // Check for `--docs=query` form first.
