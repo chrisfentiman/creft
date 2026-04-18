@@ -1,3 +1,8 @@
+// Deserialization helpers and some SearchIndex methods are used in tests and
+// by future stages (5 and 6). The dead_code lint fires here because they are
+// not yet called from binary entry points.
+#![allow(dead_code)]
+
 use super::{tokenize::tokenize, xor::Xor8Filter};
 
 /// A single document's entry in a search index.

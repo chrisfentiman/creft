@@ -187,6 +187,14 @@ impl AppContext {
         Ok(self.resolve_root(Scope::Global)?.join("settings.json"))
     }
 
+    /// Index directory for the given scope.
+    ///
+    /// Returns `<scope_root>/indexes/`. The directory is not created here;
+    /// callers create it lazily before writing.
+    pub fn index_dir_for(&self, scope: Scope) -> Result<PathBuf, CreftError> {
+        Ok(self.resolve_root(scope)?.join("indexes"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)
@@ -246,7 +254,7 @@ pub enum NamespaceEntry {
 }
 
 /// Where a skill or package is stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Local `.creft/` directory (project-level, discovered by walking up from CWD).
     Local,

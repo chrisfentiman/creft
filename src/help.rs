@@ -649,6 +649,65 @@ pub(crate) enum BuiltinHelp {
     Completions,
 }
 
+impl BuiltinHelp {
+    /// The CLI command name for this built-in, matching the entry name stored in `_builtin.idx`.
+    ///
+    /// Used by `DocsSearch` dispatch to filter index results to the specific
+    /// built-in the user queried, and by `rebuild_builtin_index` to name
+    /// entries in the index.
+    pub(crate) fn cli_name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::List => "list",
+            Self::Show => "show",
+            Self::Remove => "remove",
+            Self::Plugin => "plugin",
+            Self::PluginInstall => "plugin install",
+            Self::PluginUpdate => "plugin update",
+            Self::PluginUninstall => "plugin uninstall",
+            Self::PluginActivate => "plugin activate",
+            Self::PluginDeactivate => "plugin deactivate",
+            Self::PluginList => "plugin list",
+            Self::PluginSearch => "plugin search",
+            Self::Settings => "settings",
+            Self::SettingsShow => "settings show",
+            Self::SettingsSet => "settings set",
+            Self::Up => "up",
+            Self::Init => "init",
+            Self::Doctor => "doctor",
+            Self::Completions => "completions",
+        }
+    }
+
+    /// All `BuiltinHelp` variants in declaration order.
+    ///
+    /// Used by the index lifecycle to iterate over all built-in commands
+    /// when building `_builtin.idx`.
+    pub(crate) fn all_variants() -> &'static [BuiltinHelp] {
+        &[
+            Self::Add,
+            Self::List,
+            Self::Show,
+            Self::Remove,
+            Self::Plugin,
+            Self::PluginInstall,
+            Self::PluginUpdate,
+            Self::PluginUninstall,
+            Self::PluginActivate,
+            Self::PluginDeactivate,
+            Self::PluginList,
+            Self::PluginSearch,
+            Self::Settings,
+            Self::SettingsShow,
+            Self::SettingsSet,
+            Self::Up,
+            Self::Init,
+            Self::Doctor,
+            Self::Completions,
+        ]
+    }
+}
+
 /// Render the short help page for a built-in command (`--help`).
 ///
 /// Returns 10-15 lines: one-line description, usage, a single example, and a
