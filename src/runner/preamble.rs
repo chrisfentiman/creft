@@ -73,6 +73,33 @@ creft_exit() {
   printf '{"type":"exit","code":%s}\n' "$_code" >&3 2>/dev/null
   exit 0
 }
+creft_index() {
+  local _name="$1"
+  local _content="$2"
+  local _global="false"
+  if [ -n "$3" ]; then
+    case "$3" in
+      *global*true*|*global*1*) _global="true" ;;
+    esac
+  fi
+  printf '{"type":"index","name":"%s","content":"%s","global":%s}\n' \
+    "$(_creft_escape "$_name")" "$(_creft_escape "$_content")" "$_global" >&3 2>/dev/null
+}
+creft_search() {
+  local _creft_id
+  _creft_id="search_$$_$RANDOM"
+  local _query="$1"
+  local _name="$2"
+  printf '{"type":"search","id":"%s","query":"%s","name":"%s"}\n' \
+    "$_creft_id" \
+    "$(_creft_escape "$_query")" \
+    "$(_creft_escape "$_name")" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4
+  printf '%s' "$_creft_response" \
+    | sed 's/.*"results":"\([^"]*\)".*/\1/' \
+    | sed 's/\\n/\n/g'
+}
 # -- end creft runtime bindings --
 "#;
 
@@ -117,6 +144,25 @@ def creft_exit(code=0):
     import sys
     sys.stdout.flush()
     sys.exit(0)
+def creft_index(name, content, options=None):
+    global_flag = False
+    if isinstance(options, dict):
+        global_flag = bool(options.get("global", False))
+    _creft_write({"type": "index", "name": str(name), "content": str(content), "global": global_flag})
+def creft_search(query, name):
+    global _creft_fd4
+    _id = f"search_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
+    _creft_write({"type": "search", "id": _id, "query": str(query), "name": str(name)})
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _line = _creft_fd4.readline().strip()
+        _resp = _creft_json.loads(_line)
+        if "error" in _resp:
+            return ""
+        return _resp.get("results", "").replace("\\n", "\n")
+    except (OSError, ValueError):
+        return ""
 # -- end creft runtime bindings --
 "#;
 
@@ -164,6 +210,22 @@ function creft_exit(code) {
   } else {
     process.exit(0);
   }
+}
+function creft_index(name, content, options) {
+  const global_flag = (options && typeof options.global === 'boolean') ? options.global : false;
+  _creft_write({type:'index',name:String(name),content:String(content),global:global_flag});
+}
+function creft_search(query, name) {
+  if (!_creft_fs) return '';
+  const id = `search_${process.pid}_${Math.random().toString(36).slice(2)}`;
+  _creft_write({type:'search',id,query:String(query),name:String(name)});
+  const buf = Buffer.alloc(4096);
+  const n = _creft_fs.readSync(4, buf, 0, buf.length);
+  try {
+    const resp = JSON.parse(buf.slice(0, n).toString().trim());
+    if (resp.error) return '';
+    return (resp.results || '').replace(/\\n/g, '\n');
+  } catch(e) { return ''; }
 }
 // -- end creft runtime bindings --
 "#;
@@ -363,6 +425,108 @@ mod tests {
         assert!(
             p.contains("typeof progress === 'number'"),
             "node creft_status must guard progress with typeof check"
+        );
+    }
+
+    // ── creft_index / creft_search presence ──────────────────────────────────
+
+    /// All three preambles expose creft_index.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn all_preambles_contain_creft_index(#[case] lang: &str) {
+        let p = for_language(lang).unwrap_or_else(|| panic!("{lang} must have a preamble"));
+        assert!(
+            p.contains("creft_index"),
+            "{lang} preamble must define creft_index"
+        );
+    }
+
+    /// All three preambles expose creft_search.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn all_preambles_contain_creft_search(#[case] lang: &str) {
+        let p = for_language(lang).unwrap_or_else(|| panic!("{lang} must have a preamble"));
+        assert!(
+            p.contains("creft_search"),
+            "{lang} preamble must define creft_search"
+        );
+    }
+
+    /// Bash creft_index uses a case-based global flag detection to parse its options arg.
+    #[test]
+    fn bash_creft_index_parses_global_option_with_case() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(
+            p.contains("*global*true*"),
+            "bash creft_index must detect global:true using case match"
+        );
+    }
+
+    /// Bash creft_search generates a unique ID and reads from fd 4.
+    #[test]
+    fn bash_creft_search_reads_from_fd4() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        // Uses <&4 to read the response from fd 4.
+        assert!(
+            p.contains("<&4"),
+            "bash creft_search must read the response from fd 4 (<&4)"
+        );
+    }
+
+    /// Python creft_index accepts an optional dict for options.
+    #[test]
+    fn python_creft_index_accepts_options_dict() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(
+            p.contains("def creft_index(name, content, options=None)"),
+            "python creft_index must accept options=None keyword argument"
+        );
+    }
+
+    /// Python creft_search reads a JSON response from fd 4.
+    #[test]
+    fn python_creft_search_reads_json_from_fd4() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(
+            p.contains("def creft_search(query, name)"),
+            "python creft_search must accept query and name parameters"
+        );
+        assert!(
+            p.contains("results"),
+            "python creft_search must extract the results field from the response"
+        );
+    }
+
+    /// Node creft_index defaults global to false when options is not provided.
+    #[test]
+    fn node_creft_index_defaults_global_to_false() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("function creft_index(name, content, options)"),
+            "node creft_index must accept name, content, and options"
+        );
+        // The default must be false when options is absent.
+        assert!(
+            p.contains("false"),
+            "node creft_index must default global_flag to false"
+        );
+    }
+
+    /// Node creft_search reads synchronously from fd 4 and parses JSON.
+    #[test]
+    fn node_creft_search_reads_sync_from_fd4() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(
+            p.contains("function creft_search(query, name)"),
+            "node creft_search must accept query and name"
+        );
+        assert!(
+            p.contains("readSync(4"),
+            "node creft_search must use readSync on fd 4"
         );
     }
 }

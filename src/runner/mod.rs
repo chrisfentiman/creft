@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -5,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
+use crate::search::index::SearchIndex;
 
 mod blocks;
 #[cfg(unix)]
@@ -17,6 +19,21 @@ mod substitute;
 
 pub(crate) use self::blocks::spawn_block;
 pub(crate) use self::substitute::substitute;
+
+/// A runtime search index with its access control flag.
+///
+/// Created by `creft_index` during skill execution and held for the
+/// duration of that execution. Not persisted to disk — runtime indexes
+/// are ephemeral, scoped to a single skill invocation.
+///
+/// The `is_global` flag is set from the `global` field in the `creft_index`
+/// call. When `true`, other namespaces may query this index via `creft_search`
+/// using a dotted name. When `false`, only the owning namespace may query it.
+#[derive(Debug)]
+pub(crate) struct RuntimeIndex {
+    pub index: SearchIndex,
+    pub is_global: bool,
+}
 
 /// Execution context for a single skill invocation.
 ///
@@ -50,6 +67,24 @@ pub(crate) struct RunContext {
     /// instead of the block's declared language tag. Set from shell detection
     /// at skill invocation time. `None` means use block language literally.
     shell_preference: Option<String>,
+
+    /// The fully-qualified name of the skill being executed.
+    ///
+    /// Used to derive the caller's namespace and plugin context for namespace
+    /// resolution when handling `creft_index` and `creft_search` messages.
+    /// Empty string when no specific skill is being executed (e.g., dry-run
+    /// previews outside of skill invocation).
+    pub(crate) skill_name: String,
+
+    /// Runtime indexes created by `creft_index` during this execution.
+    ///
+    /// Keyed by fully-qualified name (e.g., `"deploy.beta"`, `"acme.deploy.beta"`).
+    /// Access control is enforced per-index via the `is_global` flag on `RuntimeIndex`.
+    ///
+    /// `Arc` is required because `RunContext` derives `Clone` and `Mutex` does not
+    /// implement `Clone`. All clones of a `RunContext` share the same index map,
+    /// so indexes created in one execution phase are visible in subsequent phases.
+    pub(crate) runtime_indexes: Arc<std::sync::Mutex<HashMap<String, RuntimeIndex>>>,
 }
 
 impl RunContext {
@@ -67,7 +102,18 @@ impl RunContext {
             verbose,
             dry_run,
             shell_preference: None,
+            skill_name: String::new(),
+            runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the fully-qualified skill name for namespace resolution.
+    ///
+    /// Used by `creft_index` and `creft_search` to derive the caller's namespace
+    /// when qualifying or resolving resource names.
+    pub(crate) fn with_skill_name(mut self, name: impl Into<String>) -> Self {
+        self.skill_name = name.into();
+        self
     }
 
     /// Set the caller's shell preference.
@@ -583,6 +629,11 @@ fn execute_block(
         let interactive = stdin_data.is_none();
 
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
+        let search_ctx = Some(channel::SearchContext {
+            skill_name: ctx.skill_name.clone(),
+            plugin: None, // plugin context is not threaded into execute_block currently
+            runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+        });
         let reader = channel::spawn_reader(
             ctrl_reader,
             std::sync::Arc::clone(&writer),
@@ -591,6 +642,7 @@ fn execute_block(
             // handler thread owns the response writer.
             None,
             Some(Arc::clone(&exit_signal)),
+            search_ctx,
         );
         let prompter =
             channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
@@ -754,13 +806,18 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    let ctx = RunContext::new(
-        ctx.cancel_arc(),
-        ctx.cwd().to_path_buf(),
-        extended_env,
-        ctx.is_verbose(),
-        ctx.is_dry_run(),
-    );
+    // Preserve skill_name and runtime_indexes from the original context so that
+    // creft_index / creft_search work correctly in skills with multiple blocks.
+    let ctx = RunContext {
+        cancel: ctx.cancel_arc(),
+        cwd: ctx.cwd().to_path_buf(),
+        env: extended_env,
+        verbose: ctx.is_verbose(),
+        dry_run: ctx.is_dry_run(),
+        shell_preference: ctx.shell_preference().map(String::from),
+        skill_name: ctx.skill_name.clone(),
+        runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+    };
 
     if cmd.blocks.len() > 1 {
         #[cfg(unix)]

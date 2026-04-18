@@ -182,7 +182,8 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         .and_then(|p| Settings::load(&p).ok())
         .and_then(|s| s.get("shell").map(str::to_string));
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
-        .with_shell_preference(shell::detect(settings_shell_pref.as_deref()));
+        .with_shell_preference(shell::detect(settings_shell_pref.as_deref()))
+        .with_skill_name(name.clone());
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.
