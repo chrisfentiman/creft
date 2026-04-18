@@ -123,6 +123,7 @@ impl Xor8Filter {
     }
 
     /// Number of fingerprint entries in the filter.
+    #[allow(dead_code)] // used in tests to verify filter sizing
     pub fn len(&self) -> usize {
         self.fingerprints.len()
     }

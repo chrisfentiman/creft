@@ -5,7 +5,5 @@
 
 pub(crate) mod index;
 pub(crate) mod store;
-#[allow(dead_code)]
 pub(crate) mod tokenize;
-#[allow(dead_code)]
 pub(crate) mod xor;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::error::CreftError;
 use crate::help::{self, BuiltinHelp};
-use crate::model::{AppContext, Scope};
+use crate::model::{AppContext, Scope, SkillSource};
 use crate::namespace::skill_namespace;
 use crate::store as skill_store;
 
@@ -34,7 +34,7 @@ pub(crate) fn index_path(
 
 /// Rebuild the search index for a single namespace within a scope.
 ///
-/// Lists all skills in the given scope whose name falls in the namespace,
+/// Lists all owned skills in the given scope whose name falls in the namespace,
 /// tokenizes each skill's prose (frontmatter description + body text with
 /// code blocks stripped), builds a `SearchIndex`, and writes it atomically
 /// to disk.
@@ -42,6 +42,9 @@ pub(crate) fn index_path(
 /// The `namespace` parameter is the top-level namespace token (e.g., `"deploy"`
 /// for skills like `"deploy rollback"`). An empty string addresses root-level
 /// skills (e.g., `"hello"`).
+///
+/// For indexing skills from all sources (owned, package, plugin), use
+/// `rebuild_all_indexes` instead.
 pub(crate) fn rebuild_namespace_index(
     ctx: &AppContext,
     namespace: &str,
@@ -98,38 +101,60 @@ pub(crate) fn load_index(
 
 /// Rebuild all indexes across all scopes, including built-in command docs.
 ///
-/// Groups all skills by their top-level namespace and rebuilds each namespace
-/// index. Also rebuilds the built-in command index (`_builtin.idx`).
+/// Iterates all skills from all sources (owned, package, and plugin) using
+/// `list_all_with_source`, groups them by `(namespace, plugin_prefix, scope)`,
+/// and writes one index file per group. Plugin skills are indexed under their
+/// plugin-prefixed path (e.g., `acme.deploy.idx`). Also rebuilds the built-in
+/// command index (`_builtin.idx`).
 pub(crate) fn rebuild_all_indexes(ctx: &AppContext) -> Result<(), CreftError> {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
-    let mut rebuilt: HashSet<(String, Scope)> = HashSet::new();
+    use crate::model::CommandDef;
 
-    let scopes = if ctx.creft_home.is_some() {
-        vec![Scope::Global]
-    } else {
-        let mut v = vec![Scope::Global];
-        if ctx.find_local_root().is_some() {
-            v.push(Scope::Local);
+    // Groups skills for indexing. Key: (namespace, Option<plugin_name>, scope).
+    type IndexGroup = HashMap<(String, Option<String>, Scope), Vec<(CommandDef, SkillSource)>>;
+
+    let mut groups: IndexGroup = HashMap::new();
+
+    let all = skill_store::list_all_with_source(ctx)?;
+
+    for (def, source) in all {
+        let ns = skill_namespace(&def.name).to_owned();
+        let key = match &source {
+            SkillSource::Plugin(plugin_name) => (ns, Some(plugin_name.clone()), Scope::Global),
+            SkillSource::Owned(scope) => (ns, None, *scope),
+            SkillSource::Package(_, scope) => (ns, None, *scope),
+        };
+        groups.entry(key).or_default().push((def, source));
+    }
+
+    for ((ns, plugin_prefix, scope), skills) in &groups {
+        let mut documents: Vec<(String, String, String)> = Vec::new();
+
+        for (def, source) in skills {
+            let raw = match skill_store::read_raw_from(ctx, &def.name, source) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("warning: could not read '{}': {}", def.name, e);
+                    continue;
+                }
+            };
+            let body_text = extract_indexable_text(&raw, &def.description);
+            documents.push((def.name.clone(), def.description.clone(), body_text));
         }
-        v
-    };
 
-    for scope in &scopes {
-        let all = skill_store::list_all_in(ctx, *scope)?;
-        for def in all {
-            let ns = skill_namespace(&def.name).to_owned();
-            let key = (ns.clone(), *scope);
-            if rebuilt.contains(&key) {
-                continue;
-            }
-            if let Err(e) = rebuild_namespace_index(ctx, &ns, *scope) {
-                eprintln!(
-                    "warning: could not rebuild index for namespace '{}': {}",
-                    ns, e
-                );
-            }
-            rebuilt.insert(key);
+        let refs: Vec<(&str, &str, &str)> = documents
+            .iter()
+            .map(|(n, d, t)| (n.as_str(), d.as_str(), t.as_str()))
+            .collect();
+        let index = SearchIndex::build(&refs);
+
+        let plugin_prefix_ref = plugin_prefix.as_deref();
+        if let Err(e) = write_index(ctx, ns, *scope, plugin_prefix_ref, &index) {
+            eprintln!(
+                "warning: could not write index for namespace '{}': {}",
+                ns, e
+            );
         }
     }
 
