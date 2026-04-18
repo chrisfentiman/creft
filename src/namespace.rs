@@ -87,9 +87,9 @@ pub(crate) fn skill_namespace(skill_name: &str) -> &str {
 /// in the registry are assumed to be namespace-local (not global).
 ///
 /// The registry is populated at two points:
-/// - At index build time (Stage 4): disk-persisted indexes record their access
+/// - At index build time: disk-persisted indexes record their access
 ///   level in the index file metadata.
-/// - At runtime (Stage 5): `creft_index` calls with `global: true` register the
+/// - At runtime: `creft_index` calls with `global: true` register the
 ///   resource as globally accessible for the duration of the skill execution.
 #[derive(Debug, Default)]
 pub(crate) struct AccessRegistry {
