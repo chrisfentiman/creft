@@ -333,8 +333,7 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
                         if score < search::FUZZY_THRESHOLD {
                             return None;
                         }
-                        let snippets =
-                            search::snippet::extract_snippets(&text, &terms, 2);
+                        let snippets = search::snippet::extract_snippets(&text, &terms, 2);
                         Some((
                             score,
                             search::snippet::SnippetResult {
@@ -347,9 +346,7 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
                     })
                     .collect();
 
-                scored.sort_by(|a, b| {
-                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 let fuzzy_results: Vec<search::snippet::SnippetResult> =
                     scored.into_iter().map(|(_, r)| r).collect();
 

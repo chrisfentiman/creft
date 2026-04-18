@@ -223,13 +223,11 @@ fn dispatch_docs_search(
                     .into_iter()
                     .filter(|e| e.name == cli_name)
                     .filter_map(|e| {
-                        let score =
-                            search::tokenize::score_query(query, &docs_text);
+                        let score = search::tokenize::score_query(query, &docs_text);
                         if score < search::FUZZY_THRESHOLD {
                             return None;
                         }
-                        let snippets =
-                            search::snippet::extract_snippets(&docs_text, &terms, 2);
+                        let snippets = search::snippet::extract_snippets(&docs_text, &terms, 2);
                         Some((
                             score,
                             search::snippet::SnippetResult {
@@ -242,9 +240,7 @@ fn dispatch_docs_search(
                     })
                     .collect();
 
-                scored.sort_by(|a, b| {
-                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 let fuzzy_results: Vec<search::snippet::SnippetResult> =
                     scored.into_iter().map(|(_, r)| r).collect();
 

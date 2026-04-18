@@ -244,6 +244,26 @@ mod tests {
         std::fs::write(&path, index.to_bytes()).unwrap();
     }
 
+    /// Write a minimal skill markdown file to the commands directory.
+    ///
+    /// The body text is placed after the frontmatter so that `load_skill_text`
+    /// extracts it for scoring. `namespace` is the first path component (e.g.
+    /// `"sort"`), `leaf` is the filename stem (e.g. `"alpha"`), and the full
+    /// skill name is `"<namespace> <leaf>"`.
+    fn write_skill_file(
+        ctx: &AppContext,
+        scope: Scope,
+        namespace: &str,
+        leaf: &str,
+        body_text: &str,
+    ) {
+        let commands_dir = ctx.commands_dir_for(scope).unwrap();
+        let ns_dir = commands_dir.join(namespace);
+        std::fs::create_dir_all(&ns_dir).unwrap();
+        let content = format!("---\nname: {namespace} {leaf}\ndescription: \n---\n\n{body_text}\n");
+        std::fs::write(ns_dir.join(format!("{leaf}.md")), content).unwrap();
+    }
+
     // ── search_all_indexes ────────────────────────────────────────────────────
 
     #[test]
@@ -393,7 +413,11 @@ mod tests {
         // (The skill file doesn't exist on disk so snippets will be empty, but
         //  the result entry will be returned — same behavior as before Stage 2.)
         let results = search_all_indexes(&ctx, "rollback");
-        assert_eq!(results.len(), 1, "exact query must still return the matching entry");
+        assert_eq!(
+            results.len(),
+            1,
+            "exact query must still return the matching entry"
+        );
         assert_eq!(results[0].name, "my skill");
     }
 
@@ -406,7 +430,10 @@ mod tests {
 
         // "zzq" has no gram overlap with "rollback" or "procedure".
         let results = search_all_indexes(&ctx, "zzq");
-        assert!(results.is_empty(), "query with no gram overlap must return empty results");
+        assert!(
+            results.is_empty(),
+            "query with no gram overlap must return empty results"
+        );
     }
 
     #[test]
@@ -418,5 +445,52 @@ mod tests {
 
         let results = search_all_indexes(&ctx, "xyzxyzxyz");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_all_indexes_fuzzy_results_sorted_by_tversky_score_descending() {
+        // Two documents both match a typo query via n-gram overlap, but one scores
+        // higher because the query's second word ("proceduure") also matches its
+        // content. The higher-scoring document must appear first.
+        //
+        // Query: "roollback proceduure" (two typos, no exact match)
+        //
+        // "sort alpha" body: "rollback procedure"
+        //   per-word best scores: tversky("roollback","rollback")≈0.71,
+        //                         tversky("proceduure","procedure")=0.75
+        //   average ≈ 0.73
+        //
+        // "sort bravo" body: "rollback"
+        //   per-word best scores: tversky("roollback","rollback")≈0.71,
+        //                         tversky("proceduure","rollback")=0.0
+        //   average ≈ 0.36
+        //
+        // Both are above FUZZY_THRESHOLD (0.2). Descending sort must put "sort alpha"
+        // at index 0.
+        let (ctx, _tmp) = make_ctx();
+
+        let alpha_body = "rollback procedure";
+        let bravo_body = "rollback";
+
+        write_skill_file(&ctx, Scope::Global, "sort", "alpha", alpha_body);
+        write_skill_file(&ctx, Scope::Global, "sort", "bravo", bravo_body);
+
+        let idx = SearchIndex::build(&[
+            ("sort alpha", "A skill", alpha_body),
+            ("sort bravo", "A skill", bravo_body),
+        ]);
+        write_index_file(&ctx, Scope::Global, "sort.idx", &idx);
+
+        let results = search_all_indexes(&ctx, "roollback proceduure");
+
+        assert!(
+            results.len() >= 2,
+            "both documents must be returned by the fuzzy fallback (got {})",
+            results.len()
+        );
+        assert_eq!(
+            results[0].name, "sort alpha",
+            "higher-scoring document must appear first (descending sort by Tversky score)"
+        );
     }
 }

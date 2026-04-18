@@ -439,7 +439,11 @@ mod tests {
         // "hered" shares grams {her, ere, red} with "heredoc".
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         let results = idx.search_fuzzy("hered");
-        assert_eq!(results.len(), 1, "document with 'heredoc' must be a candidate for query 'hered'");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'heredoc' must be a candidate for query 'hered'"
+        );
         assert_eq!(results[0].name, "doc");
     }
 
@@ -448,20 +452,30 @@ mod tests {
         // "templete" shares grams {tem, emp, mpl} with "template".
         let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
         let results = idx.search_fuzzy("templete");
-        assert_eq!(results.len(), 1, "document with 'template' must be a candidate for 'templete'");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'template' must be a candidate for 'templete'"
+        );
     }
 
     #[test]
     fn search_fuzzy_short_query_returns_empty() {
         // "ab" produces no 3-grams.
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
-        assert!(idx.search_fuzzy("ab").is_empty(), "2-char query must produce no fuzzy candidates");
+        assert!(
+            idx.search_fuzzy("ab").is_empty(),
+            "2-char query must produce no fuzzy candidates"
+        );
     }
 
     #[test]
     fn search_fuzzy_empty_query_returns_empty() {
         let idx = build_three_doc_index();
-        assert!(idx.search_fuzzy("").is_empty(), "empty query must produce no fuzzy candidates");
+        assert!(
+            idx.search_fuzzy("").is_empty(),
+            "empty query must produce no fuzzy candidates"
+        );
     }
 
     #[test]
@@ -480,7 +494,11 @@ mod tests {
             ("doc-b", "desc", "rollback procedure"),
         ]);
         let results = idx.search_fuzzy("templete");
-        assert_eq!(results.len(), 1, "only the document with gram overlap must be returned");
+        assert_eq!(
+            results.len(),
+            1,
+            "only the document with gram overlap must be returned"
+        );
         assert_eq!(results[0].name, "doc-a");
     }
 
