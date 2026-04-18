@@ -52,10 +52,7 @@ pub(crate) fn extract_snippets(text: &str, query_terms: &[&str], context: usize)
         return Vec::new();
     }
 
-    let lower_terms: Vec<String> = query_terms
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let lower_terms: Vec<String> = query_terms.iter().map(|t| t.to_lowercase()).collect();
 
     let lines: Vec<&str> = text.lines().collect();
     let line_count = lines.len();
@@ -66,7 +63,9 @@ pub(crate) fn extract_snippets(text: &str, query_terms: &[&str], context: usize)
         .enumerate()
         .filter(|(_, line)| {
             let lower_line = line.to_lowercase();
-            lower_terms.iter().any(|term| lower_line.contains(term.as_str()))
+            lower_terms
+                .iter()
+                .any(|term| lower_line.contains(term.as_str()))
         })
         .map(|(i, _)| i)
         .collect();
@@ -77,13 +76,11 @@ pub(crate) fn extract_snippets(text: &str, query_terms: &[&str], context: usize)
 
     // Expand each match index to a [start, end) range with context, then merge
     // overlapping or adjacent ranges into contiguous spans.
-    let ranges = merge_ranges(
-        match_indices.iter().map(|&i| {
-            let start = i.saturating_sub(context);
-            let end = (i + context + 1).min(line_count);
-            (start, end)
-        }),
-    );
+    let ranges = merge_ranges(match_indices.iter().map(|&i| {
+        let start = i.saturating_sub(context);
+        let end = (i + context + 1).min(line_count);
+        (start, end)
+    }));
 
     // Build one Snippet per merged range.
     ranges
@@ -101,7 +98,9 @@ pub(crate) fn extract_snippets(text: &str, query_terms: &[&str], context: usize)
                     }
                 })
                 .collect();
-            Snippet { lines: snippet_lines }
+            Snippet {
+                lines: snippet_lines,
+            }
         })
         .collect()
 }
@@ -112,14 +111,15 @@ pub(crate) fn extract_snippets(text: &str, query_terms: &[&str], context: usize)
 /// - Prints a header: bold document name (prefixed by namespace when
 ///   `show_namespace` is true)
 /// - Prints the description on the next line, dimmed
-/// - Prints each snippet's lines, with matching lines shown fully and context
-///   lines dimmed
+/// - Prints each snippet's lines, with matching lines shown fully (query terms
+///   wrapped in ANSI bold) and context lines dimmed
 /// - Separates non-adjacent snippets within a document with `  ...`
 /// - Separates documents with a blank line
 ///
 /// Returns `None` if no results have snippets (all XOR filter false positives).
 pub(crate) fn render_snippet_results(
     results: &[SnippetResult],
+    query_terms: &[&str],
     show_namespace: bool,
 ) -> Option<String> {
     let with_snippets: Vec<&SnippetResult> =
@@ -128,6 +128,8 @@ pub(crate) fn render_snippet_results(
     if with_snippets.is_empty() {
         return None;
     }
+
+    let lower_terms: Vec<String> = query_terms.iter().map(|t| t.to_lowercase()).collect();
 
     let mut out = String::new();
     let mut first_doc = true;
@@ -154,7 +156,7 @@ pub(crate) fn render_snippet_results(
             }
             for line in &snippet.lines {
                 if line.is_match {
-                    out.push_str(&line.text);
+                    out.push_str(&highlight_terms(&line.text, &lower_terms));
                 } else {
                     out.push_str(&line.text.as_str().dim().to_string());
                 }
@@ -164,6 +166,58 @@ pub(crate) fn render_snippet_results(
     }
 
     Some(out)
+}
+
+/// Wrap each occurrence of any query term in the line with ANSI bold, leaving
+/// the rest of the text unstyled.
+///
+/// Matching is case-insensitive: the original casing from the line is preserved
+/// in the output, but the bold spans are placed at the positions where a
+/// lowercased query term matches the lowercased line.
+fn highlight_terms(line: &str, lower_terms: &[String]) -> String {
+    if lower_terms.is_empty() {
+        return line.to_owned();
+    }
+
+    let lower_line = line.to_lowercase();
+
+    // Collect [start, end) byte spans for every term match in the line.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for term in lower_terms {
+        if term.is_empty() {
+            continue;
+        }
+        let mut search_start = 0;
+        while let Some(pos) = lower_line[search_start..].find(term.as_str()) {
+            let abs_start = search_start + pos;
+            let abs_end = abs_start + term.len();
+            spans.push((abs_start, abs_end));
+            search_start = abs_end;
+        }
+    }
+
+    if spans.is_empty() {
+        return line.to_owned();
+    }
+
+    // Sort and merge overlapping spans so bold regions don't nest or overlap.
+    spans.sort_unstable_by_key(|&(s, _)| s);
+    let merged = merge_ranges(spans.into_iter());
+
+    // Build the output by alternating plain and bold segments.
+    let mut result = String::with_capacity(line.len() + merged.len() * 16);
+    let mut cursor = 0;
+    for (start, end) in merged {
+        if cursor < start {
+            result.push_str(&line[cursor..start]);
+        }
+        result.push_str(&line[start..end].bold().to_string());
+        cursor = end;
+    }
+    if cursor < line.len() {
+        result.push_str(&line[cursor..]);
+    }
+    result
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
@@ -193,7 +247,6 @@ fn merge_ranges(ranges: impl Iterator<Item = (usize, usize)>) -> Vec<(usize, usi
 mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
     use rstest::rstest;
-    use yansi::Paint;
 
     use super::*;
 
@@ -243,7 +296,11 @@ mod tests {
         // Lines 0..4: a b c d e; "b" at 1 and "d" at 3 are each within context=2 of the other.
         let text = "a\nb\nc\nd\ne\n";
         let snippets = extract_snippets(text, &["b", "d"], 2);
-        assert_eq!(snippets.len(), 1, "nearby matches must merge into one snippet");
+        assert_eq!(
+            snippets.len(),
+            1,
+            "nearby matches must merge into one snippet"
+        );
     }
 
     #[test]
@@ -251,7 +308,11 @@ mod tests {
         let text = "match_one\nfiller1\nfiller2\nfiller3\nfiller4\nfiller5\nmatch_two\n";
         // context=0: no lines overlap; indices 0 and 6 are far apart.
         let snippets = extract_snippets(text, &["match_one", "match_two"], 0);
-        assert_eq!(snippets.len(), 2, "distant matches must produce separate snippets");
+        assert_eq!(
+            snippets.len(),
+            2,
+            "distant matches must produce separate snippets"
+        );
         assert_eq!(match_texts(&snippets), vec!["match_one", "match_two"]);
     }
 
@@ -259,7 +320,10 @@ mod tests {
     fn no_matches_returns_empty_vec() {
         let text = "alpha\nbeta\ngamma\n";
         let snippets = extract_snippets(text, &["zzz_not_present"], 2);
-        assert!(snippets.is_empty(), "XOR false positive must produce no snippets");
+        assert!(
+            snippets.is_empty(),
+            "XOR false positive must produce no snippets"
+        );
     }
 
     #[test]
@@ -353,13 +417,13 @@ mod tests {
             description: "desc".to_owned(),
             snippets: vec![],
         }];
-        let output = render_snippet_results(&results, false);
+        let output = render_snippet_results(&results, &[], false);
         assert!(output.is_none(), "all false positives must produce None");
     }
 
     #[test]
     fn render_returns_none_for_empty_results_slice() {
-        let output = render_snippet_results(&[], false);
+        let output = render_snippet_results(&[], &[], false);
         assert!(output.is_none());
     }
 
@@ -367,17 +431,25 @@ mod tests {
     fn render_includes_name_and_description() {
         yansi::disable();
         let result = make_result("my-skill", "ns", "Does a thing", "this is a match line\n");
-        let output = render_snippet_results(&[result], false).unwrap();
+        let output = render_snippet_results(&[result], &["match"], false).unwrap();
         yansi::enable();
         assert!(output.contains("my-skill"), "output must contain name");
-        assert!(output.contains("Does a thing"), "output must contain description");
+        assert!(
+            output.contains("Does a thing"),
+            "output must contain description"
+        );
     }
 
     #[test]
     fn render_with_show_namespace_true_includes_namespace_header() {
         yansi::disable();
-        let result = make_result("deploy rollback", "deploy", "Roll back", "rollback match line\n");
-        let output = render_snippet_results(&[result], true).unwrap();
+        let result = make_result(
+            "deploy rollback",
+            "deploy",
+            "Roll back",
+            "rollback match line\n",
+        );
+        let output = render_snippet_results(&[result], &["match"], true).unwrap();
         yansi::enable();
         assert!(
             output.contains("[deploy]"),
@@ -388,8 +460,13 @@ mod tests {
     #[test]
     fn render_with_show_namespace_false_omits_namespace_header() {
         yansi::disable();
-        let result = make_result("deploy rollback", "deploy", "Roll back", "rollback match line\n");
-        let output = render_snippet_results(&[result], false).unwrap();
+        let result = make_result(
+            "deploy rollback",
+            "deploy",
+            "Roll back",
+            "rollback match line\n",
+        );
+        let output = render_snippet_results(&[result], &["match"], false).unwrap();
         yansi::enable();
         assert!(
             !output.contains("[deploy]"),
@@ -401,17 +478,20 @@ mod tests {
     fn render_separates_non_adjacent_snippets_with_ellipsis() {
         yansi::disable();
         // Two distant matches in the same document → two snippets → ellipsis separator.
-        let text =
-            "match_one\nfiller1\nfiller2\nfiller3\nfiller4\nfiller5\nfiller6\nmatch_two\n";
+        let text = "match_one\nfiller1\nfiller2\nfiller3\nfiller4\nfiller5\nfiller6\nmatch_two\n";
         let snippets = extract_snippets(text, &["match_one", "match_two"], 0);
-        assert_eq!(snippets.len(), 2, "must have two separate snippets to test separator");
+        assert_eq!(
+            snippets.len(),
+            2,
+            "must have two separate snippets to test separator"
+        );
         let result = SnippetResult {
             name: "doc".to_owned(),
             namespace: "ns".to_owned(),
             description: "desc".to_owned(),
             snippets,
         };
-        let output = render_snippet_results(&[result], false).unwrap();
+        let output = render_snippet_results(&[result], &["match_one", "match_two"], false).unwrap();
         yansi::enable();
         assert!(
             output.contains("  ..."),
@@ -429,9 +509,13 @@ mod tests {
             snippets: vec![],
         };
         let real_match = make_result("real", "ns", "has content", "a match line here\n");
-        let output = render_snippet_results(&[false_positive, real_match], false).unwrap();
+        let output =
+            render_snippet_results(&[false_positive, real_match], &["match"], false).unwrap();
         yansi::enable();
-        assert!(!output.contains("false-pos"), "false positive must be excluded from output");
+        assert!(
+            !output.contains("false-pos"),
+            "false positive must be excluded from output"
+        );
         assert!(output.contains("real"), "real match must be in output");
     }
 
@@ -440,18 +524,21 @@ mod tests {
         // With ANSI enabled the output differs from plain text (has escape codes).
         yansi::enable();
         let result = make_result("doc", "ns", "description", "a match here\n");
-        let with_ansi = render_snippet_results(&[result], false).unwrap();
+        let with_ansi = render_snippet_results(&[result], &["match"], false).unwrap();
 
         yansi::disable();
         let result2 = make_result("doc", "ns", "description", "a match here\n");
-        let without_ansi = render_snippet_results(&[result2], false).unwrap();
+        let without_ansi = render_snippet_results(&[result2], &["match"], false).unwrap();
         yansi::enable();
 
         assert_ne!(
             with_ansi, without_ansi,
             "ANSI-enabled output must differ from plain output"
         );
-        assert!(with_ansi.contains('\x1b'), "ANSI output must contain escape sequences");
+        assert!(
+            with_ansi.contains('\x1b'),
+            "ANSI output must contain escape sequences"
+        );
     }
 
     #[test]
@@ -459,7 +546,7 @@ mod tests {
         yansi::disable();
         let r1 = make_result("doc-one", "ns", "first", "match here for one\n");
         let r2 = make_result("doc-two", "ns", "second", "match here for two\n");
-        let output = render_snippet_results(&[r1, r2], false).unwrap();
+        let output = render_snippet_results(&[r1, r2], &["match"], false).unwrap();
         yansi::enable();
         // A blank line separates the two documents.
         assert!(
@@ -468,5 +555,46 @@ mod tests {
         );
         assert!(output.contains("doc-one"));
         assert!(output.contains("doc-two"));
+    }
+
+    #[test]
+    fn render_highlights_query_terms_in_matching_lines() {
+        // Without ANSI: query term appears as plain text in the output.
+        yansi::disable();
+        let snippets = extract_snippets("call creft_exit to stop\n", &["exit"], 0);
+        let result = SnippetResult {
+            name: "doc".to_owned(),
+            namespace: "ns".to_owned(),
+            description: "desc".to_owned(),
+            snippets,
+        };
+        let plain = render_snippet_results(&[result], &["exit"], false).unwrap();
+        yansi::enable();
+        assert!(
+            plain.contains("call creft_exit to stop"),
+            "without ANSI the matching line text must appear verbatim"
+        );
+
+        // With ANSI: the output contains escape sequences specifically around "exit".
+        yansi::enable();
+        let snippets2 = extract_snippets("call creft_exit to stop\n", &["exit"], 0);
+        let result2 = SnippetResult {
+            name: "doc".to_owned(),
+            namespace: "ns".to_owned(),
+            description: "desc".to_owned(),
+            snippets: snippets2,
+        };
+        let styled = render_snippet_results(&[result2], &["exit"], false).unwrap();
+        yansi::enable();
+        assert!(
+            styled.contains('\x1b'),
+            "ANSI output must contain escape sequences wrapping the matched term"
+        );
+        // The styled output must not contain the bare word "exit" surrounded by
+        // plain text on both sides — the bold wrap must be present.
+        assert!(
+            !styled.contains("creft_exit to"),
+            "the term 'exit' inside 'creft_exit' must be wrapped in bold, breaking the plain sequence"
+        );
     }
 }
