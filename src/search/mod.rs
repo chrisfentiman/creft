@@ -133,7 +133,7 @@ fn load_builtin_text(cli_name: &str) -> Option<String> {
 /// Resolves the skill source, reads the raw file, then extracts indexable text
 /// (description prepended to code-stripped body). Returns `None` when the skill
 /// cannot be resolved or read.
-fn load_skill_text(ctx: &AppContext, name: &str) -> Option<String> {
+pub(crate) fn load_skill_text(ctx: &AppContext, name: &str) -> Option<String> {
     let name_parts: Vec<String> = name.split_whitespace().map(str::to_owned).collect();
     let (resolved_name, _, source) = skill_store::resolve_command(ctx, &name_parts).ok()?;
     let raw = skill_store::read_raw_from(ctx, &resolved_name, &source)

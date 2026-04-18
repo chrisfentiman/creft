@@ -307,22 +307,8 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
             let results: Vec<search::snippet::SnippetResult> = matches
                 .into_iter()
                 .map(|e| {
-                    let name_parts: Vec<String> =
-                        e.name.split_whitespace().map(str::to_owned).collect();
-                    let snippets = store::resolve_command(ctx, &name_parts)
-                        .ok()
-                        .and_then(|(resolved_name, _, source)| {
-                            store::read_raw_from(ctx, &resolved_name, &source)
-                                .map_err(|err| {
-                                    eprintln!("warning: could not read '{}': {}", e.name, err);
-                                })
-                                .ok()
-                        })
-                        .map(|raw| {
-                            let description = extract_frontmatter_description(&raw);
-                            let text = search::store::extract_indexable_text(&raw, &description);
-                            search::snippet::extract_snippets(&text, &terms, 2)
-                        })
+                    let snippets = search::load_skill_text(ctx, &e.name)
+                        .map(|text| search::snippet::extract_snippets(&text, &terms, 2))
                         .unwrap_or_default();
                     search::snippet::SnippetResult {
                         name: e.name.clone(),
@@ -348,26 +334,6 @@ fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<
         }
     }
     Ok(())
-}
-
-/// Extract the description field from raw skill markdown without a full parse.
-///
-/// Reads the frontmatter YAML block for the `description:` line. Returns an
-/// empty string when the frontmatter is missing or the field is not present.
-fn extract_frontmatter_description(raw: &str) -> String {
-    let Some(after_open) = raw.strip_prefix("---") else {
-        return String::new();
-    };
-    let Some(close_pos) = after_open.find("\n---") else {
-        return String::new();
-    };
-    let yaml_block = &after_open[..close_pos];
-    for line in yaml_block.lines() {
-        if let Some(rest) = line.strip_prefix("description:") {
-            return rest.trim().to_owned();
-        }
-    }
-    String::new()
 }
 
 /// Load a namespace index, trying global scope then local scope.
