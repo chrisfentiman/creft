@@ -4,6 +4,7 @@
 //! format, and lifecycle management for per-namespace index files on disk.
 
 pub(crate) mod index;
+pub(crate) mod snippet;
 pub(crate) mod store;
 pub(crate) mod tokenize;
 pub(crate) mod xor;
