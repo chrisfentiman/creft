@@ -254,7 +254,6 @@ pub(crate) fn load_store_index(dir: &Path, qualified_name: &str) -> Option<Searc
     SearchIndex::from_bytes(&bytes)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

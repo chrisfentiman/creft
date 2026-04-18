@@ -598,26 +598,6 @@ fn kill_group(pgid: Option<u32>) -> bool {
     }
 }
 
-/// Kill the pipe chain's process group, falling back to per-process kills.
-#[cfg(unix)]
-fn kill_pipe_group(
-    pgid: Option<u32>,
-    children: &[(
-        std::process::Child,
-        usize,
-        String,
-        Option<std::sync::mpsc::Sender<bool>>,
-    )],
-) {
-    if kill_group(pgid) {
-        return;
-    }
-    for (child, _, _, _) in children {
-        // SAFETY: kill(pid, SIGKILL) is standard POSIX. Harmless ESRCH if already dead.
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
-    }
-}
-
 /// Kill the pipe chain's process group, falling back to per-PID kills.
 #[cfg(unix)]
 fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
@@ -634,12 +614,6 @@ fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
 /// argument count limit.
 #[cfg(unix)]
 struct WaitArgs {
-    children: Vec<(
-        std::process::Child,
-        usize,
-        String,
-        Option<std::sync::mpsc::Sender<bool>>,
-    )>,
     child_pids: Vec<u32>,
     last_stdout: PipeStdout,
     child_pgid: Option<u32>,
@@ -650,14 +624,12 @@ struct WaitArgs {
     sponge_handles: Vec<std::thread::JoinHandle<Option<Vec<u8>>>>,
 }
 
-/// Wait for all children in a Unix pipe chain using concurrent reaper threads
-/// and a buffered stdout relay.
+/// Wait for all children in a Unix pipe chain using a buffered stdout relay.
 ///
-/// Each child is moved into its own reaper thread that calls `child.wait()` and
-/// sends the result through an mpsc channel. Results arrive in exit order, not
-/// spawn order. The last block's stdout is relayed into a buffer by a dedicated
-/// relay thread; the buffer is flushed to the terminal only after all reapers
-/// have reported and the exit-99 check passes.
+/// Reaper threads are spawned inline by `run_pipe_chain` immediately after each
+/// child is spawned, so the cancel sender is live before any downstream sponge
+/// thread checks `recv()`. This function receives results through the shared
+/// `rx` channel and waits for all reapers and sponge threads to finish.
 ///
 /// The `tx`/`rx` channel pair is created by the caller (`run_pipe_chain`) so
 /// that sponge threads can also send results through the same channel before
@@ -678,7 +650,6 @@ fn wait_pipe_children_unix(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<PipeResult>, bool), CreftError> {
     let WaitArgs {
-        children,
         child_pids,
         last_stdout,
         child_pgid,
@@ -746,52 +717,9 @@ fn wait_pipe_children_unix(
         })
         .expect("failed to spawn relay thread");
 
-    for (i, (child, block_idx, lang, cancel_tx)) in children.into_iter().enumerate() {
-        let tx = tx.clone();
-        let pgid = child_pgid; // Option<u32> is Copy — no Arc needed
-        std::thread::Builder::new()
-            .name(format!("creft-reaper-{i}"))
-            .spawn(move || {
-                let mut child = child;
-                // Drain stderr before wait() to prevent deadlock: a child that fills
-                // the stderr pipe buffer blocks on write(), and wait() never returns.
-                let captured_stderr = {
-                    let mut buf = Vec::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        let _ = std::io::Read::read_to_end(&mut err, &mut buf);
-                    }
-                    buf
-                };
-                let status = child.wait();
-                let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
-                    == Some(crate::runner::EARLY_EXIT);
-                // Kill the process group immediately on exit 99, before any channel hop.
-                // The main thread's kill is a redundant safety net.
-                if exit_99 {
-                    kill_group(pgid);
-                }
-                // Always send the exit-99 determination to the downstream sponge so
-                // it can unblock from recv(). Send before the ReaperResult so the
-                // sponge unblocks before the main thread begins its kill/cancel cascade.
-                // Ignore send error: sponge already exited or was never spawned.
-                if let Some(cancel) = cancel_tx {
-                    let _ = cancel.send(exit_99);
-                }
-                // Ignore send error: main thread dropped rx only if it panicked.
-                let _ = tx.send(ReaperResult {
-                    block_idx,
-                    lang,
-                    outcome: match status {
-                        Ok(s) => BlockOutcome::Exited(s),
-                        Err(e) => BlockOutcome::Error(e),
-                    },
-                    stderr: captured_stderr,
-                });
-            })
-            .expect("failed to spawn reaper thread");
-    }
-    // Drop the tx clone passed in from run_pipe_chain. Combined with sponge threads
-    // dropping their clones and reaper threads dropping theirs, rx closes when all done.
+    // Drop the tx clone passed in from run_pipe_chain. Reaper threads were already
+    // spawned inline by run_pipe_chain. Combined with sponge threads dropping their
+    // clones and reaper threads dropping theirs, rx closes when all are done.
     drop(tx);
 
     let mut results: Vec<PipeResult> = Vec::new();
@@ -1006,12 +934,15 @@ pub(super) fn run_pipe_chain(
 
     // node_deps_dirs keeps npm-installed tempdir handles alive until all children exit.
     let mut node_deps_dirs: Vec<Option<tempfile::TempDir>> = Vec::with_capacity(n);
-    let mut children: Vec<(
-        std::process::Child,
-        usize,
-        String,
-        Option<std::sync::mpsc::Sender<bool>>,
-    )> = Vec::with_capacity(n);
+    // PIDs of all non-sponge children, used for kill fallbacks in error paths and
+    // after wait_pipe_children_unix. Reaper threads are spawned inline immediately
+    // after each child so the cancel sender is live before any downstream sponge checks.
+    #[cfg(unix)]
+    let mut child_pids: Vec<u32> = Vec::with_capacity(n);
+    // Non-Unix only: children accumulated for sequential wait.
+    #[cfg(not(unix))]
+    let mut non_unix_children: Vec<Option<(std::process::Child, usize, String)>> =
+        Vec::with_capacity(n);
     let mut prev_stdout: Option<PipeStdout> = None;
     // PID of the first child, used as the process group ID for all pipe children.
     #[cfg(unix)]
@@ -1150,8 +1081,7 @@ pub(super) fn run_pipe_chain(
                 // Dup the read end so the kernel buffer survives if the downstream
                 // block is killed on exit 99. Failure kills already-spawned children.
                 let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
-                    kill_pipe_group(child_pgid, &children);
-                    drop(children.drain(..));
+                    kill_pipe_group_by_pids(child_pgid, &child_pids);
                     drop(node_deps_dirs.drain(..));
                 })?;
                 exit99_drains.insert(i, duped);
@@ -1207,8 +1137,7 @@ pub(super) fn run_pipe_chain(
         // independent pipe pair and reader thread.
         #[cfg(unix)]
         let mut block_channel = SideChannel::new().inspect_err(|_| {
-            kill_pipe_group(child_pgid, &children);
-            drop(children.drain(..));
+            kill_pipe_group_by_pids(child_pgid, &child_pids);
             drop(node_deps_dirs.drain(..));
         })?;
 
@@ -1227,8 +1156,7 @@ pub(super) fn run_pipe_chain(
         )
         .inspect_err(|_| {
             #[cfg(unix)]
-            kill_pipe_group(child_pgid, &children);
-            drop(children.drain(..));
+            kill_pipe_group_by_pids(child_pgid, &child_pids);
             drop(node_deps_dirs.drain(..));
         })?;
 
@@ -1279,8 +1207,8 @@ pub(super) fn run_pipe_chain(
                 // Stdio::piped() must always yield a ChildStdout — this path is unreachable
                 // under normal conditions, but guard against it to avoid a silent hang.
                 #[cfg(unix)]
-                kill_pipe_group(child_pgid, &children);
-                drop(children.drain(..));
+                kill_pipe_group_by_pids(child_pgid, &child_pids);
+                drop(node_deps_dirs.drain(..));
                 return Err(CreftError::Setup(format!(
                     "internal: failed to capture stdout for block {} ({})",
                     i, block.lang
@@ -1292,8 +1220,7 @@ pub(super) fn run_pipe_chain(
                 // Dup the read end before passing it to the next block as stdin.
                 // The kernel buffer stays alive after the downstream block is killed.
                 let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
-                    kill_pipe_group(child_pgid, &children);
-                    drop(children.drain(..));
+                    kill_pipe_group_by_pids(child_pgid, &child_pids);
                     drop(node_deps_dirs.drain(..));
                 })?;
                 exit99_drains.insert(i, duped);
@@ -1313,8 +1240,9 @@ pub(super) fn run_pipe_chain(
         }
 
         // When the next block is a sponge, create a direct cancellation channel.
-        // The sender is held by this block's reaper thread and dropped on exit 99.
-        // The receiver is stored and later passed to the sponge thread via SpongeChannels.
+        // The sender goes to this reaper thread; the receiver to the sponge thread.
+        // The reaper is spawned inline below so the sender is live before the next
+        // iteration spawns the downstream sponge.
         #[cfg(unix)]
         let cancel_tx: Option<std::sync::mpsc::Sender<bool>> = {
             let next_is_sponge = cmd.blocks.get(i + 1).is_some_and(|b| b.needs_sponge());
@@ -1327,15 +1255,65 @@ pub(super) fn run_pipe_chain(
             }
         };
 
-        children.push((
-            child,
-            i,
-            block.lang.clone(),
-            #[cfg(unix)]
-            cancel_tx,
-            #[cfg(not(unix))]
-            None,
-        ));
+        // Spawn the reaper thread immediately after extracting stdout and creating
+        // the cancel channel. This guarantees the cancel sender is live before the
+        // next loop iteration spawns a downstream sponge that calls recv() on the
+        // matching receiver.
+        #[cfg(unix)]
+        {
+            let pid = child.id();
+            child_pids.push(pid);
+            let reaper_tx_clone = reaper_tx.clone();
+            let pgid = child_pgid;
+            let block_idx = i;
+            let lang = block.lang.clone();
+            std::thread::Builder::new()
+                .name(format!("creft-reaper-{i}"))
+                .spawn(move || {
+                    let mut child = child;
+                    // Drain stderr before wait() to prevent deadlock: a child that fills
+                    // the stderr pipe buffer blocks on write(), and wait() never returns.
+                    let captured_stderr = {
+                        let mut buf = Vec::new();
+                        if let Some(mut err) = child.stderr.take() {
+                            let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+                        }
+                        buf
+                    };
+                    let status = child.wait();
+                    let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
+                        == Some(crate::runner::EARLY_EXIT);
+                    // Kill the process group immediately on exit 99, before any channel hop.
+                    // The main thread's kill is a redundant safety net.
+                    if exit_99 {
+                        kill_group(pgid);
+                    }
+                    // Always send the exit-99 determination to the downstream sponge so
+                    // it can unblock from recv(). Send before the ReaperResult so the
+                    // sponge unblocks before the main thread begins its kill/cancel cascade.
+                    // Ignore send error: sponge already exited or was never spawned.
+                    if let Some(cancel) = cancel_tx {
+                        let _ = cancel.send(exit_99);
+                    }
+                    // Ignore send error: main thread dropped rx only if it panicked.
+                    let _ = reaper_tx_clone.send(ReaperResult {
+                        block_idx,
+                        lang,
+                        outcome: match status {
+                            Ok(s) => BlockOutcome::Exited(s),
+                            Err(e) => BlockOutcome::Error(e),
+                        },
+                        stderr: captured_stderr,
+                    });
+                })
+                .expect("failed to spawn reaper thread");
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix: accumulate children for sequential wait.
+            non_unix_children.push(Some((child, i, block.lang.clone())));
+        }
     }
 
     // Install SIGINT handler for the pipe chain duration (Unix only).
@@ -1349,11 +1327,6 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let _sigint_guard = child_pgid.map(PipeSignalGuard::new);
 
-    // Child PIDs saved before wait_pipe_children_unix consumes `children`.
-    // Used in the post-reader-join exit-signal cleanup.
-    #[cfg(unix)]
-    let saved_child_pids: Vec<u32>;
-
     #[cfg(unix)]
     let (results, mut early_exit) = {
         let last_stdout = last_child_stdout.ok_or_else(|| {
@@ -1363,12 +1336,11 @@ pub(super) fn run_pipe_chain(
         // (sponge + reaper threads) drop their own clones.
         let tx = reaper_tx;
         let rx = reaper_rx;
-        let child_pids: Vec<u32> = children.iter().map(|(c, _, _, _)| c.id()).collect();
-        saved_child_pids = child_pids.clone();
+        // Clone so child_pids remains available for the post-reader-join cleanup.
+        let pids_for_wait = child_pids.clone();
         wait_pipe_children_unix(
             WaitArgs {
-                children,
-                child_pids,
+                child_pids: pids_for_wait,
                 last_stdout,
                 child_pgid,
                 tx,
@@ -1382,13 +1354,7 @@ pub(super) fn run_pipe_chain(
     };
 
     #[cfg(not(unix))]
-    let (results, early_exit) = {
-        let children_opt: Vec<Option<(std::process::Child, usize, String)>> = children
-            .into_iter()
-            .map(|(c, i, l, _)| Some((c, i, l)))
-            .collect();
-        wait_pipe_children_fallback(children_opt)?
-    };
+    let (results, early_exit) = wait_pipe_children_fallback(non_unix_children)?;
 
     // Join all side-channel reader threads now that every child has exited.
     // The children's fd 3 write ends are closed on exit; close_child_ends()
@@ -1413,13 +1379,13 @@ pub(super) fn run_pipe_chain(
                     // All processes have already exited (wait_pipe_children_unix
                     // joined them). kill_pipe_group_by_pids is a no-op for already-
                     // exited PIDs, but ensures any late grandchildren are cleaned up.
-                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    kill_pipe_group_by_pids(child_pgid, &child_pids);
                     ctx.request_cancel();
                 }
             } else {
                 // creft_exit with non-zero: explicit failure.
                 if !early_exit {
-                    kill_pipe_group_by_pids(child_pgid, &saved_child_pids);
+                    kill_pipe_group_by_pids(child_pgid, &child_pids);
                     ctx.request_cancel();
                 }
                 let lang = results

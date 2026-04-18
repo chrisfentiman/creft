@@ -834,7 +834,9 @@ mod tests {
     fn bash_store_search_reads_from_fd4() {
         let p = for_language("bash").expect("bash must have a preamble");
         // creft_store_search must read the response with <&4.
-        let idx = p.find("creft_store_search").expect("creft_store_search must exist");
+        let idx = p
+            .find("creft_store_search")
+            .expect("creft_store_search must exist");
         let after = &p[idx..];
         assert!(after.contains("<&4"));
     }
@@ -851,7 +853,9 @@ mod tests {
     #[test]
     fn node_store_search_reads_sync_from_fd4() {
         let p = for_language("node").expect("node must have a preamble");
-        let idx = p.find("creft_store_search").expect("creft_store_search must exist");
+        let idx = p
+            .find("creft_store_search")
+            .expect("creft_store_search must exist");
         let after = &p[idx..];
         assert!(after.contains("readSync(4"));
     }

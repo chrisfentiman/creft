@@ -2606,8 +2606,7 @@ printf '%s' "$_resp"
     /// StorePut with global:true deserializes to Some(true).
     #[test]
     fn channel_message_store_put_global_true_deserializes() {
-        let json =
-            r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":true}"#;
+        let json = r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":true}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::StorePut {
@@ -2632,7 +2631,10 @@ printf '%s' "$_resp"
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::StorePut { global, .. } => {
-                assert_eq!(global, None, "omitted global field must deserialize as None");
+                assert_eq!(
+                    global, None,
+                    "omitted global field must deserialize as None"
+                );
             }
             other => panic!("expected StorePut, got {other:?}"),
         }
@@ -2711,7 +2713,15 @@ printf '%s' "$_resp"
     #[test]
     fn handle_store_put_replaces_existing_key() {
         let dir = tempfile::tempdir().unwrap();
-        super::handle_store_put("data", "env", "staging", None, "deploy skill", None, dir.path());
+        super::handle_store_put(
+            "data",
+            "env",
+            "staging",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
         super::handle_store_put(
             "data",
             "env",
@@ -2731,8 +2741,17 @@ printf '%s' "$_resp"
     #[test]
     fn handle_store_get_returns_value_for_existing_key() {
         let dir = tempfile::tempdir().unwrap();
-        super::handle_store_put("data", "env", "prod", None, "deploy skill", None, dir.path());
-        let response = super::handle_store_get("g1", "data", "env", "deploy skill", None, dir.path());
+        super::handle_store_put(
+            "data",
+            "env",
+            "prod",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        let response =
+            super::handle_store_get("g1", "data", "env", "deploy skill", None, dir.path());
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "g1");
         assert_eq!(parsed["value"], "prod");
@@ -2743,8 +2762,14 @@ printf '%s' "$_resp"
     fn handle_store_get_returns_empty_value_for_missing_key() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put("data", "other", "x", None, "deploy skill", None, dir.path());
-        let response =
-            super::handle_store_get("g2", "data", "missing_key", "deploy skill", None, dir.path());
+        let response = super::handle_store_get(
+            "g2",
+            "data",
+            "missing_key",
+            "deploy skill",
+            None,
+            dir.path(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "g2");
         assert_eq!(parsed["value"], "");
@@ -2754,7 +2779,8 @@ printf '%s' "$_resp"
     #[test]
     fn handle_store_get_returns_empty_when_database_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let response = super::handle_store_get("g3", "data", "env", "deploy skill", None, dir.path());
+        let response =
+            super::handle_store_get("g3", "data", "env", "deploy skill", None, dir.path());
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "g3");
         assert_eq!(parsed["value"], "");
@@ -2810,8 +2836,14 @@ printf '%s' "$_resp"
             None,
             dir.path(),
         );
-        let response =
-            super::handle_store_search("ss2", "data", "zzzunmatchable", "deploy skill", None, dir.path());
+        let response = super::handle_store_search(
+            "ss2",
+            "data",
+            "zzzunmatchable",
+            "deploy skill",
+            None,
+            dir.path(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "ss2");
         assert_eq!(parsed["results"].as_str().unwrap_or("MISSING"), "");
@@ -2885,7 +2917,15 @@ printf '%s' "$_resp"
         let path = crate::store_kv::store_path(dir.path(), "deploy.data");
         std::fs::write(&path, b"not a redb file\xFF\xFE\xFD").unwrap();
         // Must complete without panicking (fire-and-forget, writes warning to stderr).
-        super::handle_store_put("data", "env", "production", None, "deploy skill", None, dir.path());
+        super::handle_store_put(
+            "data",
+            "env",
+            "production",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
     }
 
     // ── handle_store_get: error path ─────────────────────────────────────────
@@ -2897,7 +2937,8 @@ printf '%s' "$_resp"
         let path = crate::store_kv::store_path(dir.path(), "deploy.data");
         std::fs::write(&path, b"not a redb file\xFF\xFE\xFD").unwrap();
 
-        let response = super::handle_store_get("g5", "data", "env", "deploy skill", None, dir.path());
+        let response =
+            super::handle_store_get("g5", "data", "env", "deploy skill", None, dir.path());
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "g5");
         assert!(
@@ -2936,8 +2977,14 @@ printf '%s' "$_resp"
             dir.path(),
         );
         // Query with a term that won't exact-match but fuzzy-matches ("prodution" typo).
-        let response =
-            super::handle_store_search("ss6", "data", "prodution", "deploy skill", None, dir.path());
+        let response = super::handle_store_search(
+            "ss6",
+            "data",
+            "prodution",
+            "deploy skill",
+            None,
+            dir.path(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "ss6");
         // We don't assert the specific results (fuzzy matching may or may not match),
@@ -2977,7 +3024,8 @@ printf '%s' "$_resp"
         let resp_writer_file =
             Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
         // ctx = None: exercises the else-if fallback for StoreGet.
-        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
 
         let output = child.wait_with_output().unwrap();
         reader_handle.join().expect("reader thread must not panic");
@@ -3015,7 +3063,8 @@ printf '%s' "$_resp"
         let resp_writer_file =
             Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
         // ctx = None: exercises the else-if fallback for StoreSearch.
-        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
 
         let output = child.wait_with_output().unwrap();
         reader_handle.join().expect("reader thread must not panic");
@@ -3097,7 +3146,8 @@ printf '%s' "$_resp"
         use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
         let resp_writer_file =
             Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
-        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
 
         let output = child.wait_with_output().unwrap();
         reader_handle.join().expect("reader thread must not panic");
@@ -3144,7 +3194,8 @@ printf '%s' "$_resp"
         use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
         let resp_writer_file =
             Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
-        let reader_handle = super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, ctx);
 
         let output = child.wait_with_output().unwrap();
         reader_handle.join().expect("reader thread must not panic");
