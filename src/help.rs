@@ -1194,6 +1194,7 @@ mod renderer {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
 
     use super::*;
 
@@ -1274,6 +1275,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_add_contains_usage_line() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1285,6 +1287,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_show_contains_blocks_flag() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Show);
@@ -1318,6 +1321,7 @@ mod tests {
     ];
 
     #[test]
+    #[serial]
     fn all_render_docs_contain_usage_line() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1331,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_contain_usage_line() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1344,6 +1349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_contain_docs_footer() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1357,6 +1363,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn all_render_short_under_20_lines() {
         yansi::disable();
         for &variant in ALL_VARIANTS {
@@ -1371,6 +1378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_disabled_produces_no_ansi() {
         yansi::disable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1382,6 +1390,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_short_disabled_produces_no_ansi() {
         yansi::disable();
         let output = render_short(BuiltinHelp::Add);
@@ -1393,6 +1402,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_docs_enabled_produces_ansi_bold_on_headers() {
         yansi::enable();
         let output = render_docs(BuiltinHelp::Add);
@@ -1403,6 +1413,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_docs_output_contains_built_in_tag() {
         yansi::disable();
         let variants = [

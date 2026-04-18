@@ -545,6 +545,7 @@ pub fn cmd_namespace_help(ctx: &AppContext, prefix: &[&str]) -> Result<(), Creft
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
 
     use super::{collapse_blank_lines, render_skill_docs, strip_code_blocks};
 
@@ -644,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn headers_in_prose_receive_bold_markers() {
         yansi::enable();
         let body = "## Prerequisites\n\nSome text.\n";
@@ -660,6 +662,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn frontmatter_replaced_with_name_description_header() {
         yansi::disable();
         let raw =
@@ -682,6 +685,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn skill_with_only_frontmatter_and_code_produces_header_only() {
         yansi::disable();
         let raw = "---\nname: minimal\ndescription: Minimal skill.\n---\n\n```bash\necho hi\n```\n";
@@ -693,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_ansi_when_yansi_disabled() {
         yansi::disable();
         let raw = "---\nname: skill\ndescription: A skill.\n---\n\n## Header\n\nProse.\n";
@@ -720,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn malformed_frontmatter_falls_back_to_skill_name_header() {
         yansi::disable();
         let raw = "not valid frontmatter\n\nSome prose.\n";

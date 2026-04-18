@@ -561,6 +561,7 @@ mod tests {
     #[allow(unused_imports)]
     use pretty_assertions::{assert_eq, assert_ne};
     use rstest::rstest;
+    use serial_test::serial;
 
     #[test]
     fn test_name_parts_simple() {
@@ -610,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_help_text() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -662,6 +664,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn help_text_hides_empty_default() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -782,6 +785,7 @@ name: MY_TOKEN
     // ── help_text: flags section ──────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_help_text_bool_flag_no_value_hint() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -817,6 +821,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_string_flag_with_default() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -851,6 +856,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_env_optional() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -879,6 +885,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_arg_with_default() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -913,6 +920,7 @@ name: MY_TOKEN
     /// at the name rather than leaving a dangling two-space separator column that
     /// makes the output look ragged compared to built-in help.
     #[test]
+    #[serial]
     fn test_help_text_arg_without_description_has_no_trailing_spaces() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -955,6 +963,7 @@ name: MY_TOKEN
     // ── help_text: usage line construction ───────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_help_text_usage_line_with_required_arg() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -984,6 +993,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_usage_line_with_optional_arg() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -1013,6 +1023,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_usage_line_with_options() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -1044,6 +1055,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_usage_line_no_flags_no_args() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -1071,6 +1083,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_description_only_first_line() {
         let cmd = ParsedCommand {
             def: CommandDef {
@@ -1204,6 +1217,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_ansi_section_headers_bold() {
         let cmd = make_full_cmd();
         yansi::enable();
@@ -1232,6 +1246,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_ansi_arg_names_bold() {
         let cmd = make_full_cmd();
         yansi::enable();
@@ -1247,6 +1262,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_ansi_flag_labels_bold() {
         let cmd = make_full_cmd();
         yansi::enable();
@@ -1259,6 +1275,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_ansi_description_not_bold() {
         let cmd = make_full_cmd();
         yansi::enable();
@@ -1274,6 +1291,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_ansi_default_hints_not_bold() {
         let cmd = make_full_cmd();
         yansi::enable();
@@ -1289,6 +1307,7 @@ name: MY_TOKEN
     }
 
     #[test]
+    #[serial]
     fn test_help_text_plain_and_ansi_same_structure() {
         // Both plain and ANSI outputs should contain the same sections and content.
         let cmd = make_full_cmd();

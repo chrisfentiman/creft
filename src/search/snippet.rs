@@ -271,6 +271,7 @@ fn merge_ranges(ranges: impl Iterator<Item = (usize, usize)>) -> Vec<(usize, usi
 mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
     use rstest::rstest;
+    use serial_test::serial;
 
     use super::*;
 
@@ -452,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_includes_name_and_description() {
         yansi::disable();
         let result = make_result("my-skill", "ns", "Does a thing", "this is a match line\n");
@@ -465,6 +467,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_with_show_namespace_true_includes_namespace_header() {
         yansi::disable();
         let result = make_result(
@@ -482,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_with_show_namespace_false_omits_namespace_header() {
         yansi::disable();
         let result = make_result(
@@ -499,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_separates_non_adjacent_snippets_with_ellipsis() {
         yansi::disable();
         // Two distant matches in the same document → two snippets → ellipsis separator.
@@ -524,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_skips_false_positive_results_but_shows_real_matches() {
         yansi::disable();
         let false_positive = SnippetResult {
@@ -544,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_produces_different_output_with_and_without_ansi() {
         // With ANSI enabled the output differs from plain text (has escape codes).
         yansi::enable();
@@ -566,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_multiple_docs_separated_by_blank_line() {
         yansi::disable();
         let r1 = make_result("doc-one", "ns", "first", "match here for one\n");
@@ -582,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn render_highlights_query_terms_in_matching_lines() {
         // Without ANSI: query term appears as plain text in the output.
         yansi::disable();

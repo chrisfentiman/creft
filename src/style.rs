@@ -66,6 +66,7 @@ fn color_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
+    use serial_test::serial;
     use yansi::Paint;
 
     use super::*;
@@ -96,6 +97,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn init_color_no_color_disables_yansi() {
         // SAFETY: nextest runs each test in a separate process, so env mutation
         // cannot race with other tests.
@@ -108,6 +110,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn init_color_term_dumb_disables_yansi() {
         let prev = std::env::var("TERM").ok();
         // SAFETY: nextest runs each test in a separate process, so env mutation
@@ -125,6 +128,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn paint_disabled_produces_no_ansi() {
         yansi::disable();
         let s = "hello".bold().to_string();
@@ -133,6 +137,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn paint_enabled_produces_ansi_bold() {
         yansi::enable();
         let s = "hello".bold().to_string();
