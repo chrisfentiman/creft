@@ -96,9 +96,12 @@ creft_search() {
     "$(_creft_escape "$_name")" >&3 2>/dev/null
   local _creft_response
   read -r _creft_response <&4
-  printf '%s' "$_creft_response" \
-    | sed 's/.*"results":"\([^"]*\)".*/\1/' \
-    | sed 's/\\n/\n/g'
+  case "$_creft_response" in
+    *'"error"'*) ;;
+    *) printf '%s' "$_creft_response" \
+         | sed 's/.*"results":"\([^"]*\)".*/\1/' \
+         | sed 's/\\n/\n/g' ;;
+  esac
 }
 # -- end creft runtime bindings --
 "#;

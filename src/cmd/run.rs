@@ -5,7 +5,7 @@ use yansi::Paint;
 
 use crate::cmd::skill::render_namespace_listing;
 use crate::error::CreftError;
-use crate::model::AppContext;
+use crate::model::{AppContext, SkillSource};
 use crate::settings::Settings;
 use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 use crate::{frontmatter, runner, shell, store};
@@ -181,9 +181,14 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         .ok()
         .and_then(|p| Settings::load(&p).ok())
         .and_then(|s| s.get("shell").map(str::to_string));
+    let plugin_name = match &source {
+        SkillSource::Plugin(name) => Some(name.clone()),
+        _ => None,
+    };
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
         .with_shell_preference(shell::detect(settings_shell_pref.as_deref()))
-        .with_skill_name(name.clone());
+        .with_skill_name(name.clone())
+        .with_plugin(plugin_name);
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.

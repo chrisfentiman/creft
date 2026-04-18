@@ -76,6 +76,14 @@ pub(crate) struct RunContext {
     /// previews outside of skill invocation).
     pub(crate) skill_name: String,
 
+    /// Plugin name when the skill is sourced from an activated plugin.
+    ///
+    /// `Some(name)` when the skill comes from `SkillSource::Plugin(name)`.
+    /// `None` for user-owned and package skills. Passed to `SearchContext`
+    /// so that `namespace::qualify` produces fully-qualified names with the
+    /// plugin prefix (e.g., `acme.deploy.beta` instead of `deploy.beta`).
+    pub(crate) plugin: Option<String>,
+
     /// Runtime indexes created by `creft_index` during this execution.
     ///
     /// Keyed by fully-qualified name (e.g., `"deploy.beta"`, `"acme.deploy.beta"`).
@@ -103,6 +111,7 @@ impl RunContext {
             dry_run,
             shell_preference: None,
             skill_name: String::new(),
+            plugin: None,
             runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -113,6 +122,17 @@ impl RunContext {
     /// when qualifying or resolving resource names.
     pub(crate) fn with_skill_name(mut self, name: impl Into<String>) -> Self {
         self.skill_name = name.into();
+        self
+    }
+
+    /// Set the plugin name when the skill is sourced from an activated plugin.
+    ///
+    /// Pass `Some(plugin_name)` for `SkillSource::Plugin` skills. Pass `None`
+    /// for user-owned and package skills. The plugin name is threaded through
+    /// to `SearchContext` so that `namespace::qualify` produces correctly
+    /// prefixed names (e.g., `acme.deploy.beta` for plugin `acme`).
+    pub(crate) fn with_plugin(mut self, plugin: Option<String>) -> Self {
+        self.plugin = plugin;
         self
     }
 
@@ -631,7 +651,7 @@ fn execute_block(
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
         let search_ctx = Some(channel::SearchContext {
             skill_name: ctx.skill_name.clone(),
-            plugin: None, // plugin context is not threaded into execute_block currently
+            plugin: ctx.plugin.clone(),
             runtime_indexes: Arc::clone(&ctx.runtime_indexes),
         });
         let reader = channel::spawn_reader(
@@ -806,8 +826,8 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    // Preserve skill_name and runtime_indexes from the original context so that
-    // creft_index / creft_search work correctly in skills with multiple blocks.
+    // Preserve skill_name, plugin, and runtime_indexes from the original context
+    // so that creft_index / creft_search work correctly in skills with multiple blocks.
     let ctx = RunContext {
         cancel: ctx.cancel_arc(),
         cwd: ctx.cwd().to_path_buf(),
@@ -816,6 +836,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         dry_run: ctx.is_dry_run(),
         shell_preference: ctx.shell_preference().map(String::from),
         skill_name: ctx.skill_name.clone(),
+        plugin: ctx.plugin.clone(),
         runtime_indexes: Arc::clone(&ctx.runtime_indexes),
     };
 
