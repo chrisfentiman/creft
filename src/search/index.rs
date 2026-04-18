@@ -1,4 +1,7 @@
-use super::{tokenize::tokenize, xor::Xor8Filter};
+use super::{
+    tokenize::{tokenize, tokenize_ngrams},
+    xor::Xor8Filter,
+};
 
 /// A single document's entry in a search index.
 ///
@@ -26,18 +29,25 @@ pub(crate) struct SearchIndex {
 impl SearchIndex {
     /// Build an index from a list of `(name, description, text)` tuples.
     ///
-    /// Each text is tokenized and an XOR filter is built from the tokens.
+    /// Each text is tokenized into whole-token hashes (for exact search) and
+    /// 3-gram hashes (for fuzzy candidate gating). Both sets are combined into
+    /// a single XOR filter per document. Existing `search` callers are unaffected:
+    /// whole-token hashes remain present in every filter.
+    ///
     /// Documents with no tokens (empty text) are included with an empty
     /// filter that rejects all queries.
     pub fn build(documents: &[(&str, &str, &str)]) -> Self {
         let entries = documents
             .iter()
             .map(|&(name, description, text)| {
-                let tokens = tokenize(text);
+                let mut all_keys = tokenize(text);
+                all_keys.extend(tokenize_ngrams(text));
+                all_keys.sort_unstable();
+                all_keys.dedup();
                 IndexEntry {
                     name: name.to_owned(),
                     description: description.to_owned(),
-                    filter: Xor8Filter::build(&tokens),
+                    filter: Xor8Filter::build(&all_keys),
                 }
             })
             .collect();
@@ -173,6 +183,7 @@ fn read_str(data: &[u8], pos: &mut usize, len: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tokenize::{tokenize, tokenize_ngrams};
     use pretty_assertions::assert_eq;
 
     fn build_three_doc_index() -> SearchIndex {
@@ -335,5 +346,69 @@ mod tests {
         let one = SearchIndex::build(&[("doc", "desc", "content")]);
         assert_eq!(one.len(), 1);
         assert!(!one.is_empty());
+    }
+
+    // ── combined filter (whole-token + n-gram hashes) ─────────────────────────
+
+    #[test]
+    fn build_filter_contains_whole_token_hashes() {
+        let idx = SearchIndex::build(&[("doc", "desc", "exit template")]);
+        let entry = &idx.entries[0];
+        for &hash in &tokenize("exit template") {
+            assert!(
+                entry.filter.contains(hash),
+                "filter must contain whole-token hash for 'exit template'"
+            );
+        }
+    }
+
+    #[test]
+    fn build_filter_contains_ngram_hashes() {
+        let idx = SearchIndex::build(&[("doc", "desc", "exit")]);
+        let entry = &idx.entries[0];
+        for &hash in &tokenize_ngrams("exit") {
+            assert!(
+                entry.filter.contains(hash),
+                "filter must contain n-gram hash for 'exit' grams"
+            );
+        }
+    }
+
+    #[test]
+    fn build_filter_contains_both_whole_token_and_ngram_hashes() {
+        // Verify that both hash sets are present in the same filter.
+        let idx = SearchIndex::build(&[("doc", "desc", "heredoc template")]);
+        let entry = &idx.entries[0];
+
+        let whole_tokens = tokenize("heredoc template");
+        let ngram_hashes = tokenize_ngrams("heredoc template");
+
+        for &hash in &whole_tokens {
+            assert!(entry.filter.contains(hash), "missing whole-token hash");
+        }
+        for &hash in &ngram_hashes {
+            assert!(entry.filter.contains(hash), "missing n-gram hash");
+        }
+    }
+
+    #[test]
+    fn exact_search_unchanged_after_combined_filter_build() {
+        // Exact search must still work identically now that the filter contains
+        // additional n-gram hashes alongside whole-token hashes.
+        let idx = build_three_doc_index();
+        let results = idx.search("template");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "deploy rollback");
+    }
+
+    #[test]
+    fn exact_search_and_semantics_unchanged() {
+        let idx = build_three_doc_index();
+        let results = idx.search("template placeholder");
+        assert_eq!(
+            results.len(),
+            0,
+            "AND semantics must be preserved with combined filter"
+        );
     }
 }
