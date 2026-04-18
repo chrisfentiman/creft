@@ -22,17 +22,30 @@ pub(crate) use self::substitute::substitute;
 
 /// A runtime search index with its access control flag.
 ///
-/// Created by `creft_index` during skill execution and held for the
-/// duration of that execution. Not persisted to disk — runtime indexes
-/// are ephemeral, scoped to a single skill invocation.
+/// Created by `creft_index` during skill execution. Accumulates documents
+/// across multiple calls to the same index name: each call appends a new
+/// document and rebuilds the XOR filter from all accumulated content.
+/// Not persisted to disk — runtime indexes are ephemeral, scoped to a
+/// single skill invocation.
 ///
-/// The `is_global` flag is set from the `global` field in the `creft_index`
-/// call. When `true`, other namespaces may query this index via `creft_search`
-/// using a dotted name. When `false`, only the owning namespace may query it.
+/// The `is_global` flag is set from the most recent `creft_index` call's
+/// `global` field. When `true`, other namespaces may query this index via
+/// `creft_search` using a dotted name. When `false`, only the owning
+/// namespace may query it.
 #[derive(Debug)]
 pub(crate) struct RuntimeIndex {
+    /// The current search index, rebuilt from `documents` on every
+    /// `creft_index` call.
     pub index: SearchIndex,
+    /// Whether this index is queryable from other namespaces.
+    /// Set from the most recent `creft_index` call's `global` flag.
     pub is_global: bool,
+    /// Raw documents accumulated by successive `creft_index` calls.
+    /// Each entry is `(document_name, content)`. The document name is a
+    /// sequential label (e.g., `"doc_0"`, `"doc_1"`) — runtime documents
+    /// have no user-visible identity. Search results for runtime indexes
+    /// return the index name, not per-document names.
+    pub documents: Vec<(String, String)>,
 }
 
 /// Execution context for a single skill invocation.

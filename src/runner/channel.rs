@@ -634,11 +634,32 @@ pub(crate) fn spawn_reader(
         .expect("failed to spawn channel reader thread")
 }
 
-/// Handle a `creft_index` message: qualify the name, build a `SearchIndex`,
-/// and store it in `runtime_indexes`.
+/// Escape a string for safe interpolation into a JSON string value.
+///
+/// Replaces the five characters that break JSON string literals:
+/// - `\` → `\\` (must be first to avoid double-escaping)
+/// - `"` → `\"`
+/// - tab → `\t`
+/// - newline → `\n`
+/// - carriage return → `\r`
+fn json_escape_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Handle a `creft_index` message: qualify the name, accumulate the document,
+/// rebuild the `SearchIndex`, and store the result in `runtime_indexes`.
 ///
 /// Called from the reader thread when an `Index` message arrives on fd 3.
 /// Fire-and-forget — no response is written to fd 4.
+///
+/// When called multiple times with the same qualified name, each call appends
+/// a new document to the index rather than replacing it. The `SearchIndex` is
+/// rebuilt from all accumulated documents on every call. The `is_global` flag
+/// is updated to the value from the most recent call (last-write-wins).
 fn handle_index_message(
     name: &str,
     content: &str,
@@ -649,16 +670,32 @@ fn handle_index_message(
 ) {
     let ns = namespace::skill_namespace(skill_name);
     let qualified = namespace::qualify(name, ns, plugin);
-    // Build the index from the provided content as a single document.
-    // The document name is the qualified index name; the description is empty
-    // (runtime indexes are ephemeral and not surfaced in search results listings).
-    let index = SearchIndex::build(&[(&qualified, "", content)]);
-    let runtime_index = RuntimeIndex {
-        index,
-        is_global: global,
-    };
+
     if let Ok(mut map) = runtime_indexes.lock() {
-        map.insert(qualified, runtime_index);
+        let runtime_index = map
+            .entry(qualified.clone())
+            .or_insert_with(|| RuntimeIndex {
+                index: SearchIndex::build(&[]),
+                is_global: global,
+                documents: Vec::new(),
+            });
+
+        // Append the new document with a sequential label. The label is only
+        // used internally by the XOR filter construction; search results for
+        // runtime indexes return the index name, not these per-document labels.
+        let doc_name = format!("doc_{}", runtime_index.documents.len());
+        runtime_index.documents.push((doc_name, content.to_owned()));
+        runtime_index.is_global = global;
+
+        // Rebuild the index from all accumulated documents. The number of
+        // runtime documents per index is small (a skill typically indexes
+        // 1–10 documents per invocation), so rebuilding is negligible.
+        let doc_triples: Vec<(&str, &str, &str)> = runtime_index
+            .documents
+            .iter()
+            .map(|(n, c)| (n.as_str(), "", c.as_str()))
+            .collect();
+        runtime_index.index = SearchIndex::build(&doc_triples);
     }
 }
 
@@ -702,7 +739,7 @@ fn handle_search_message(
             hits.iter()
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>()
-                .join("\\n")
+                .join("\n")
         } else {
             String::new()
         }
@@ -710,7 +747,8 @@ fn handle_search_message(
         String::new()
     };
 
-    format!("{{\"id\":\"{id}\",\"results\":\"{results}\"}}\n")
+    let escaped_results = json_escape_string(&results);
+    format!("{{\"id\":\"{id}\",\"results\":\"{escaped_results}\"}}\n")
 }
 
 /// Handle a prompt request by rendering it to the terminal and collecting user
@@ -782,14 +820,7 @@ pub(crate) fn handle_prompt(
     // not touch stderr and does not need the terminal lock.
     drop(g);
 
-    // Escape the answer for JSON: backslash and double-quote need escaping.
-    let escaped = answer
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-
+    let escaped = json_escape_string(&answer);
     let response = format!("{{\"id\":\"{id}\",\"value\":\"{escaped}\"}}\n");
     let _ = response_writer.write_all(response.as_bytes());
     let _ = response_writer.flush();
@@ -2040,5 +2071,177 @@ printf '%s' "$_resp"
             "",
             "search with no prior index must return empty results"
         );
+    }
+
+    // ── document accumulation tests ───────────────────────────────────────────
+
+    /// Two calls to handle_index_message with the same name accumulate both
+    /// documents: the RuntimeIndex contains 2 entries after the second call.
+    #[test]
+    fn handle_index_message_accumulates_documents_across_calls() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "first document about rollback",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "second document about deployment",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("deploy.docs")
+            .expect("deploy.docs must be in the map");
+        assert_eq!(
+            entry.documents.len(),
+            2,
+            "two creft_index calls to the same name must accumulate 2 documents"
+        );
+    }
+
+    /// After two calls with distinct tokens, searching for a token from the
+    /// first document still returns results (the first document is not lost).
+    #[test]
+    fn handle_index_message_first_document_searchable_after_second_call() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response =
+            super::handle_search_message("s1", "rollback", "docs", "deploy skill", None, &indexes);
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s1");
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search for token from first document must return results after second call; got: {response}"
+        );
+    }
+
+    /// After two calls with distinct tokens, searching for a token from the
+    /// second document returns results.
+    #[test]
+    fn handle_index_message_second_document_searchable_after_accumulation() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response = super::handle_search_message(
+            "s2",
+            "deployment",
+            "docs",
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(parsed["id"], "s2");
+        assert!(
+            !parsed["results"].as_str().unwrap_or("").is_empty(),
+            "search for token from second document must return results; got: {response}"
+        );
+    }
+
+    /// The is_global flag reflects the most recent call (last-write-wins).
+    #[test]
+    fn handle_index_message_is_global_last_write_wins() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message("docs", "content one", false, "deploy skill", None, &indexes);
+        super::handle_index_message("docs", "content two", true, "deploy skill", None, &indexes);
+
+        let map = indexes.lock().unwrap();
+        let entry = map
+            .get("deploy.docs")
+            .expect("deploy.docs must be in the map");
+        assert!(
+            entry.is_global,
+            "is_global must reflect the most recent call (true); last-write-wins"
+        );
+    }
+
+    // ── json_escape_string tests ──────────────────────────────────────────────
+
+    /// Entry names containing double-quotes produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_double_quote() {
+        let escaped = super::json_escape_string("name with \"quotes\"");
+        assert_eq!(escaped, r#"name with \"quotes\""#);
+        // Verify the escaped string produces valid JSON when embedded.
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "name with \"quotes\"");
+    }
+
+    /// Entry names containing backslashes produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_backslash() {
+        let escaped = super::json_escape_string("path\\to\\file");
+        assert_eq!(escaped, "path\\\\to\\\\file");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "path\\to\\file");
+    }
+
+    /// Entry names containing newlines produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_newline() {
+        let escaped = super::json_escape_string("line one\nline two");
+        assert_eq!(escaped, "line one\\nline two");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "line one\nline two");
+    }
+
+    /// Entry names containing tabs produce valid JSON in the search response.
+    #[test]
+    fn handle_search_message_response_valid_json_when_name_contains_tab() {
+        let escaped = super::json_escape_string("col\there");
+        assert_eq!(escaped, "col\\there");
+        let json = format!("{{\"results\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(parsed["results"], "col\there");
+    }
+
+    /// json_escape_string is a no-op for plain ASCII content.
+    #[test]
+    fn json_escape_string_passthrough_for_plain_ascii() {
+        let s = "deploy rollback configuration";
+        assert_eq!(super::json_escape_string(s), s);
     }
 }
