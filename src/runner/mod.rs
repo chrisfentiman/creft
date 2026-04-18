@@ -654,13 +654,31 @@ fn execute_block(
             plugin: ctx.plugin.clone(),
             runtime_indexes: Arc::clone(&ctx.runtime_indexes),
         });
+
+        // Duplicate the response writer fd so both the reader thread (which
+        // handles creft_search responses) and the prompt handler thread (which
+        // handles creft_prompt responses) can write to fd 4 independently.
+        // Without this, creft_search messages have nowhere to send their
+        // response and the bash block hangs forever on `read <&4`.
+        //
+        // SAFETY: resp_writer_fd is a valid, open fd we own. dup(2) returns a
+        // new fd independent of the original; both are valid write ends of the
+        // same pipe. OwnedFd takes ownership and closes on drop.
+        let search_resp_writer: Option<std::fs::File> = {
+            use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+            let raw = unsafe { libc::dup(resp_writer_fd.as_raw_fd()) };
+            if raw < 0 {
+                return Err(CreftError::Io(std::io::Error::last_os_error()));
+            }
+            // SAFETY: dup(2) returned a non-negative fd we own exclusively.
+            Some(unsafe { std::fs::File::from_raw_fd(raw) })
+        };
+
         let reader = channel::spawn_reader(
             ctrl_reader,
             std::sync::Arc::clone(&writer),
             Some(prompt_tx),
-            // The reader does not write responses directly — the prompt
-            // handler thread owns the response writer.
-            None,
+            search_resp_writer,
             Some(Arc::clone(&exit_signal)),
             search_ctx,
         );
@@ -2207,6 +2225,61 @@ mod tests {
         assert!(
             tmp.path().extension().map(|e| e == "py").unwrap_or(false),
             "python blocks must produce .py temp files"
+        );
+    }
+
+    // ── creft_search in single-block mode ────────────────────────────────────
+
+    /// A single-block bash skill that calls creft_index then creft_search must
+    /// receive the search response on fd 4 and complete without hanging.
+    ///
+    /// Before the fix, spawn_reader received None for its response_writer, so
+    /// Search messages were silently dropped and the bash block blocked forever
+    /// on `read <&4`. This test is the regression guard for that bug.
+    #[test]
+    #[cfg(unix)]
+    fn single_block_creft_search_receives_response_without_hanging() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-search".into(),
+                description: "single block with creft_index then creft_search".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![CodeBlock {
+                lang: "bash".into(),
+                // Index some content then search for it. If the response writer
+                // is missing, creft_search hangs forever on read <&4.
+                code: r#"creft_index "docs" "rollback deployment procedure"
+creft_search "rollback" "docs" > /dev/null
+echo "search completed"
+"#
+                .into(),
+                deps: vec![],
+                llm_config: None,
+                llm_parse_error: None,
+            }],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test search");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "single-block creft_search must complete without hanging: {:?}",
+            result
         );
     }
 }
