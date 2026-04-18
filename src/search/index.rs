@@ -1,5 +1,5 @@
 use super::{
-    tokenize::{tokenize, tokenize_ngrams},
+    tokenize::{query_ngrams, tokenize, tokenize_ngrams},
     xor::Xor8Filter,
 };
 
@@ -152,30 +152,37 @@ impl SearchIndex {
         self.entries.is_empty()
     }
 
-    /// Query the index for documents that contain enough query trigrams to be
+    /// Query the index for documents that contain enough query grams to be
     /// plausible candidates.
     ///
-    /// Generates trigrams from the query, then counts how many of the query's
-    /// trigrams each document's filter contains. Only entries where at least 2
-    /// trigrams match are returned — the count threshold eliminates the false
-    /// positives that any-single-gram matching produces on common 3-char substrings.
+    /// Generates variable-length grams from the query (bigrams for short query
+    /// tokens, trigrams for longer ones), then counts how many of the query's
+    /// grams each document's filter contains. An entry passes when the fraction
+    /// of matching grams meets a minimum ratio threshold — this is the count
+    /// filter from the q-gram literature, expressed as a ratio to handle the
+    /// variable gram-set sizes that arise from mixed bigram/trigram queries.
     ///
-    /// This is the candidate gate; the caller applies Tversky scoring and a score
-    /// threshold to further narrow results.
+    /// The ratio threshold (0.25) is intentionally permissive: the Tversky
+    /// scoring step that follows this gate applies the real precision cutoff.
+    /// The gate's job is to eliminate documents with no meaningful gram overlap,
+    /// not to make the final relevance decision.
     ///
-    /// Returns an empty vec when the query produces fewer than 2 trigrams (query
-    /// tokens all shorter than 5 characters after tokenization, or the query
-    /// itself is too short).
+    /// Returns an empty vec when the query produces no grams.
     pub fn search_fuzzy(&self, query: &str) -> Vec<&IndexEntry> {
-        let grams = tokenize_ngrams(query);
+        let grams = query_ngrams(query);
         if grams.is_empty() {
             return Vec::new();
         }
+        let n = grams.len();
         self.entries
             .iter()
             .filter(|entry| {
                 let matching = grams.iter().filter(|&&g| entry.filter.contains(g)).count();
-                matching >= 2
+                // Ratio-based threshold: at least 25% of the query's grams must
+                // be present in the document. This adapts naturally to queries
+                // that produce small gram sets (e.g., a 4-char token with bigrams
+                // produces 3 grams; 1 match = 33% > 25%).
+                matching as f64 / n as f64 >= 0.25
             })
             .collect()
     }
@@ -446,8 +453,9 @@ mod tests {
 
     #[test]
     fn search_fuzzy_returns_candidate_with_shared_trigrams() {
-        // "hered" trigrams: {her, ere, red}; "heredoc" trigrams include {her, ere, red}.
-        // All 3 query trigrams match -> passes the count threshold of 2.
+        // "hered" (5 chars) → query bigrams: trigrams {her,ere,red} (5 >= 5).
+        // "heredoc" filter contains trigrams {her,ere,red,...}.
+        // All 3 query grams match → ratio 3/3=1.0 >= 0.25 → passes.
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         let results = idx.search_fuzzy("hered");
         assert_eq!(
@@ -460,9 +468,9 @@ mod tests {
 
     #[test]
     fn search_fuzzy_returns_candidate_for_typo_query() {
-        // "templete" trigrams: {tem, emp, mpl, ple, let, ete}
-        // "template" trigrams: {tem, emp, mpl, pla, lat, ate}
-        // intersection = {tem, emp, mpl} = 3 >= 2 -> passes count threshold.
+        // "templete" (8 chars ≥ 5) → query trigrams {tem,emp,mpl,ple,let,ete} = 6.
+        // "template" filter contains trigrams {tem,emp,mpl,...}.
+        // 3 of 6 query grams match → ratio 0.5 >= 0.25 → passes.
         let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
         let results = idx.search_fuzzy("templete");
         assert_eq!(
@@ -498,12 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn search_fuzzy_requires_count_threshold_not_any_gram() {
-        // Count threshold: a document that shares only 1 trigram with the query
-        // must be rejected. "rollback" trigrams include {rol, oll, llb, lba, bac, ack};
-        // "template" trigrams include {tem, emp, mpl, pla, lat, ate}.
-        // No overlap -> "doc-b" is correctly excluded.
-        // "templete" and "template" share 3 trigrams -> "doc-a" passes.
+    fn search_fuzzy_requires_ratio_threshold_not_any_gram() {
+        // Ratio threshold: "rollback" grams share no overlap with "templete" query grams.
+        // "templete" (8 chars) query trigrams: {tem,emp,mpl,ple,let,ete}.
+        // "template" filter has trigrams {tem,emp,mpl,...} → 3/6=0.5 ≥ 0.25 → passes.
+        // "rollback" filter has trigrams {rol,oll,llb,...} → 0/6=0 < 0.25 → rejected.
         let idx = SearchIndex::build(&[
             ("doc-a", "desc", "template guide"),
             ("doc-b", "desc", "rollback procedure"),
@@ -512,9 +519,25 @@ mod tests {
         assert_eq!(
             results.len(),
             1,
-            "only the document with sufficient trigram overlap must be returned"
+            "only the document with sufficient gram overlap must be returned"
         );
         assert_eq!(results[0].name, "doc-a");
+    }
+
+    #[test]
+    fn search_fuzzy_short_query_bigrams_match_document_via_shared_bigram() {
+        // "ecit" (4 chars, < 5) → query bigrams {ec, ci, it}.
+        // "exit" indexed with bigrams {ex, xi, it}: "it" is in both → 1/3=0.33 ≥ 0.25 → passes.
+        // This verifies that single-substitution typos in 4-char tokens reach the
+        // Tversky scorer instead of being silently rejected at the filter gate.
+        let idx = SearchIndex::build(&[("cmd", "desc", "exit code handling")]);
+        let results = idx.search_fuzzy("ecit");
+        assert_eq!(
+            results.len(),
+            1,
+            "document with 'exit' must be a candidate for single-substitution query 'ecit'"
+        );
+        assert_eq!(results[0].name, "cmd");
     }
 
     #[test]

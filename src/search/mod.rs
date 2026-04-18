@@ -18,7 +18,11 @@ use self::snippet::{SnippetResult, extract_snippets, extract_snippets_fuzzy};
 use self::tokenize::score_query_with_matches;
 
 const SNIPPET_CONTEXT: usize = 2;
-pub(crate) const FUZZY_THRESHOLD: f64 = 0.4;
+// Minimum Tversky score for a fuzzy candidate to appear in results.
+// Set to 0.3 to accommodate short-token single-substitution typos: a 4-char
+// token with one substituted character scores ≈0.33 with bigrams (1 shared
+// gram out of 3 query grams), which just clears this threshold.
+pub(crate) const FUZZY_THRESHOLD: f64 = 0.3;
 
 /// Search all indexes across all scopes, loading content snippets for matches.
 ///

@@ -53,23 +53,25 @@ fn split_and_lowercase(text: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|tok| tok.len() >= 2)
 }
 
-/// Generate all contiguous 3-character substrings of a single lowercase token.
+/// Generate all contiguous substrings of length `n` from a single lowercase token.
 ///
-/// "exit" → \["exi", "xit"\]
-/// "abc"  → \["abc"\]
-/// "ab"   → \[\] (too short for a trigram)
-/// "a"    → \[\] (too short)
+/// ```text
+/// grams_from_token("exit", 3) → ["exi", "xit"]
+/// grams_from_token("exit", 2) → ["ex", "xi", "it"]
+/// grams_from_token("abc", 3)  → ["abc"]
+/// grams_from_token("ab", 3)   → []  (too short)
+/// grams_from_token("a", 2)    → []  (too short)
+/// ```
 ///
-/// The returned substrings borrow from `token`. Tokens shorter than 3 characters
-/// produce no grams; they are already covered by whole-token hashes.
-fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
-    const N: usize = 3;
+/// The returned substrings borrow from `token`. Tokens shorter than `n` characters
+/// produce no grams; they are covered by whole-token hashes.
+fn grams_from_token(token: &str, n: usize) -> impl Iterator<Item = &str> {
     let chars: Vec<(usize, char)> = token.char_indices().collect();
     let len = chars.len();
-    (0..len.saturating_sub(N - 1)).map(move |i| {
+    (0..len.saturating_sub(n - 1)).map(move |i| {
         let start = chars[i].0;
-        let end = if i + N < len {
-            chars[i + N].0
+        let end = if i + n < len {
+            chars[i + n].0
         } else {
             token.len()
         };
@@ -77,25 +79,59 @@ fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Generate trigram hashes from text.
+/// Choose gram size for a token using a VGRAM-inspired heuristic.
 ///
-/// Splits text into tokens using the same rules as `tokenize` (split on
-/// non-alphanumeric/underscore/hyphen, lowercase, filter >= 2 chars), then
-/// for each token of length >= 3, generates all contiguous 3-character
-/// substrings and hashes each one.
+/// Tokens with fewer than 5 characters produce only 2 trigrams at most, which
+/// is too few for a single-substitution typo to retain any shared grams.
+/// Bigrams give more overlap for short tokens at the cost of lower selectivity.
 ///
-/// Tokens shorter than 3 characters produce no grams (they are already
-/// covered by whole-token hashes in the combined filter).
+/// - tokens with 4 or fewer chars → bigrams (n=2)
+/// - tokens with 5 or more chars  → trigrams (n=3)
+fn gram_size_for(token: &str) -> usize {
+    if token.chars().count() < 5 { 2 } else { 3 }
+}
+
+/// Generate variable-length gram hashes from a single token.
 ///
-/// Duplicate grams across tokens are deduplicated. For example, "exit" and
-/// "exits" both contain the gram "xit" — it appears once in the output.
+/// Uses `gram_size_for` to pick gram size, then hashes each gram.
+fn token_gram_hashes(token: &str) -> impl Iterator<Item = u64> + '_ {
+    let n = gram_size_for(token);
+    grams_from_token(token, n).map(hash_token)
+}
+
+/// Generate query gram hashes for fuzzy candidate filtering.
+///
+/// Uses the VGRAM-inspired size selection: bigrams for tokens shorter than
+/// 5 characters, trigrams for longer tokens. Each token selects independently.
+/// This is the right set to test against the document filter, which was built
+/// with `tokenize_ngrams` (both bigrams and trigrams) and therefore contains
+/// grams at both sizes.
+pub(crate) fn query_ngrams(text: &str) -> Vec<u64> {
+    let mut hashes: Vec<u64> = split_and_lowercase(text)
+        .flat_map(|tok| token_gram_hashes(&tok).collect::<Vec<u64>>())
+        .collect();
+
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes
+}
+
+/// Generate gram hashes for index construction.
+///
+/// Splits text into tokens (same rules as `tokenize`), then for each token
+/// emits **both** bigram and trigram hashes. Indexing with both gram sizes
+/// ensures the XOR filter can be queried at either gram size — so a query
+/// that uses bigrams (short query token) finds bigrams in the document filter,
+/// and a query that uses trigrams (longer query token) finds trigrams, even
+/// when the document token and the query token happen to be different lengths.
+///
+/// Duplicate hashes across tokens and across gram sizes are deduplicated.
 pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     let mut hashes: Vec<u64> = split_and_lowercase(text)
         .flat_map(|tok| {
-            // ngrams_from_token borrows from tok, so collect into owned strings first.
-            ngrams_from_token(&tok)
-                .map(hash_token)
-                .collect::<Vec<u64>>()
+            let bigrams = grams_from_token(&tok, 2).map(hash_token);
+            let trigrams = grams_from_token(&tok, 3).map(hash_token);
+            bigrams.chain(trigrams).collect::<Vec<u64>>()
         })
         .collect();
 
@@ -104,17 +140,37 @@ pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     hashes
 }
 
-/// Extract the set of trigram strings from text.
+/// Extract the set of gram strings from text at a fixed gram size.
 ///
-/// Same tokenization rules as `tokenize_ngrams`, but returns the actual
-/// gram strings instead of hashes. Used by `tversky_score` for set
-/// comparison.
+/// Same tokenization rules as `tokenize_ngrams`, but returns the actual gram
+/// strings at the specified gram size `n`. Used internally by `tversky_score`
+/// so that both the query and document grams are generated at the same size —
+/// a requirement for meaningful set intersection.
 ///
 /// Returns a `HashSet` for O(1) intersection operations.
-pub(crate) fn gram_set(text: &str) -> HashSet<String> {
+fn gram_set_at(text: &str, n: usize) -> HashSet<String> {
     let mut grams = HashSet::new();
     for tok in split_and_lowercase(text) {
-        for gram in ngrams_from_token(&tok) {
+        for gram in grams_from_token(&tok, n) {
+            grams.insert(gram.to_owned());
+        }
+    }
+    grams
+}
+
+/// Extract the set of variable-length gram strings from text.
+///
+/// Uses the VGRAM-inspired size selection from `gram_size_for`: bigrams for
+/// tokens shorter than 5 characters, trigrams for longer tokens. Each token
+/// selects its own gram size independently.
+///
+/// Returns a `HashSet` for O(1) intersection operations.
+#[cfg(test)]
+fn gram_set(text: &str) -> HashSet<String> {
+    let mut grams = HashSet::new();
+    for tok in split_and_lowercase(text) {
+        let n = gram_size_for(&tok);
+        for gram in grams_from_token(&tok, n) {
             grams.insert(gram.to_owned());
         }
     }
@@ -123,7 +179,8 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 
 /// Compute the Tversky similarity between a query and a document token.
 ///
-/// Generates trigram sets from both strings and computes:
+/// Generates gram sets from both strings at a size determined by the query
+/// token's length, and computes:
 ///
 /// ```text
 /// |intersection| / (|intersection| + a * |query_only| + b * |doc_only|)
@@ -132,13 +189,28 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 /// Uses a=1.0, b=0.0 (prototype model): the score measures what fraction
 /// of the query's grams appear in the document token. The document can be
 /// any length without penalty. This rewards partial recall queries (e.g.,
-/// "here" scores 1.0 against "heredoc") and penalizes only the query's
+/// "hered" scores 1.0 against "heredoc") and penalizes only the query's
 /// unmatched grams (typos reduce the score proportionally).
 ///
-/// Returns 0.0 when either input produces no trigrams.
+/// The gram size is fixed to the query's length-based choice and applied to
+/// both the query and the document. Generating both sides at the same gram
+/// size ensures meaningful set intersection across tokens of different lengths
+/// — if the query is short (bigrams) the document is also compared via bigrams,
+/// so a single substitution in a 4-char token retains one shared bigram.
+///
+/// Returns 0.0 when the query produces no grams at the chosen gram size.
 pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
-    let query_grams = gram_set(query);
-    let doc_grams = gram_set(document);
+    // Determine gram size from the query's first (and typically only) token.
+    // For multi-word inputs, the first token's length drives the gram size;
+    // score_query calls this function once per query word, so in practice
+    // each call has a single-word query.
+    let n = split_and_lowercase(query)
+        .map(|tok| gram_size_for(&tok))
+        .next()
+        .unwrap_or(3);
+
+    let query_grams = gram_set_at(query, n);
+    let doc_grams = gram_set_at(document, n);
 
     if query_grams.is_empty() {
         return 0.0;
@@ -350,6 +422,11 @@ mod tests {
 
     // ── ngrams_from_token ─────────────────────────────────────────────────────
 
+    /// Trigram wrapper used only in these tests to verify `grams_from_token` at n=3.
+    fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
+        grams_from_token(token, 3)
+    }
+
     #[test]
     fn ngrams_from_token_yields_sliding_window() {
         let token = "exit";
@@ -386,28 +463,40 @@ mod tests {
     // ── tokenize_ngrams ───────────────────────────────────────────────────────
 
     #[test]
-    fn tokenize_ngrams_four_char_token_produces_two_hashes() {
+    fn tokenize_ngrams_four_char_token_produces_both_gram_sizes() {
+        // "exit" (4 chars): bigrams {ex,xi,it}=3 + trigrams {exi,xit}=2 = 5 unique hashes.
+        // Indexing with both sizes lets the filter answer queries at either gram size.
         let hashes = tokenize_ngrams("exit");
-        assert_eq!(hashes.len(), 2, "exit -> {{exi, xit}}");
+        assert_eq!(hashes.len(), 5, "exit -> {{ex,xi,it,exi,xit}} (bigrams + trigrams)");
     }
 
     #[test]
-    fn tokenize_ngrams_five_char_token_produces_three_hashes() {
+    fn tokenize_ngrams_five_char_token_produces_both_gram_sizes() {
+        // "hello" (5 chars): bigrams {he,el,ll,lo}=4 + trigrams {hel,ell,llo}=3 = 7 hashes.
         let hashes = tokenize_ngrams("hello");
-        assert_eq!(hashes.len(), 3, "hello -> {{hel, ell, llo}}");
+        assert_eq!(
+            hashes.len(),
+            7,
+            "hello -> 4 bigrams {{he,el,ll,lo}} + 3 trigrams {{hel,ell,llo}}"
+        );
     }
 
     #[test]
-    fn tokenize_ngrams_two_char_token_produces_no_hashes() {
-        // Trigrams require at least 3 characters; "ab" produces nothing.
+    fn tokenize_ngrams_two_char_token_produces_one_hash() {
+        // "ab" (2 chars): bigrams {ab}=1, no trigrams. Total = 1.
         let hashes = tokenize_ngrams("ab");
-        assert_eq!(hashes.len(), 0, "ab produces no trigrams");
+        assert_eq!(hashes.len(), 1, "ab -> {{ab}} (one bigram, no trigrams)");
     }
 
     #[test]
-    fn tokenize_ngrams_three_char_token_produces_one_hash() {
+    fn tokenize_ngrams_three_char_token_produces_three_hashes() {
+        // "abc" (3 chars): bigrams {ab,bc}=2 + trigrams {abc}=1 = 3 hashes.
         let hashes = tokenize_ngrams("abc");
-        assert_eq!(hashes.len(), 1, "abc -> {{abc}}");
+        assert_eq!(
+            hashes.len(),
+            3,
+            "abc -> {{ab,bc}} bigrams + {{abc}} trigram = 3"
+        );
     }
 
     #[test]
@@ -427,13 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn tokenize_ngrams_multi_word_produces_grams_from_both_tokens() {
-        // "hello world" should produce grams from "hello" (3) and "world" (3)
-        // "hello" grams: hel, ell, llo; "world" grams: wor, orl, rld — no overlap
+    fn tokenize_ngrams_multi_word_no_overlap_produces_union() {
+        // "hello world": both tokens produce bigrams+trigrams with no cross-token overlap.
+        // "hello": {he,el,ll,lo,hel,ell,llo}=7; "world": {wo,or,rl,ld,wor,orl,rld}=7
         let both = tokenize_ngrams("hello world");
         let hello = tokenize_ngrams("hello");
         let world = tokenize_ngrams("world");
-        // Union of hello and world grams (no overlap between them)
         assert_eq!(both.len(), hello.len() + world.len());
     }
 
@@ -448,16 +536,24 @@ mod tests {
     #[test]
     fn tokenize_ngrams_short_tokens_after_split_produce_grams() {
         // "it's a test!" splits to: "it", "s", "a", "test"
-        // "test" (4 chars) survives and produces 2 trigrams: {tes, est}.
-        // "it" (2 chars), "s", and "a" are all too short for trigrams.
+        // "it" (2 chars): bigrams {it}=1, no trigrams
+        // "test" (4 chars): bigrams {te,es,st}=3, trigrams {tes,est}=2 → 5
+        // "s" and "a" are filtered out by the >= 2 char minimum.
+        // Total deduplicated: {it, te, es, st, tes, est} = 6 hashes.
         let hashes = tokenize_ngrams("it's a test!");
-        assert_eq!(hashes.len(), 2, "'test' produces {{tes, est}}; 'it' is too short");
+        assert_eq!(
+            hashes.len(),
+            6,
+            "'it' -> {{it}}, 'test' -> {{te,es,st,tes,est}}: 6 unique grams"
+        );
     }
 
     // ── gram_set ──────────────────────────────────────────────────────────────
 
     #[rstest]
-    #[case::exit("exit", vec!["exi", "xit"])]
+    // "exit" is 4 chars (< 5) → bigrams
+    #[case::exit("exit", vec!["ex", "xi", "it"])]
+    // "heredoc" is 7 chars (>= 5) → trigrams
     #[case::heredoc("heredoc", vec!["her", "ere", "red", "edo", "doc"])]
     fn gram_set_produces_expected_grams(#[case] input: &str, #[case] expected: Vec<&str>) {
         let result = gram_set(input);
@@ -466,10 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn gram_set_two_char_input_yields_no_grams() {
-        // Two characters cannot form a trigram.
+    fn gram_set_two_char_input_yields_one_bigram() {
+        // Two characters produce one bigram.
         let result = gram_set("ab");
-        assert!(result.is_empty(), "two-char input produces no trigrams");
+        assert_eq!(result.len(), 1, "two-char input produces one bigram");
+        assert!(result.contains("ab"), "bigram must be the token itself");
     }
 
     #[test]
@@ -509,13 +606,15 @@ mod tests {
     }
 
     #[test]
-    fn tversky_score_single_transposition_four_char_token_no_shared_trigrams() {
-        // "ecit" trigrams: {eci, cit}; "exit" trigrams: {exi, xit}
-        // No shared trigrams: intersection = 0, score = 0.0
-        // Trigrams do not catch single-transposition typos in 4-char tokens —
-        // longer queries (5+ chars) retain enough shared trigrams to score well.
+    fn tversky_score_single_substitution_four_char_token_shares_bigram() {
+        // "ecit" bigrams (4 chars, < 5 → bigrams): {ec, ci, it}
+        // "exit" bigrams (4 chars, < 5 → bigrams): {ex, xi, it}
+        // intersection = {it} = 1, query_only = {ec, ci} = 2
+        // score = 1 / (1 + 2) = 1/3 ≈ 0.333
+        // With bigrams, a single substitution in a 4-char token retains one
+        // shared gram — enough to score above the 0.3 fuzzy threshold.
         let score = tversky_score("ecit", "exit");
-        assert_eq!(score, 0.0);
+        assert!((score - 1.0 / 3.0).abs() < 1e-10, "expected 1/3, got {score}");
     }
 
     #[test]
