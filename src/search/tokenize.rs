@@ -53,21 +53,23 @@ fn split_and_lowercase(text: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|tok| tok.len() >= 2)
 }
 
-/// Generate all contiguous 2-character substrings of a single lowercase token.
+/// Generate all contiguous 3-character substrings of a single lowercase token.
 ///
-/// "exit" → \["ex", "xi", "it"\]
-/// "ab"   → \["ab"\]
+/// "exit" → \["exi", "xit"\]
+/// "abc"  → \["abc"\]
+/// "ab"   → \[\] (too short for a trigram)
 /// "a"    → \[\] (too short)
 ///
-/// The returned substrings borrow from `token`. Tokens shorter than 2 characters
+/// The returned substrings borrow from `token`. Tokens shorter than 3 characters
 /// produce no grams; they are already covered by whole-token hashes.
 fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
+    const N: usize = 3;
     let chars: Vec<(usize, char)> = token.char_indices().collect();
     let len = chars.len();
-    (0..len.saturating_sub(1)).map(move |i| {
+    (0..len.saturating_sub(N - 1)).map(move |i| {
         let start = chars[i].0;
-        let end = if i + 2 < len {
-            chars[i + 2].0
+        let end = if i + N < len {
+            chars[i + N].0
         } else {
             token.len()
         };
@@ -75,18 +77,18 @@ fn ngrams_from_token(token: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Generate bigram hashes from text.
+/// Generate trigram hashes from text.
 ///
 /// Splits text into tokens using the same rules as `tokenize` (split on
 /// non-alphanumeric/underscore/hyphen, lowercase, filter >= 2 chars), then
-/// for each token of length >= 2, generates all contiguous 2-character
+/// for each token of length >= 3, generates all contiguous 3-character
 /// substrings and hashes each one.
 ///
-/// Tokens shorter than 2 characters produce no grams (they are already
+/// Tokens shorter than 3 characters produce no grams (they are already
 /// covered by whole-token hashes in the combined filter).
 ///
 /// Duplicate grams across tokens are deduplicated. For example, "exit" and
-/// "exits" both contain the gram "it" — it appears once in the output.
+/// "exits" both contain the gram "xit" — it appears once in the output.
 pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     let mut hashes: Vec<u64> = split_and_lowercase(text)
         .flat_map(|tok| {
@@ -102,7 +104,7 @@ pub(crate) fn tokenize_ngrams(text: &str) -> Vec<u64> {
     hashes
 }
 
-/// Extract the set of bigram strings from text.
+/// Extract the set of trigram strings from text.
 ///
 /// Same tokenization rules as `tokenize_ngrams`, but returns the actual
 /// gram strings instead of hashes. Used by `tversky_score` for set
@@ -121,7 +123,7 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 
 /// Compute the Tversky similarity between a query and a document token.
 ///
-/// Generates bigram sets from both strings and computes:
+/// Generates trigram sets from both strings and computes:
 ///
 /// ```text
 /// |intersection| / (|intersection| + a * |query_only| + b * |doc_only|)
@@ -130,10 +132,10 @@ pub(crate) fn gram_set(text: &str) -> HashSet<String> {
 /// Uses a=1.0, b=0.0 (prototype model): the score measures what fraction
 /// of the query's grams appear in the document token. The document can be
 /// any length without penalty. This rewards partial recall queries (e.g.,
-/// "hered" scores 1.0 against "heredoc") and penalizes only the query's
+/// "here" scores 1.0 against "heredoc") and penalizes only the query's
 /// unmatched grams (typos reduce the score proportionally).
 ///
-/// Returns 0.0 when either input produces no bigrams.
+/// Returns 0.0 when either input produces no trigrams.
 pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
     let query_grams = gram_set(query);
     let doc_grams = gram_set(document);
@@ -166,8 +168,8 @@ pub(crate) fn tversky_score(query: &str, document: &str) -> f64 {
 /// A document that contains good matches for all query words scores close to 1.0.
 /// A document that matches only some words scores proportionally lower.
 ///
-/// Returns 0.0 when the query is empty or all query words are shorter than 2
-/// characters (no bigrams can be generated to compare).
+/// Returns 0.0 when the query is empty or all query words are shorter than 3
+/// characters (no trigrams can be generated to compare).
 pub(crate) fn score_query(query: &str, document_text: &str) -> f64 {
     score_query_with_matches(query, document_text).0
 }
@@ -352,21 +354,27 @@ mod tests {
     fn ngrams_from_token_yields_sliding_window() {
         let token = "exit";
         let grams: Vec<&str> = ngrams_from_token(token).collect();
-        assert_eq!(grams, vec!["ex", "xi", "it"]);
+        assert_eq!(grams, vec!["exi", "xit"]);
     }
 
     #[test]
-    fn ngrams_from_token_exactly_two_chars_yields_one_gram() {
-        let token = "ab";
-        let grams: Vec<&str> = ngrams_from_token(token).collect();
-        assert_eq!(grams, vec!["ab"]);
-    }
-
-    #[test]
-    fn ngrams_from_token_three_chars_yields_two_grams() {
+    fn ngrams_from_token_exactly_three_chars_yields_one_gram() {
         let token = "abc";
         let grams: Vec<&str> = ngrams_from_token(token).collect();
-        assert_eq!(grams, vec!["ab", "bc"]);
+        assert_eq!(grams, vec!["abc"]);
+    }
+
+    #[test]
+    fn ngrams_from_token_four_chars_yields_two_grams() {
+        let token = "abcd";
+        let grams: Vec<&str> = ngrams_from_token(token).collect();
+        assert_eq!(grams, vec!["abc", "bcd"]);
+    }
+
+    #[test]
+    fn ngrams_from_token_two_chars_yields_nothing() {
+        let grams: Vec<&str> = ngrams_from_token("ab").collect();
+        assert!(grams.is_empty(), "trigrams require at least 3 characters");
     }
 
     #[test]
@@ -378,27 +386,28 @@ mod tests {
     // ── tokenize_ngrams ───────────────────────────────────────────────────────
 
     #[test]
-    fn tokenize_ngrams_four_char_token_produces_three_hashes() {
+    fn tokenize_ngrams_four_char_token_produces_two_hashes() {
         let hashes = tokenize_ngrams("exit");
-        assert_eq!(hashes.len(), 3, "exit -> {{ex, xi, it}}");
+        assert_eq!(hashes.len(), 2, "exit -> {{exi, xit}}");
     }
 
     #[test]
-    fn tokenize_ngrams_five_char_token_produces_four_hashes() {
+    fn tokenize_ngrams_five_char_token_produces_three_hashes() {
         let hashes = tokenize_ngrams("hello");
-        assert_eq!(hashes.len(), 4, "hello -> {{he, el, ll, lo}}");
+        assert_eq!(hashes.len(), 3, "hello -> {{hel, ell, llo}}");
     }
 
     #[test]
-    fn tokenize_ngrams_two_char_token_produces_one_hash() {
+    fn tokenize_ngrams_two_char_token_produces_no_hashes() {
+        // Trigrams require at least 3 characters; "ab" produces nothing.
         let hashes = tokenize_ngrams("ab");
-        assert_eq!(hashes.len(), 1, "ab -> {{ab}}");
+        assert_eq!(hashes.len(), 0, "ab produces no trigrams");
     }
 
     #[test]
-    fn tokenize_ngrams_three_char_token_produces_two_hashes() {
+    fn tokenize_ngrams_three_char_token_produces_one_hash() {
         let hashes = tokenize_ngrams("abc");
-        assert_eq!(hashes.len(), 2, "abc -> {{ab, bc}}");
+        assert_eq!(hashes.len(), 1, "abc -> {{abc}}");
     }
 
     #[test]
@@ -419,8 +428,8 @@ mod tests {
 
     #[test]
     fn tokenize_ngrams_multi_word_produces_grams_from_both_tokens() {
-        // "hello world" should produce grams from "hello" (4) and "world" (4)
-        // "hello" grams: he, el, ll, lo; "world" grams: wo, or, rl, ld — no overlap
+        // "hello world" should produce grams from "hello" (3) and "world" (3)
+        // "hello" grams: hel, ell, llo; "world" grams: wor, orl, rld — no overlap
         let both = tokenize_ngrams("hello world");
         let hello = tokenize_ngrams("hello");
         let world = tokenize_ngrams("world");
@@ -439,21 +448,17 @@ mod tests {
     #[test]
     fn tokenize_ngrams_short_tokens_after_split_produce_grams() {
         // "it's a test!" splits to: "it", "s", "a", "test"
-        // "it" and "test" survive the >= 2 char filter; "s" and "a" are dropped.
-        // "it" (2 chars) -> 1 gram: {it}. "test" (4 chars) -> 3 grams: {te, es, st}.
+        // "test" (4 chars) survives and produces 2 trigrams: {tes, est}.
+        // "it" (2 chars), "s", and "a" are all too short for trigrams.
         let hashes = tokenize_ngrams("it's a test!");
-        assert_eq!(
-            hashes.len(),
-            4,
-            "'it' produces {{it}}; 'test' produces {{te, es, st}}"
-        );
+        assert_eq!(hashes.len(), 2, "'test' produces {{tes, est}}; 'it' is too short");
     }
 
     // ── gram_set ──────────────────────────────────────────────────────────────
 
     #[rstest]
-    #[case::exit("exit", vec!["ex", "xi", "it"])]
-    #[case::heredoc("heredoc", vec!["he", "er", "re", "ed", "do", "oc"])]
+    #[case::exit("exit", vec!["exi", "xit"])]
+    #[case::heredoc("heredoc", vec!["her", "ere", "red", "edo", "doc"])]
     fn gram_set_produces_expected_grams(#[case] input: &str, #[case] expected: Vec<&str>) {
         let result = gram_set(input);
         let expected_set: HashSet<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -461,9 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn gram_set_two_char_input_yields_one_gram() {
+    fn gram_set_two_char_input_yields_no_grams() {
+        // Two characters cannot form a trigram.
         let result = gram_set("ab");
-        assert_eq!(result, HashSet::from(["ab".to_owned()]));
+        assert!(result.is_empty(), "two-char input produces no trigrams");
     }
 
     #[test]
@@ -480,8 +486,8 @@ mod tests {
 
     #[test]
     fn tversky_score_partial_recall_query_fully_contained_in_doc() {
-        // "hered" bigrams: {he, er, re, ed}; "heredoc" bigrams: {he, er, re, ed, do, oc}
-        // intersection=4, query_only=0 -> score = 4/4 = 1.0
+        // "hered" trigrams: {her, ere, red}; "heredoc" trigrams: {her, ere, red, edo, doc}
+        // intersection=3, query_only=0 -> score = 3/3 = 1.0
         let score = tversky_score("hered", "heredoc");
         assert_eq!(score, 1.0);
     }
@@ -489,25 +495,35 @@ mod tests {
     #[test]
     fn tversky_score_identical_strings() {
         assert_eq!(tversky_score("heredoc", "heredoc"), 1.0);
+        // "exit" only has 2 trigrams (exi, xit), still identical -> 1.0
         assert_eq!(tversky_score("exit", "exit"), 1.0);
     }
 
     #[test]
     fn tversky_score_typo_returns_partial_score() {
-        // "templete" bigrams: {te, em, mp, pl, le, et}
-        // "template" bigrams: {te, em, mp, pl, la, at}
-        // intersection = {te, em, mp, pl} = 4, query_only = {le, et} = 2 -> score = 4/6 = 2/3
+        // "templete" trigrams: {tem, emp, mpl, ple, let, ete}
+        // "template" trigrams: {tem, emp, mpl, pla, lat, ate}
+        // intersection = {tem, emp, mpl} = 3, query_only = {ple, let, ete} = 3 -> score = 3/6 = 0.5
         let score = tversky_score("templete", "template");
-        assert_eq!(score, 4.0 / 6.0);
+        assert_eq!(score, 3.0 / 6.0);
     }
 
     #[test]
-    fn tversky_score_single_transposition_four_char_token_shares_one_bigram() {
-        // "ecit" bigrams: {ec, ci, it}; "exit" bigrams: {ex, xi, it}
-        // intersection = {it} = 1, query_only = {ec, ci} = 2 -> score = 1/3
-        // Bigrams catch the shared "it" that trigrams miss entirely.
+    fn tversky_score_single_transposition_four_char_token_no_shared_trigrams() {
+        // "ecit" trigrams: {eci, cit}; "exit" trigrams: {exi, xit}
+        // No shared trigrams: intersection = 0, score = 0.0
+        // Trigrams do not catch single-transposition typos in 4-char tokens —
+        // longer queries (5+ chars) retain enough shared trigrams to score well.
         let score = tversky_score("ecit", "exit");
-        assert_eq!(score, 1.0 / 3.0);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn tversky_score_typo_five_char_token_shares_trigrams() {
+        // "exitt" trigrams: {exi, xit, itt}; "exit" trigrams: {exi, xit}
+        // intersection = {exi, xit} = 2, query_only = {itt} = 1 -> score = 2/3
+        let score = tversky_score("exitt", "exit");
+        assert_eq!(score, 2.0 / 3.0);
     }
 
     #[test]
@@ -516,8 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn tversky_score_no_shared_bigrams_returns_zero() {
-        // "ab" bigrams: {ab}; "heredoc" bigrams: {he, er, re, ed, do, oc} — no overlap
+    fn tversky_score_no_shared_trigrams_returns_zero() {
+        // "ab" has no trigrams (too short); "heredoc" has {her, ere, red, edo, doc} — no overlap
         assert_eq!(tversky_score("ab", "heredoc"), 0.0);
     }
 
@@ -533,8 +549,8 @@ mod tests {
     #[test]
     fn tversky_score_is_asymmetric() {
         // With a=1.0, b=0.0 the score is not symmetric.
-        // "hered" bigrams are a subset of "heredoc" bigrams, so forward = 1.0.
-        // "heredoc" has bigrams {do, oc} not in "hered", so reverse < 1.0.
+        // "hered" trigrams are a subset of "heredoc" trigrams, so forward = 1.0.
+        // "heredoc" has trigrams {edo, doc} not in "hered", so reverse < 1.0.
         let forward = tversky_score("hered", "heredoc");
         let reverse = tversky_score("heredoc", "hered");
         assert_eq!(forward, 1.0);
@@ -545,18 +561,18 @@ mod tests {
 
     #[test]
     fn score_query_single_word_best_match_in_document() {
-        // "hered" scores 1.0 against "heredoc"; best doc word is "heredoc"
+        // "hered" trigrams fully contained in "heredoc" trigrams -> score 1.0
         let score = score_query("hered", "this explains the heredoc syntax");
         assert_eq!(score, 1.0);
     }
 
     #[test]
     fn score_query_multi_word_averages_per_word_best_scores() {
-        // "hered" bigrams fully contained in "heredoc" bigrams -> 1.0
-        // "templete" vs "template": intersection=4, query_only=2 -> 4/6 = 2/3
-        // average = (1.0 + 4/6) / 2
+        // "hered" trigrams fully contained in "heredoc" trigrams -> 1.0
+        // "templete" vs "template": intersection=3, query_only=3 -> 3/6 = 0.5
+        // average = (1.0 + 0.5) / 2
         let score = score_query("hered templete", "the heredoc template guide");
-        assert_eq!(score, (1.0 + 4.0 / 6.0) / 2.0);
+        assert_eq!(score, (1.0 + 3.0 / 6.0) / 2.0);
     }
 
     #[test]
@@ -597,18 +613,20 @@ mod tests {
 
     #[test]
     fn score_query_with_matches_returns_best_matching_doc_word() {
-        // "ecit" best matches "exit" (score 1/3, the only word with any gram overlap).
-        // The matched word must be "exit", not the query typo "ecit".
-        let (score, matched) = score_query_with_matches("ecit", "call the exit code");
-        assert!(score > 0.0, "ecit must score > 0.0 against 'exit'");
+        // "templete" trigrams: {tem, emp, mpl, ple, let, ete}
+        // "template" trigrams: {tem, emp, mpl, pla, lat, ate}
+        // intersection=3, query_only=3 -> score = 0.5 > 0.0
+        // The matched word must be "template", not the query typo "templete".
+        let (score, matched) = score_query_with_matches("templete", "use the template command");
+        assert!(score > 0.0, "templete must score > 0.0 against 'template'");
         assert!(
-            matched.contains(&"exit".to_owned()),
-            "matched words must contain 'exit', got {:?}",
+            matched.contains(&"template".to_owned()),
+            "matched words must contain 'template', got {:?}",
             matched
         );
         assert!(
-            !matched.contains(&"ecit".to_owned()),
-            "matched words must not contain the query typo 'ecit'"
+            !matched.contains(&"templete".to_owned()),
+            "matched words must not contain the query typo 'templete'"
         );
     }
 
@@ -653,7 +671,7 @@ mod tests {
 
     #[test]
     fn score_query_with_matches_zero_score_words_excluded_from_matches() {
-        // "zzz" has no bigram overlap with any word in the document.
+        // "zzz" has no trigram overlap with any word in the document.
         // The matched words list must be empty even though doc words exist.
         let (score, matched) = score_query_with_matches("zzz", "nothing matches here");
         assert_eq!(score, 0.0);

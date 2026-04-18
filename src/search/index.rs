@@ -30,7 +30,7 @@ impl SearchIndex {
     /// Build an index from a list of `(name, description, text)` tuples.
     ///
     /// Each text is tokenized into whole-token hashes (for exact search) and
-    /// bigram hashes (for fuzzy candidate gating). Both sets are combined into
+    /// trigram hashes (for fuzzy candidate gating). Both sets are combined into
     /// a single XOR filter per document. Existing `search` callers are unaffected:
     /// whole-token hashes remain present in every filter.
     ///
@@ -152,15 +152,20 @@ impl SearchIndex {
         self.entries.is_empty()
     }
 
-    /// Query the index for documents that might contain any query bigram.
+    /// Query the index for documents that contain enough query trigrams to be
+    /// plausible candidates.
     ///
-    /// Generates bigrams from the query, then tests each document's filter for
-    /// membership of any gram. Returns entries where at least one gram is probably
-    /// present (OR/ANY semantics). This is the candidate gate — the caller scores
-    /// and filters the results.
+    /// Generates trigrams from the query, then counts how many of the query's
+    /// trigrams each document's filter contains. Only entries where at least 2
+    /// trigrams match are returned — the count threshold eliminates the false
+    /// positives that any-single-gram matching produces on common 3-char substrings.
     ///
-    /// Returns an empty vec when the query produces no bigrams (query tokens all
-    /// shorter than 2 characters).
+    /// This is the candidate gate; the caller applies Tversky scoring and a score
+    /// threshold to further narrow results.
+    ///
+    /// Returns an empty vec when the query produces fewer than 2 trigrams (query
+    /// tokens all shorter than 5 characters after tokenization, or the query
+    /// itself is too short).
     pub fn search_fuzzy(&self, query: &str) -> Vec<&IndexEntry> {
         let grams = tokenize_ngrams(query);
         if grams.is_empty() {
@@ -168,7 +173,10 @@ impl SearchIndex {
         }
         self.entries
             .iter()
-            .filter(|entry| grams.iter().any(|&g| entry.filter.contains(g)))
+            .filter(|entry| {
+                let matching = grams.iter().filter(|&&g| entry.filter.contains(g)).count();
+                matching >= 2
+            })
             .collect()
     }
 }
@@ -368,7 +376,7 @@ mod tests {
         assert!(!one.is_empty());
     }
 
-    // ── combined filter (whole-token + n-gram hashes) ─────────────────────────
+    // ── combined filter (whole-token + trigram hashes) ───────────────────────
 
     #[test]
     fn build_filter_contains_whole_token_hashes() {
@@ -384,12 +392,14 @@ mod tests {
 
     #[test]
     fn build_filter_contains_ngram_hashes() {
-        let idx = SearchIndex::build(&[("doc", "desc", "exit")]);
+        // "exits" (5 chars) produces trigrams {exi, xit, its}; "exit" alone only
+        // produces 2 trigrams. Use a longer word to ensure the filter check is meaningful.
+        let idx = SearchIndex::build(&[("doc", "desc", "exits")]);
         let entry = &idx.entries[0];
-        for &hash in &tokenize_ngrams("exit") {
+        for &hash in &tokenize_ngrams("exits") {
             assert!(
                 entry.filter.contains(hash),
-                "filter must contain n-gram hash for 'exit' grams"
+                "filter must contain trigram hash for 'exits' grams"
             );
         }
     }
@@ -435,8 +445,9 @@ mod tests {
     // ── search_fuzzy ──────────────────────────────────────────────────────────
 
     #[test]
-    fn search_fuzzy_returns_candidate_with_shared_bigrams() {
-        // "hered" shares bigrams {he, er, re, ed} with "heredoc".
+    fn search_fuzzy_returns_candidate_with_shared_trigrams() {
+        // "hered" trigrams: {her, ere, red}; "heredoc" trigrams include {her, ere, red}.
+        // All 3 query trigrams match -> passes the count threshold of 2.
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         let results = idx.search_fuzzy("hered");
         assert_eq!(
@@ -449,7 +460,9 @@ mod tests {
 
     #[test]
     fn search_fuzzy_returns_candidate_for_typo_query() {
-        // "templete" shares bigrams {te, em, mp, pl} with "template".
+        // "templete" trigrams: {tem, emp, mpl, ple, let, ete}
+        // "template" trigrams: {tem, emp, mpl, pla, lat, ate}
+        // intersection = {tem, emp, mpl} = 3 >= 2 -> passes count threshold.
         let idx = SearchIndex::build(&[("doc", "desc", "template placeholder")]);
         let results = idx.search_fuzzy("templete");
         assert_eq!(
@@ -461,7 +474,7 @@ mod tests {
 
     #[test]
     fn search_fuzzy_single_char_query_returns_empty() {
-        // "a" produces no bigrams (< 2 chars).
+        // "a" produces no trigrams (< 3 chars).
         let idx = SearchIndex::build(&[("doc", "desc", "heredoc documentation")]);
         assert!(
             idx.search_fuzzy("a").is_empty(),
@@ -485,10 +498,12 @@ mod tests {
     }
 
     #[test]
-    fn search_fuzzy_uses_any_gram_semantics() {
-        // OR semantics: matching ONE gram is enough to be a candidate.
-        // "templete" and "template" share bigrams {te, em, mp, pl}; the document also
-        // has "rollback" which shares no bigrams with "templete".
+    fn search_fuzzy_requires_count_threshold_not_any_gram() {
+        // Count threshold: a document that shares only 1 trigram with the query
+        // must be rejected. "rollback" trigrams include {rol, oll, llb, lba, bac, ack};
+        // "template" trigrams include {tem, emp, mpl, pla, lat, ate}.
+        // No overlap -> "doc-b" is correctly excluded.
+        // "templete" and "template" share 3 trigrams -> "doc-a" passes.
         let idx = SearchIndex::build(&[
             ("doc-a", "desc", "template guide"),
             ("doc-b", "desc", "rollback procedure"),
@@ -497,7 +512,7 @@ mod tests {
         assert_eq!(
             results.len(),
             1,
-            "only the document with gram overlap must be returned"
+            "only the document with sufficient trigram overlap must be returned"
         );
         assert_eq!(results[0].name, "doc-a");
     }
