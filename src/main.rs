@@ -77,6 +77,12 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
             print!("{}", help::render_docs(which));
             Ok(())
         }
+        Some(cli::Parsed::DocsSearch(which, query)) => {
+            dispatch_docs_search(ctx, which, &query)
+        }
+        Some(cli::Parsed::DocsSearchAll(query)) => {
+            dispatch_docs_search_all(ctx, &query)
+        }
         Some(cli::Parsed::RootHelp) => cmd::skill::cmd_list(ctx, None, false, false, vec![]),
         Some(cli::Parsed::Version) => {
             println!("{}", help::render_version());
@@ -161,6 +167,90 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             Ok(())
         }
     }
+}
+
+/// Handle `creft <builtin> --docs "<query>"`.
+///
+/// Loads `_builtin.idx`, searches it for the query, then filters results to
+/// entries whose name matches the built-in's CLI name. Prints matches to
+/// stdout; prints a no-match message to stderr when nothing is found.
+fn dispatch_docs_search(
+    ctx: &model::AppContext,
+    which: help::BuiltinHelp,
+    query: &str,
+) -> Result<(), CreftError> {
+    let dir = ctx.index_dir_for(model::Scope::Global)?;
+    let path = dir.join("_builtin.idx");
+
+    let index = if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        search::index::SearchIndex::from_bytes(&bytes)
+    } else {
+        None
+    };
+
+    let cli_name = which.cli_name();
+    match index {
+        Some(idx) => {
+            let all_matches = idx.search(query);
+            let filtered: Vec<_> = all_matches
+                .into_iter()
+                .filter(|e| e.name == cli_name)
+                .collect();
+
+            match search::render_search_results(&filtered) {
+                Some(rendered) => print!("{}", rendered),
+                None => {
+                    eprintln!(
+                        "no documentation matches for \"{}\" (run 'creft up' to rebuild the search index)",
+                        query
+                    );
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                query
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Handle `creft --docs "<query>"`.
+///
+/// Searches all `.idx` files (including `_builtin.idx`) across all scopes
+/// and prints combined results. Prints a no-match message to stderr when
+/// nothing is found.
+fn dispatch_docs_search_all(ctx: &model::AppContext, query: &str) -> Result<(), CreftError> {
+    let results = search::search_all_indexes(ctx, query);
+
+    if results.is_empty() {
+        let dir = ctx.index_dir_for(model::Scope::Global)?;
+        if dir.join("_builtin.idx").exists() {
+            eprintln!("no documentation matches for \"{}\"", query);
+        } else {
+            eprintln!(
+                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                query
+            );
+        }
+        return Ok(());
+    }
+
+    // Group by namespace for display: show namespace header before each group.
+    let mut current_ns: Option<&str> = None;
+    let max_name = results.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    for result in &results {
+        if current_ns != Some(result.namespace.as_str()) {
+            current_ns = Some(result.namespace.as_str());
+            println!("[{}]", result.namespace);
+        }
+        let pad = " ".repeat(max_name - result.name.len());
+        println!("  {}{}  {}", result.name, pad, result.description);
+    }
+    Ok(())
 }
 
 /// Handle `creft help [<name>...]`.

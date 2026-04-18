@@ -5,16 +5,21 @@ use yansi::Paint;
 
 use crate::cmd::skill::render_namespace_listing;
 use crate::error::CreftError;
-use crate::model::{AppContext, SkillSource};
+use crate::model::{AppContext, Scope, SkillSource};
+use crate::namespace::skill_namespace;
+use crate::search;
 use crate::settings::Settings;
 use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 use crate::{frontmatter, runner, shell, store};
 
 pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftError> {
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-    let has_docs = args.iter().any(|a| a == "--docs");
+    let has_docs = args.iter().any(|a| a == "--docs" || a.starts_with("--docs="));
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+
+    // Extract a query from `--docs <value>` or `--docs=<value>` before filtering.
+    let docs_query = extract_docs_query(args);
 
     // Filter out meta-flags before resolving command name so they are not
     // mistakenly matched as part of the command name or passed as remaining args.
@@ -24,7 +29,7 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         .filter(|a| {
             *a != "--help"
                 && *a != "-h"
-                && *a != "--docs"
+                && !a.starts_with("--docs")
                 && *a != "--dry-run"
                 && *a != "--verbose"
                 && *a != "-v"
@@ -38,6 +43,12 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         }
         match store::resolve_command(ctx, &filtered) {
             Ok((name, _, source)) => {
+                // When a search query is present, search the namespace index
+                // rather than rendering the full doc text.
+                if let Some(ref query) = docs_query {
+                    return search_skill_docs(ctx, &name, query);
+                }
+
                 let raw = store::read_raw_from(ctx, &name, &source)?;
                 let rendered = render_skill_docs(&name, &raw);
                 print!("{}", rendered);
@@ -239,6 +250,73 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     }
 
     result
+}
+
+/// Extract the search query from `--docs <value>` or `--docs=<value>` in the raw arg list.
+///
+/// Returns `None` when `--docs` is present but bare (no query follows) or
+/// when the value following `--docs` starts with `-` (it is another flag,
+/// not a query).
+fn extract_docs_query(args: &[String]) -> Option<String> {
+    for (i, arg) in args.iter().enumerate() {
+        // `--docs=value` form.
+        if let Some(query) = arg.strip_prefix("--docs=")
+            && !query.is_empty()
+        {
+            return Some(query.to_owned());
+        }
+        // `--docs value` form: check the next arg.
+        if arg == "--docs"
+            && let Some(next) = args.get(i + 1)
+            && !next.starts_with('-')
+        {
+            return Some(next.clone());
+        }
+    }
+    None
+}
+
+/// Search the namespace index for a skill and render matching entries.
+///
+/// Derives the namespace from the skill name, loads the corresponding index
+/// file, tokenizes the query, and prints matching document names and
+/// descriptions. Prints a no-match message to stderr if nothing is found.
+fn search_skill_docs(ctx: &AppContext, skill_name: &str, query: &str) -> Result<(), CreftError> {
+    let ns = skill_namespace(skill_name);
+
+    // Try global scope first, then local scope.
+    let index = load_namespace_index(ctx, ns);
+
+    match index {
+        Some(idx) => {
+            let matches = idx.search(query);
+            match search::render_search_results(&matches) {
+                Some(rendered) => print!("{}", rendered),
+                None => {
+                    eprintln!("no documentation matches for \"{}\"", query);
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "no documentation matches for \"{}\" (run 'creft up' to build the search index)",
+                query
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load a namespace index, trying global scope then local scope.
+///
+/// Returns `None` if neither scope has a readable, valid index.
+fn load_namespace_index(ctx: &AppContext, namespace: &str) -> Option<search::index::SearchIndex> {
+    for scope in &[Scope::Global, Scope::Local] {
+        if let Ok(Some(idx)) = search::store::load_index(ctx, namespace, *scope) {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 /// Render skill documentation from the raw markdown file content.
@@ -590,5 +668,49 @@ mod tests {
             "skill name must appear as fallback header"
         );
         yansi::enable();
+    }
+
+    // ── extract_docs_query ────────────────────────────────────────────────────
+
+    use super::extract_docs_query;
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_when_no_docs_flag() {
+        assert!(extract_docs_query(&strs(&["deploy", "rollback"])).is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_for_bare_docs_flag() {
+        assert!(extract_docs_query(&strs(&["deploy", "--docs"])).is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_returns_value_after_docs() {
+        let result = extract_docs_query(&strs(&["deploy", "--docs", "rollback"]));
+        assert_eq!(result.as_deref(), Some("rollback"));
+    }
+
+    #[test]
+    fn extract_docs_query_returns_value_from_equals_form() {
+        let result = extract_docs_query(&strs(&["deploy", "--docs=rollback"]));
+        assert_eq!(result.as_deref(), Some("rollback"));
+    }
+
+    #[test]
+    fn extract_docs_query_returns_none_when_next_arg_is_flag() {
+        // `--docs --force` — the next arg starts with '-', so it's not a query.
+        let result = extract_docs_query(&strs(&["deploy", "--docs", "--force"]));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_docs_query_handles_multi_word_style_query() {
+        // The shell typically presents this as a single arg.
+        let result = extract_docs_query(&strs(&["deploy", "--docs", "roll back"]));
+        assert_eq!(result.as_deref(), Some("roll back"));
     }
 }
