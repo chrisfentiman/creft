@@ -467,7 +467,11 @@ mod tests {
         // "exit" (4 chars): bigrams {ex,xi,it}=3 + trigrams {exi,xit}=2 = 5 unique hashes.
         // Indexing with both sizes lets the filter answer queries at either gram size.
         let hashes = tokenize_ngrams("exit");
-        assert_eq!(hashes.len(), 5, "exit -> {{ex,xi,it,exi,xit}} (bigrams + trigrams)");
+        assert_eq!(
+            hashes.len(),
+            5,
+            "exit -> {{ex,xi,it,exi,xit}} (bigrams + trigrams)"
+        );
     }
 
     #[test]
@@ -614,7 +618,10 @@ mod tests {
         // With bigrams, a single substitution in a 4-char token retains one
         // shared gram — enough to score above the 0.3 fuzzy threshold.
         let score = tversky_score("ecit", "exit");
-        assert!((score - 1.0 / 3.0).abs() < 1e-10, "expected 1/3, got {score}");
+        assert!(
+            (score - 1.0 / 3.0).abs() < 1e-10,
+            "expected 1/3, got {score}"
+        );
     }
 
     #[test]
