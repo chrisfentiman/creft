@@ -1839,7 +1839,7 @@ printf '%s' "$_resp"
         );
         let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(parsed["id"], "r1");
-        // Results should be non-empty — the document name should appear.
+        // Results should be non-empty — the indexed content should appear.
         assert!(
             !parsed["results"].as_str().unwrap_or("").is_empty(),
             "search for 'rollback' must return a non-empty results string after indexing"
@@ -2220,6 +2220,50 @@ printf '%s' "$_resp"
         assert!(
             !parsed["results"].as_str().unwrap_or("").is_empty(),
             "search for token from second document must return results; got: {response}"
+        );
+    }
+
+    /// After two calls with distinct content, searching returns the original content
+    /// strings, not the internal doc labels (`"doc_0"`, `"doc_1"`).
+    ///
+    /// Verifies the content-resolution fix holds for the multi-document path: a
+    /// regression in the `filter_map` would pass the non-empty assertions above
+    /// but fail here by returning `"doc_0"` or `"doc_1"` instead of real content.
+    #[test]
+    fn handle_search_message_multi_document_returns_content_not_doc_labels() {
+        let indexes = make_runtime_indexes();
+        super::handle_index_message(
+            "docs",
+            "rollback procedure guide",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "docs",
+            "deployment configuration steps",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+
+        let response =
+            super::handle_search_message("s1", "rollback", "docs", "deploy skill", None, &indexes);
+        let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        let results = parsed["results"].as_str().unwrap_or("");
+        assert!(
+            results.contains("rollback procedure guide"),
+            "results must contain the original content from the first document, not an internal label; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_0"),
+            "results must not expose internal doc label 'doc_0'; got: {results}"
+        );
+        assert!(
+            !results.contains("doc_1"),
+            "results must not expose internal doc label 'doc_1'; got: {results}"
         );
     }
 
