@@ -8,6 +8,10 @@ mod frontmatter;
 mod help;
 mod markdown;
 mod model;
+// Namespace module is not yet wired into binary entry points. The public API is
+// exercised by module tests and consumed by future stages (4, 5, 6).
+#[allow(dead_code)]
+mod namespace;
 mod registry;
 mod registry_config;
 mod runner;
