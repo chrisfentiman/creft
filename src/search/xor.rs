@@ -10,6 +10,7 @@
 ///
 /// Memory: ~9 bits per key in the construction set (1.23 * n bytes for the
 /// fingerprint array, plus 8 bytes for the seed and 4 for block_length).
+#[derive(Debug)]
 pub(crate) struct Xor8Filter {
     seed: u64,
     block_length: u32,

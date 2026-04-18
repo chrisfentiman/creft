@@ -1,7 +1,8 @@
 //! Indexed search primitives for creft skill documentation.
 //!
-//! Currently provides the [`xor::Xor8Filter`] probabilistic set-membership
-//! filter. Tokenization, index serialization, and disk-based index lifecycle
-//! are planned additions.
+//! Provides text tokenization, XOR filter construction, and a searchable
+//! index format for fast approximate set membership queries across skill docs.
 
+pub(crate) mod index;
+pub(crate) mod tokenize;
 pub(crate) mod xor;
