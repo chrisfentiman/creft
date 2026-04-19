@@ -3310,7 +3310,7 @@ printf '%s' "$_resp"
         );
     }
 
-    // ── Stage 1: ack response tests ──────────────────────────────────────────
+    // ── ack response tests ───────────────────────────────────────────────────
 
     /// StorePut with an id field deserializes correctly and the id is captured.
     #[test]

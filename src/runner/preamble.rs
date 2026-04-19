@@ -968,7 +968,7 @@ mod tests {
         assert!(after.contains("_creft_escape"));
     }
 
-    // ── Stage 2: synchronous ack tests ───────────────────────────────────────
+    // ── synchronous ack tests ────────────────────────────────────────────────
 
     /// Bash creft_store_put reads the ack from fd 4 after writing.
     #[test]
