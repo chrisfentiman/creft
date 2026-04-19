@@ -203,10 +203,14 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
         SkillSource::Plugin(name) => Some(name.clone()),
         _ => None,
     };
+    let store_dir = ctx
+        .store_dir_for(Scope::Global)
+        .unwrap_or_else(|_| std::path::PathBuf::new());
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
         .with_shell_preference(shell::detect(settings_shell_pref.as_deref()))
         .with_skill_name(name.clone())
-        .with_plugin(plugin_name);
+        .with_plugin(plugin_name)
+        .with_store_dir(store_dir);
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.

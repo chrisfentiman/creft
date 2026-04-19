@@ -195,6 +195,16 @@ impl AppContext {
         Ok(self.resolve_root(scope)?.join("indexes"))
     }
 
+    /// Store directory for the given scope.
+    ///
+    /// Returns `<scope_root>/stores/`. The directory is not created here;
+    /// callers create it lazily before writing.
+    // Called by the channel handler added in Stage 2.
+    #[allow(dead_code)]
+    pub fn store_dir_for(&self, scope: Scope) -> Result<PathBuf, CreftError> {
+        Ok(self.resolve_root(scope)?.join("stores"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)

@@ -74,6 +74,8 @@ creft_exit() {
   exit 0
 }
 creft_index() {
+  local _creft_id
+  _creft_id="index_$$_$RANDOM"
   local _name="$1"
   local _content="$2"
   local _global="false"
@@ -82,8 +84,10 @@ creft_index() {
       *global*true*|*global*1*) _global="true" ;;
     esac
   fi
-  printf '{"type":"index","name":"%s","content":"%s","global":%s}\n' \
-    "$(_creft_escape "$_name")" "$(_creft_escape "$_content")" "$_global" >&3 2>/dev/null
+  printf '{"type":"index","id":"%s","name":"%s","content":"%s","global":%s}\n' \
+    "$_creft_id" "$(_creft_escape "$_name")" "$(_creft_escape "$_content")" "$_global" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4 2>/dev/null
 }
 creft_search() {
   local _creft_id
@@ -102,6 +106,61 @@ creft_search() {
         | sed 's/.*"error":"\([^"]*\)".*/\1/' \
         | sed 's/\\n/\n/g')" >&2
       ;;
+    *) printf '%s' "$_creft_response" \
+         | sed 's/.*"results":"\([^"]*\)".*/\1/' \
+         | sed 's/\\n/\n/g' ;;
+  esac
+}
+creft_store_put() {
+  local _creft_id
+  _creft_id="store_put_$$_$RANDOM"
+  local _name="$1"
+  local _key="$2"
+  local _value="$3"
+  local _global_part=""
+  if [ -n "$4" ]; then
+    case "$4" in
+      *global*true*|*global*1*) _global_part=',"global":true' ;;
+      *global*false*|*global*0*) _global_part=',"global":false' ;;
+    esac
+  fi
+  printf '{"type":"store_put","id":"%s","name":"%s","key":"%s","value":"%s"%s}\n' \
+    "$_creft_id" "$(_creft_escape "$_name")" "$(_creft_escape "$_key")" \
+    "$(_creft_escape "$_value")" "$_global_part" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4 2>/dev/null
+}
+creft_store_get() {
+  local _creft_id
+  _creft_id="store_get_$$_$RANDOM"
+  local _name="$1"
+  local _key="$2"
+  printf '{"type":"store_get","id":"%s","name":"%s","key":"%s"}\n' \
+    "$_creft_id" \
+    "$(_creft_escape "$_name")" \
+    "$(_creft_escape "$_key")" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4
+  case "$_creft_response" in
+    *'"error"'*) ;;
+    *) printf '%s' "$_creft_response" \
+         | sed 's/.*"value":"\([^"]*\)".*/\1/' \
+         | sed 's/\\n/\n/g' ;;
+  esac
+}
+creft_store_search() {
+  local _creft_id
+  _creft_id="store_search_$$_$RANDOM"
+  local _query="$1"
+  local _name="$2"
+  printf '{"type":"store_search","id":"%s","name":"%s","query":"%s"}\n' \
+    "$_creft_id" \
+    "$(_creft_escape "$_name")" \
+    "$(_creft_escape "$_query")" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4
+  case "$_creft_response" in
+    *'"error"'*) ;;
     *) printf '%s' "$_creft_response" \
          | sed 's/.*"results":"\([^"]*\)".*/\1/' \
          | sed 's/\\n/\n/g' ;;
@@ -152,10 +211,18 @@ def creft_exit(code=0):
     sys.stdout.flush()
     sys.exit(0)
 def creft_index(name, content, options=None):
+    global _creft_fd4
+    _id = f"index_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
     global_flag = False
     if isinstance(options, dict):
         global_flag = bool(options.get("global", False))
-    _creft_write({"type": "index", "name": str(name), "content": str(content), "global": global_flag})
+    _creft_write({"type": "index", "id": _id, "name": str(name), "content": str(content), "global": global_flag})
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _creft_fd4.readline()
+    except OSError:
+        pass
 def creft_search(query, name):
     global _creft_fd4
     _id = f"search_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
@@ -168,6 +235,48 @@ def creft_search(query, name):
         if "error" in _resp:
             import sys
             print(f"creft_search: {_resp['error']}", file=sys.stderr)
+            return ""
+        return _resp.get("results", "").replace("\\n", "\n")
+    except (OSError, ValueError):
+        return ""
+def creft_store_put(name, key, value, options=None):
+    global _creft_fd4
+    _id = f"store_put_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
+    msg = {"type": "store_put", "id": _id, "name": str(name), "key": str(key),
+           "value": str(value)}
+    if isinstance(options, dict) and "global" in options:
+        msg["global"] = bool(options["global"])
+    _creft_write(msg)
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _creft_fd4.readline()
+    except OSError:
+        pass
+def creft_store_get(name, key):
+    global _creft_fd4
+    _id = f"store_get_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
+    _creft_write({"type": "store_get", "id": _id, "name": str(name), "key": str(key)})
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _line = _creft_fd4.readline().strip()
+        _resp = _creft_json.loads(_line)
+        if "error" in _resp:
+            return ""
+        return _resp.get("value", "").replace("\\n", "\n")
+    except (OSError, ValueError):
+        return ""
+def creft_store_search(query, name):
+    global _creft_fd4
+    _id = f"store_search_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
+    _creft_write({"type": "store_search", "id": _id, "name": str(name), "query": str(query)})
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _line = _creft_fd4.readline().strip()
+        _resp = _creft_json.loads(_line)
+        if "error" in _resp:
             return ""
         return _resp.get("results", "").replace("\\n", "\n")
     except (OSError, ValueError):
@@ -221,8 +330,12 @@ function creft_exit(code) {
   }
 }
 function creft_index(name, content, options) {
+  if (!_creft_fs) return;
+  const id = `index_${process.pid}_${Math.random().toString(36).slice(2)}`;
   const global_flag = (options && typeof options.global === 'boolean') ? options.global : false;
-  _creft_write({type:'index',name:String(name),content:String(content),global:global_flag});
+  _creft_write({type:'index',id,name:String(name),content:String(content),global:global_flag});
+  const buf = Buffer.alloc(4096);
+  try { _creft_fs.readSync(4, buf, 0, buf.length); } catch(e) {}
 }
 function creft_search(query, name) {
   if (!_creft_fs) return '';
@@ -236,6 +349,45 @@ function creft_search(query, name) {
       try { process.stderr.write('creft_search: ' + resp.error + '\n'); } catch(e) {}
       return '';
     }
+    return (resp.results || '').replace(/\\n/g, '\n');
+  } catch(e) { return ''; }
+}
+function creft_store_put(name, key, value, options) {
+  if (!_creft_fs) return;
+  const id = `store_put_${process.pid}_${Math.random().toString(36).slice(2)}`;
+  const msg = {type:'store_put',id,name:String(name),key:String(key),value:String(value)};
+  if (options && typeof options.global === 'boolean') msg.global = options.global;
+  _creft_write(msg);
+  const buf = Buffer.alloc(4096);
+  try { _creft_fs.readSync(4, buf, 0, buf.length); } catch(e) {}
+}
+function creft_store_get(name, key) {
+  if (!_creft_fs) return '';
+  const id = `store_get_${process.pid}_${Math.random().toString(36).slice(2)}`;
+  _creft_write({type:'store_get',id,name:String(name),key:String(key)});
+  let line = '';
+  const chunk = Buffer.alloc(4096);
+  for (;;) {
+    const n = _creft_fs.readSync(4, chunk, 0, chunk.length);
+    if (n === 0) break;
+    line += chunk.slice(0, n).toString();
+    if (line.indexOf('\n') !== -1) break;
+  }
+  try {
+    const resp = JSON.parse(line.trim());
+    if (resp.error) return '';
+    return (resp.value || '').replace(/\\n/g, '\n');
+  } catch(e) { return ''; }
+}
+function creft_store_search(query, name) {
+  if (!_creft_fs) return '';
+  const id = `store_search_${process.pid}_${Math.random().toString(36).slice(2)}`;
+  _creft_write({type:'store_search',id,name:String(name),query:String(query)});
+  const buf = Buffer.alloc(4096);
+  const n = _creft_fs.readSync(4, buf, 0, buf.length);
+  try {
+    const resp = JSON.parse(buf.slice(0, n).toString().trim());
+    if (resp.error) return '';
     return (resp.results || '').replace(/\\n/g, '\n');
   } catch(e) { return ''; }
 }
@@ -613,6 +765,325 @@ mod tests {
         assert!(
             p.contains("'creft_search: '"),
             "node creft_search error must be prefixed with 'creft_search:'"
+        );
+    }
+
+    // ── store primitive preamble tests ────────────────────────────────────────
+
+    /// All three preambles define creft_store_put.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_contains_creft_store_put(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(
+            p.contains("creft_store_put"),
+            "{lang} preamble missing creft_store_put"
+        );
+    }
+
+    /// All three preambles define creft_store_get.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_contains_creft_store_get(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(
+            p.contains("creft_store_get"),
+            "{lang} preamble missing creft_store_get"
+        );
+    }
+
+    /// All three preambles define creft_store_search.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_contains_creft_store_search(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(
+            p.contains("creft_store_search"),
+            "{lang} preamble missing creft_store_search"
+        );
+    }
+
+    /// Bash creft_store_put includes global:true when the option is passed.
+    #[test]
+    fn bash_store_put_includes_global_true_when_option_set() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(p.contains("global*true") || p.contains("\"global\":true"));
+    }
+
+    /// Bash creft_store_get reads from fd 4.
+    #[test]
+    fn bash_store_get_reads_from_fd4() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(p.contains("read -r _creft_response <&4"));
+    }
+
+    /// Python creft_store_put omits global when options dict lacks the key.
+    #[test]
+    fn python_store_put_omits_global_when_not_in_options() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(p.contains("\"global\" in options"));
+    }
+
+    /// Python creft_store_get reads JSON from fd 4.
+    #[test]
+    fn python_store_get_reads_json_from_fd4() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(p.contains("store_get"));
+        assert!(p.contains("_creft_fd4.readline"));
+    }
+
+    /// Node creft_store_put omits global when options not provided or global not boolean.
+    #[test]
+    fn node_store_put_omits_global_when_not_boolean() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(p.contains("typeof options.global === 'boolean'"));
+    }
+
+    /// Node creft_store_get reads in a loop until newline (no fixed buffer limit).
+    #[test]
+    fn node_store_get_reads_in_loop_until_newline() {
+        let p = for_language("node").expect("node must have a preamble");
+        assert!(p.contains("indexOf('\\n')"));
+    }
+
+    // ── store preamble structural tests ──────────────────────────────────────
+
+    /// Bash creft_store_put writes to fd 3 (block → creft direction).
+    #[test]
+    fn bash_store_put_writes_to_fd3() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        assert!(p.contains(">&3"));
+    }
+
+    /// Bash creft_store_search reads a response from fd 4.
+    #[test]
+    fn bash_store_search_reads_from_fd4() {
+        let p = for_language("bash").expect("bash must have a preamble");
+        // creft_store_search must read the response with <&4.
+        let idx = p
+            .find("creft_store_search")
+            .expect("creft_store_search must exist");
+        let after = &p[idx..];
+        assert!(after.contains("<&4"));
+    }
+
+    /// Python creft_store_search reads from fd 4 and extracts results.
+    #[test]
+    fn python_store_search_reads_from_fd4() {
+        let p = for_language("python").expect("python must have a preamble");
+        assert!(p.contains("creft_store_search"));
+        assert!(p.contains("_creft_fd4"));
+    }
+
+    /// Node creft_store_search uses readSync on fd 4.
+    #[test]
+    fn node_store_search_reads_sync_from_fd4() {
+        let p = for_language("node").expect("node must have a preamble");
+        let idx = p
+            .find("creft_store_search")
+            .expect("creft_store_search must exist");
+        let after = &p[idx..];
+        assert!(after.contains("readSync(4"));
+    }
+
+    /// All three preambles write store_put messages with the store_put type field.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_store_put_type_field_is_store_put(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(p.contains("store_put"));
+    }
+
+    /// All three preambles write store_get messages with the store_get type field.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_store_get_type_field_is_store_get(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(p.contains("store_get"));
+    }
+
+    /// All three preambles write store_search messages with the store_search type field.
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::python("python")]
+    #[case::node("node")]
+    fn preamble_store_search_type_field_is_store_search(#[case] lang: &str) {
+        let p = for_language(lang).expect("preamble must exist");
+        assert!(p.contains("store_search"));
+    }
+
+    /// Bash creft_store_search generates a unique id with a random component.
+    #[test]
+    fn bash_store_search_id_has_random_component() {
+        let p = for_language("bash").unwrap();
+        assert!(p.contains("store_search_"));
+    }
+
+    /// Python creft_store_get extracts the value field from the JSON response.
+    #[test]
+    fn python_store_get_extracts_value_field() {
+        let p = for_language("python").unwrap();
+        assert!(p.contains("\"value\""));
+    }
+
+    /// Python creft_store_search extracts the results field.
+    #[test]
+    fn python_store_search_extracts_results_field() {
+        let p = for_language("python").unwrap();
+        assert!(p.contains("\"results\""));
+    }
+
+    /// Node creft_store_put stringifies name, key, and value.
+    #[test]
+    fn node_store_put_stringifies_name_key_value() {
+        let p = for_language("node").unwrap();
+        assert!(p.contains("String(name)"));
+        assert!(p.contains("String(key)"));
+        assert!(p.contains("String(value)"));
+    }
+
+    /// Node creft_store_search uses a random id for request correlation.
+    #[test]
+    fn node_store_search_uses_random_id() {
+        let p = for_language("node").unwrap();
+        assert!(p.contains("Math.random()"));
+    }
+
+    /// Bash creft_store_put uses _creft_escape for the name, key, and value.
+    #[test]
+    fn bash_store_put_uses_creft_escape() {
+        let p = for_language("bash").unwrap();
+        let idx = p.find("creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(after.contains("_creft_escape"));
+    }
+
+    // ── synchronous ack tests ────────────────────────────────────────────────
+
+    /// Bash creft_store_put reads the ack from fd 4 after writing.
+    #[test]
+    fn bash_store_put_reads_from_fd4() {
+        let p = for_language("bash").unwrap();
+        let idx = p.find("creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("read -r _creft_response <&4"),
+            "bash creft_store_put must read the ack from fd 4"
+        );
+    }
+
+    /// Bash creft_index reads the ack from fd 4 after writing.
+    #[test]
+    fn bash_creft_index_reads_from_fd4() {
+        let p = for_language("bash").unwrap();
+        let idx = p.find("creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("read -r _creft_response <&4"),
+            "bash creft_index must read the ack from fd 4"
+        );
+    }
+
+    /// Bash creft_store_put generates a store_put_ prefixed id.
+    #[test]
+    fn bash_store_put_id_has_store_put_prefix() {
+        let p = for_language("bash").unwrap();
+        assert!(
+            p.contains("store_put_$$"),
+            "bash creft_store_put must generate a store_put_-prefixed id"
+        );
+    }
+
+    /// Bash creft_index generates an index_ prefixed id.
+    #[test]
+    fn bash_creft_index_id_has_index_prefix() {
+        let p = for_language("bash").unwrap();
+        assert!(
+            p.contains("index_$$"),
+            "bash creft_index must generate an index_-prefixed id"
+        );
+    }
+
+    /// Python creft_store_put reads from fd 4 after writing.
+    #[test]
+    fn python_store_put_reads_from_fd4() {
+        let p = for_language("python").unwrap();
+        // Find the creft_store_put definition and check for readline after it.
+        let idx = p.find("def creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("_creft_fd4.readline()"),
+            "python creft_store_put must read the ack from fd 4"
+        );
+    }
+
+    /// Python creft_index reads from fd 4 after writing.
+    #[test]
+    fn python_creft_index_reads_from_fd4() {
+        let p = for_language("python").unwrap();
+        let idx = p.find("def creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("_creft_fd4.readline()"),
+            "python creft_index must read the ack from fd 4"
+        );
+    }
+
+    /// Node creft_store_put calls readSync on fd 4.
+    #[test]
+    fn node_store_put_reads_sync_from_fd4() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("readSync(4"),
+            "node creft_store_put must use readSync on fd 4"
+        );
+    }
+
+    /// Node creft_index calls readSync on fd 4.
+    #[test]
+    fn node_creft_index_reads_sync_from_fd4() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("readSync(4"),
+            "node creft_index must use readSync on fd 4"
+        );
+    }
+
+    /// Node creft_store_put has an early return guard for ESM compatibility.
+    #[test]
+    fn node_store_put_has_early_return_guard() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("if (!_creft_fs) return;"),
+            "node creft_store_put must have early return guard for ESM compatibility"
+        );
+    }
+
+    /// Node creft_index has an early return guard for ESM compatibility.
+    #[test]
+    fn node_creft_index_has_early_return_guard() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("if (!_creft_fs) return;"),
+            "node creft_index must have early return guard for ESM compatibility"
         );
     }
 }

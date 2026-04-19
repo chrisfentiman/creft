@@ -81,6 +81,14 @@ pub(crate) struct RunContext {
     /// at skill invocation time. `None` means use block language literally.
     shell_preference: Option<String>,
 
+    /// Directory for persistent key-value stores.
+    ///
+    /// Passed into `PrimitiveContext` when spawning the channel reader thread.
+    /// Populated from `AppContext::store_dir_for(Scope::Global)` at the call site.
+    /// Defaults to an empty path when not set (store operations are no-ops in
+    /// contexts that don't configure a store directory, such as dry-run).
+    pub(crate) store_dir: std::path::PathBuf,
+
     /// The fully-qualified name of the skill being executed.
     ///
     /// Used to derive the caller's namespace and plugin context for namespace
@@ -92,7 +100,7 @@ pub(crate) struct RunContext {
     /// Plugin name when the skill is sourced from an activated plugin.
     ///
     /// `Some(name)` when the skill comes from `SkillSource::Plugin(name)`.
-    /// `None` for user-owned and package skills. Passed to `SearchContext`
+    /// `None` for user-owned and package skills. Passed to `PrimitiveContext`
     /// so that `namespace::qualify` produces fully-qualified names with the
     /// plugin prefix (e.g., `acme.deploy.beta` instead of `deploy.beta`).
     pub(crate) plugin: Option<String>,
@@ -123,10 +131,20 @@ impl RunContext {
             verbose,
             dry_run,
             shell_preference: None,
+            store_dir: std::path::PathBuf::new(),
             skill_name: String::new(),
             plugin: None,
             runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the directory for persistent key-value stores.
+    ///
+    /// Derived from `AppContext::store_dir_for(Scope::Global)` at the call site
+    /// and threaded into `PrimitiveContext` when the channel reader thread is spawned.
+    pub(crate) fn with_store_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.store_dir = dir;
+        self
     }
 
     /// Set the fully-qualified skill name for namespace resolution.
@@ -142,7 +160,7 @@ impl RunContext {
     ///
     /// Pass `Some(plugin_name)` for `SkillSource::Plugin` skills. Pass `None`
     /// for user-owned and package skills. The plugin name is threaded through
-    /// to `SearchContext` so that `namespace::qualify` produces correctly
+    /// to `PrimitiveContext` so that `namespace::qualify` produces correctly
     /// prefixed names (e.g., `acme.deploy.beta` for plugin `acme`).
     pub(crate) fn with_plugin(mut self, plugin: Option<String>) -> Self {
         self.plugin = plugin;
@@ -662,10 +680,11 @@ fn execute_block(
         let interactive = stdin_data.is_none();
 
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
-        let search_ctx = Some(channel::SearchContext {
+        let search_ctx = Some(channel::PrimitiveContext {
             skill_name: ctx.skill_name.clone(),
             plugin: ctx.plugin.clone(),
             runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+            store_dir: ctx.store_dir.clone(),
         });
 
         // Duplicate the response writer fd so both the reader thread (which
@@ -857,8 +876,9 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    // Preserve skill_name, plugin, and runtime_indexes from the original context
-    // so that creft_index / creft_search work correctly in skills with multiple blocks.
+    // Preserve skill_name, plugin, store_dir, and runtime_indexes from the original
+    // context so that creft_index / creft_search / creft_store_* work correctly
+    // in skills with multiple blocks.
     let ctx = RunContext {
         cancel: ctx.cancel_arc(),
         cwd: ctx.cwd().to_path_buf(),
@@ -866,6 +886,7 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         verbose: ctx.is_verbose(),
         dry_run: ctx.is_dry_run(),
         shell_preference: ctx.shell_preference().map(String::from),
+        store_dir: ctx.store_dir.clone(),
         skill_name: ctx.skill_name.clone(),
         plugin: ctx.plugin.clone(),
         runtime_indexes: Arc::clone(&ctx.runtime_indexes),
@@ -2292,6 +2313,147 @@ echo "search completed"
         assert!(
             result.is_ok(),
             "single-block creft_search must complete without hanging: {:?}",
+            result
+        );
+    }
+
+    // ── creft_search / creft_store in pipe-chain blocks ──────────────────────
+
+    /// A block in a multi-block pipe chain can call creft_index and creft_search
+    /// and receive actual results.
+    ///
+    /// Before the fix, spawn_reader was passed `None` for the PrimitiveContext
+    /// in pipe-chain mode, so Index messages were silently dropped and Search
+    /// queries returned empty results regardless of what was indexed. This test
+    /// verifies that the PrimitiveContext is wired correctly: index then search
+    /// within the same pipe-chain block returns the indexed content.
+    #[test]
+    #[cfg(unix)]
+    fn pipe_chain_block_creft_index_and_search_receive_results() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-pipe-search".into(),
+                description: "index and search within a pipe-chain block".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Block 0 (non-sponge): index content, search for it, and
+                    // write the result to stdout. Block 1 captures that output
+                    // and fails if the result is empty.
+                    code: r#"creft_index "notes" "rollback deployment procedure"
+result=$(creft_search "rollback" "notes")
+echo "$result"
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Block 1: read block 0's search result from stdin.
+                    // If PrimitiveContext was missing, creft_search in block 0
+                    // would return an empty string, and this test would fail.
+                    code: r#"stdin=$(cat)
+if [ -z "$stdin" ]; then
+  echo "ERROR: search returned empty result" >&2
+  exit 1
+fi
+exit 0
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+            ],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test pipe search");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "creft_index + creft_search in a pipe-chain block must return results: {:?}",
+            result
+        );
+    }
+
+    /// A block in a multi-block pipe chain can call creft_store_get and receive
+    /// an empty-value response without hanging.
+    ///
+    /// With PrimitiveContext wired to the reader thread, StoreGet is handled by
+    /// the real handler which returns `{"value":""}` when the key is absent.
+    /// Without it, the reader falls through to the "no ctx" branch, which also
+    /// returns an empty response — but this test documents that the handler is
+    /// reached and the block exits cleanly in both cases.
+    #[test]
+    #[cfg(unix)]
+    fn pipe_chain_block_creft_store_get_returns_empty_for_missing_key() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-pipe-store".into(),
+                description: "store_get for absent key in pipe-chain block".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![
+                CodeBlock {
+                    lang: "bash".into(),
+                    code: "echo ready\n".into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Discard block 0 output, call store_get, verify it exits
+                    // cleanly (no hang, no non-zero exit from creft_store_get).
+                    code: r#"cat > /dev/null
+creft_store_get "mystore" "no_such_key" > /dev/null
+echo "get completed"
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+            ],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test pipe store");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "creft_store_get for a missing key in a pipe-chain block must exit cleanly: {:?}",
             result
         );
     }

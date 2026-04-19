@@ -108,6 +108,15 @@ pub enum CreftError {
     /// surfaced to the user — callers translate it to `Ok(())`.
     #[error("early exit (exit 99)")]
     EarlyExit,
+
+    #[error("cannot open store '{name}': {reason}")]
+    StoreOpen { name: String, reason: String },
+
+    #[error("cannot read store '{name}': {reason}")]
+    StoreRead { name: String, reason: String },
+
+    #[error("cannot write store '{name}': {reason}")]
+    StoreWrite { name: String, reason: String },
 }
 
 impl CreftError {

@@ -20,6 +20,7 @@ mod settings;
 mod setup;
 mod shell;
 mod store;
+mod store_kv;
 mod style;
 mod validate;
 mod wrap;
