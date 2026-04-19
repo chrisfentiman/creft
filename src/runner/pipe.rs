@@ -920,10 +920,16 @@ pub(super) fn run_pipe_chain(
     // Temp files for non-sponge blocks. Sponge blocks use prepare_block_script
     // internally inside sponge_stage. Use Option so indices align with block indices.
     let mut temp_files: Vec<Option<tempfile::NamedTempFile>> = Vec::with_capacity(n);
+    #[cfg(unix)]
+    let mut non_sponge_count: usize = 0;
     for block in &cmd.blocks {
         if block.needs_sponge() {
             temp_files.push(None);
         } else {
+            #[cfg(unix)]
+            {
+                non_sponge_count += 1;
+            }
             // In pipe mode, no "prev" template arg (output is on stdin).
             let expanded = substitute(&block.code, bound_refs, &block.lang)?;
             let pre = preamble::for_language(&block.lang);
@@ -955,6 +961,19 @@ pub(super) fn run_pipe_chain(
     // The main thread drops its tx clone before calling wait_pipe_children_unix.
     #[cfg(unix)]
     let (reaper_tx, reaper_rx) = std::sync::mpsc::channel::<ReaperResult>();
+
+    // Per-reaper release signals. Reaper N waits for a signal that block N+1 has
+    // been spawned (and called setpgid) before calling child.wait(). Without this,
+    // a fast-exiting block 0 is reaped before block 1 forks, causing block 1's
+    // setpgid to fail with EPERM (the process group no longer exists). Each sender
+    // is held by the main thread and sent at the start of iteration N+1 (after
+    // block N+1 forks). The last reaper's sender is sent after the spawn loop.
+    // Using SyncChannel(0) so the send blocks until the reaper receives — ensures
+    // ordering even under heavy scheduler pressure. Disconnection (sender dropped
+    // without sending) also unblocks recv() with Err, which we treat as "proceed".
+    #[cfg(unix)]
+    let mut next_block_spawned_txs: Vec<std::sync::mpsc::SyncSender<()>> =
+        Vec::with_capacity(non_sponge_count);
 
     // Join handles for sponge threads — joined inside wait_pipe_children_unix
     // so returned data is available when the output selection decision is made.
@@ -1273,6 +1292,18 @@ pub(super) fn run_pipe_chain(
             let pgid = child_pgid;
             let block_idx = i;
             let lang = block.lang.clone();
+            // Oneshot channel: main thread sends () after the next block spawns
+            // (or immediately for the last block). The reaper waits before calling
+            // child.wait() so no zombie is reaped before the next block's setpgid.
+            // Capacity 1 so the main thread never blocks on send().
+            let (next_spawned_tx, next_spawned_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            // Signal the previous reaper that this block has now been spawned
+            // and setpgid has been called. The previous reaper may now safely
+            // call child.wait() without risking EPERM on this block's setpgid.
+            if let Some(prev_tx) = next_block_spawned_txs.last() {
+                let _ = prev_tx.send(());
+            }
+            next_block_spawned_txs.push(next_spawned_tx);
             std::thread::Builder::new()
                 .name(format!("creft-reaper-{i}"))
                 .spawn(move || {
@@ -1286,6 +1317,14 @@ pub(super) fn run_pipe_chain(
                         }
                         buf
                     };
+                    // Wait until the next block has been spawned and called setpgid.
+                    // If block N exits instantly, its reaper would otherwise call waitpid
+                    // before block N+1 forks, destroying the process group and causing
+                    // block N+1's setpgid to fail with EPERM. The main thread sends ()
+                    // after block N+1 is spawned (or at end of spawn loop for the last
+                    // block). Disconnection (Err) also means "proceed" — the sender was
+                    // dropped, which only happens after the loop regardless.
+                    let _ = next_spawned_rx.recv();
                     let status = child.wait();
                     let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
                         == Some(crate::runner::EARLY_EXIT);
@@ -1320,6 +1359,14 @@ pub(super) fn run_pipe_chain(
             // Non-Unix: accumulate children for sequential wait.
             non_unix_children.push(Some((child, i, block.lang.clone())));
         }
+    }
+
+    // All blocks have been spawned. Signal the last reaper that it may call
+    // child.wait(). All earlier reapers were already signaled at the start of
+    // the iteration that spawned the next block.
+    #[cfg(unix)]
+    if let Some(last_tx) = next_block_spawned_txs.last() {
+        let _ = last_tx.send(());
     }
 
     // Install SIGINT handler for the pipe chain duration (Unix only).
