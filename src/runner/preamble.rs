@@ -74,6 +74,8 @@ creft_exit() {
   exit 0
 }
 creft_index() {
+  local _creft_id
+  _creft_id="index_$$_$RANDOM"
   local _name="$1"
   local _content="$2"
   local _global="false"
@@ -82,8 +84,10 @@ creft_index() {
       *global*true*|*global*1*) _global="true" ;;
     esac
   fi
-  printf '{"type":"index","name":"%s","content":"%s","global":%s}\n' \
-    "$(_creft_escape "$_name")" "$(_creft_escape "$_content")" "$_global" >&3 2>/dev/null
+  printf '{"type":"index","id":"%s","name":"%s","content":"%s","global":%s}\n' \
+    "$_creft_id" "$(_creft_escape "$_name")" "$(_creft_escape "$_content")" "$_global" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4 2>/dev/null
 }
 creft_search() {
   local _creft_id
@@ -108,6 +112,8 @@ creft_search() {
   esac
 }
 creft_store_put() {
+  local _creft_id
+  _creft_id="store_put_$$_$RANDOM"
   local _name="$1"
   local _key="$2"
   local _value="$3"
@@ -118,9 +124,11 @@ creft_store_put() {
       *global*false*|*global*0*) _global_part=',"global":false' ;;
     esac
   fi
-  printf '{"type":"store_put","name":"%s","key":"%s","value":"%s"%s}\n' \
-    "$(_creft_escape "$_name")" "$(_creft_escape "$_key")" \
+  printf '{"type":"store_put","id":"%s","name":"%s","key":"%s","value":"%s"%s}\n' \
+    "$_creft_id" "$(_creft_escape "$_name")" "$(_creft_escape "$_key")" \
     "$(_creft_escape "$_value")" "$_global_part" >&3 2>/dev/null
+  local _creft_response
+  read -r _creft_response <&4 2>/dev/null
 }
 creft_store_get() {
   local _creft_id
@@ -203,10 +211,18 @@ def creft_exit(code=0):
     sys.stdout.flush()
     sys.exit(0)
 def creft_index(name, content, options=None):
+    global _creft_fd4
+    _id = f"index_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
     global_flag = False
     if isinstance(options, dict):
         global_flag = bool(options.get("global", False))
-    _creft_write({"type": "index", "name": str(name), "content": str(content), "global": global_flag})
+    _creft_write({"type": "index", "id": _id, "name": str(name), "content": str(content), "global": global_flag})
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _creft_fd4.readline()
+    except OSError:
+        pass
 def creft_search(query, name):
     global _creft_fd4
     _id = f"search_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
@@ -224,11 +240,19 @@ def creft_search(query, name):
     except (OSError, ValueError):
         return ""
 def creft_store_put(name, key, value, options=None):
-    msg = {"type": "store_put", "name": str(name), "key": str(key),
+    global _creft_fd4
+    _id = f"store_put_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
+    msg = {"type": "store_put", "id": _id, "name": str(name), "key": str(key),
            "value": str(value)}
     if isinstance(options, dict) and "global" in options:
         msg["global"] = bool(options["global"])
     _creft_write(msg)
+    try:
+        if _creft_fd4 is None:
+            _creft_fd4 = _creft_os.fdopen(4, 'r', closefd=False)
+        _creft_fd4.readline()
+    except OSError:
+        pass
 def creft_store_get(name, key):
     global _creft_fd4
     _id = f"store_get_{_creft_os.getpid()}_{_creft_random.randint(0,99999)}"
@@ -306,8 +330,12 @@ function creft_exit(code) {
   }
 }
 function creft_index(name, content, options) {
+  if (!_creft_fs) return;
+  const id = `index_${process.pid}_${Math.random().toString(36).slice(2)}`;
   const global_flag = (options && typeof options.global === 'boolean') ? options.global : false;
-  _creft_write({type:'index',name:String(name),content:String(content),global:global_flag});
+  _creft_write({type:'index',id,name:String(name),content:String(content),global:global_flag});
+  const buf = Buffer.alloc(4096);
+  try { _creft_fs.readSync(4, buf, 0, buf.length); } catch(e) {}
 }
 function creft_search(query, name) {
   if (!_creft_fs) return '';
@@ -325,9 +353,13 @@ function creft_search(query, name) {
   } catch(e) { return ''; }
 }
 function creft_store_put(name, key, value, options) {
-  const msg = {type:'store_put',name:String(name),key:String(key),value:String(value)};
+  if (!_creft_fs) return;
+  const id = `store_put_${process.pid}_${Math.random().toString(36).slice(2)}`;
+  const msg = {type:'store_put',id,name:String(name),key:String(key),value:String(value)};
   if (options && typeof options.global === 'boolean') msg.global = options.global;
   _creft_write(msg);
+  const buf = Buffer.alloc(4096);
+  try { _creft_fs.readSync(4, buf, 0, buf.length); } catch(e) {}
 }
 function creft_store_get(name, key) {
   if (!_creft_fs) return '';
@@ -934,5 +966,124 @@ mod tests {
         let idx = p.find("creft_store_put").unwrap();
         let after = &p[idx..];
         assert!(after.contains("_creft_escape"));
+    }
+
+    // ── Stage 2: synchronous ack tests ───────────────────────────────────────
+
+    /// Bash creft_store_put reads the ack from fd 4 after writing.
+    #[test]
+    fn bash_store_put_reads_from_fd4() {
+        let p = for_language("bash").unwrap();
+        let idx = p.find("creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("read -r _creft_response <&4"),
+            "bash creft_store_put must read the ack from fd 4"
+        );
+    }
+
+    /// Bash creft_index reads the ack from fd 4 after writing.
+    #[test]
+    fn bash_creft_index_reads_from_fd4() {
+        let p = for_language("bash").unwrap();
+        let idx = p.find("creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("read -r _creft_response <&4"),
+            "bash creft_index must read the ack from fd 4"
+        );
+    }
+
+    /// Bash creft_store_put generates a store_put_ prefixed id.
+    #[test]
+    fn bash_store_put_id_has_store_put_prefix() {
+        let p = for_language("bash").unwrap();
+        assert!(
+            p.contains("store_put_$$"),
+            "bash creft_store_put must generate a store_put_-prefixed id"
+        );
+    }
+
+    /// Bash creft_index generates an index_ prefixed id.
+    #[test]
+    fn bash_creft_index_id_has_index_prefix() {
+        let p = for_language("bash").unwrap();
+        assert!(
+            p.contains("index_$$"),
+            "bash creft_index must generate an index_-prefixed id"
+        );
+    }
+
+    /// Python creft_store_put reads from fd 4 after writing.
+    #[test]
+    fn python_store_put_reads_from_fd4() {
+        let p = for_language("python").unwrap();
+        // Find the creft_store_put definition and check for readline after it.
+        let idx = p.find("def creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("_creft_fd4.readline()"),
+            "python creft_store_put must read the ack from fd 4"
+        );
+    }
+
+    /// Python creft_index reads from fd 4 after writing.
+    #[test]
+    fn python_creft_index_reads_from_fd4() {
+        let p = for_language("python").unwrap();
+        let idx = p.find("def creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("_creft_fd4.readline()"),
+            "python creft_index must read the ack from fd 4"
+        );
+    }
+
+    /// Node creft_store_put calls readSync on fd 4.
+    #[test]
+    fn node_store_put_reads_sync_from_fd4() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("readSync(4"),
+            "node creft_store_put must use readSync on fd 4"
+        );
+    }
+
+    /// Node creft_index calls readSync on fd 4.
+    #[test]
+    fn node_creft_index_reads_sync_from_fd4() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("readSync(4"),
+            "node creft_index must use readSync on fd 4"
+        );
+    }
+
+    /// Node creft_store_put has an early return guard for ESM compatibility.
+    #[test]
+    fn node_store_put_has_early_return_guard() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_store_put").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("if (!_creft_fs) return;"),
+            "node creft_store_put must have early return guard for ESM compatibility"
+        );
+    }
+
+    /// Node creft_index has an early return guard for ESM compatibility.
+    #[test]
+    fn node_creft_index_has_early_return_guard() {
+        let p = for_language("node").unwrap();
+        let idx = p.find("function creft_index").unwrap();
+        let after = &p[idx..];
+        assert!(
+            after.contains("if (!_creft_fs) return;"),
+            "node creft_index must have early return guard for ESM compatibility"
+        );
     }
 }

@@ -192,6 +192,8 @@ pub(crate) enum ChannelMessage {
     },
     #[serde(rename = "index")]
     Index {
+        /// Request ID for ack correlation.
+        id: String,
         /// Sub-index name (local to the skill's namespace).
         name: String,
         /// Content to tokenize and add to the named sub-index.
@@ -214,6 +216,8 @@ pub(crate) enum ChannelMessage {
     },
     #[serde(rename = "store_put")]
     StorePut {
+        /// Request ID for ack correlation.
+        id: String,
         /// Store name (local to the skill's namespace).
         name: String,
         /// Key to store.
@@ -556,12 +560,12 @@ pub(crate) struct PrimitiveContext {
 ///   child does not deadlock on its `read(<&4)` call, and logs the question
 ///   as a print message.
 /// - `Index` — when `ctx` is `Some`, qualifies the name and builds an
-///   in-memory `SearchIndex`. Fire-and-forget; no response is written.
+///   in-memory `SearchIndex`, then writes a JSON ack on fd 4.
 /// - `Search` — when `ctx` is `Some`, resolves the name against the
 ///   access registry, queries the index, and writes a JSON response on fd 4.
 /// - `StorePut` — when `ctx` is `Some`, qualifies the store name, writes the
-///   key-value pair to the redb database, and rebuilds the search index.
-///   Fire-and-forget; no response is written.
+///   key-value pair to the redb database, rebuilds the search index, and
+///   writes a JSON ack on fd 4.
 /// - `StoreGet` — when `ctx` is `Some`, reads the value for the given key from
 ///   the redb database and writes a JSON response on fd 4.
 /// - `StoreSearch` — when `ctx` is `Some`, resolves the store name (with access
@@ -640,12 +644,14 @@ pub(crate) fn spawn_reader(
                         }
                     }
                     ChannelMessage::Index {
+                        id,
                         name,
                         content,
                         global,
                     } => {
                         if let Some(ref ctx) = ctx {
-                            handle_index_message(
+                            let response = handle_index_message(
+                                &id,
                                 &name,
                                 &content,
                                 global,
@@ -653,6 +659,15 @@ pub(crate) fn spawn_reader(
                                 ctx.plugin.as_deref(),
                                 &ctx.runtime_indexes,
                             );
+                            if let Some(ref mut rw) = response_writer {
+                                let _ = rw.write_all(response.as_bytes());
+                                let _ = rw.flush();
+                            }
+                        } else if let Some(ref mut rw) = response_writer {
+                            // No primitive context — write ack so the child does not hang.
+                            let response = format!("{{\"id\":\"{id}\",\"ok\":true}}\n");
+                            let _ = rw.write_all(response.as_bytes());
+                            let _ = rw.flush();
                         }
                     }
                     ChannelMessage::Search { id, query, name } => {
@@ -677,13 +692,15 @@ pub(crate) fn spawn_reader(
                         }
                     }
                     ChannelMessage::StorePut {
+                        id,
                         name,
                         key,
                         value,
                         global,
                     } => {
                         if let Some(ref ctx) = ctx {
-                            handle_store_put(
+                            let response = handle_store_put(
+                                &id,
                                 &name,
                                 &key,
                                 &value,
@@ -692,6 +709,15 @@ pub(crate) fn spawn_reader(
                                 ctx.plugin.as_deref(),
                                 &ctx.store_dir,
                             );
+                            if let Some(ref mut rw) = response_writer {
+                                let _ = rw.write_all(response.as_bytes());
+                                let _ = rw.flush();
+                            }
+                        } else if let Some(ref mut rw) = response_writer {
+                            // No primitive context — write ack so the child does not hang.
+                            let response = format!("{{\"id\":\"{id}\",\"ok\":true}}\n");
+                            let _ = rw.write_all(response.as_bytes());
+                            let _ = rw.flush();
                         }
                     }
                     ChannelMessage::StoreGet { id, name, key } => {
@@ -765,20 +791,22 @@ fn json_escape_string(s: &str) -> String {
 /// rebuild the `SearchIndex`, and store the result in `runtime_indexes`.
 ///
 /// Called from the reader thread when an `Index` message arrives on fd 3.
-/// Fire-and-forget — no response is written to fd 4.
+/// Returns a JSON ack string (`{"id":"<id>","ok":true}\n`) after the index
+/// rebuild completes. The caller writes this string to fd 4.
 ///
 /// When called multiple times with the same qualified name, each call appends
 /// a new document to the index rather than replacing it. The `SearchIndex` is
 /// rebuilt from all accumulated documents on every call. The `is_global` flag
 /// is updated to the value from the most recent call (last-write-wins).
 fn handle_index_message(
+    id: &str,
     name: &str,
     content: &str,
     global: bool,
     skill_name: &str,
     plugin: Option<&str>,
     runtime_indexes: &std::sync::Mutex<HashMap<String, RuntimeIndex>>,
-) {
+) -> String {
     let ns = namespace::skill_namespace(skill_name);
     let qualified = namespace::qualify(name, ns, plugin);
 
@@ -808,6 +836,8 @@ fn handle_index_message(
             .collect();
         runtime_index.index = SearchIndex::build(&doc_triples);
     }
+
+    format!("{{\"id\":\"{id}\",\"ok\":true}}\n")
 }
 
 /// Handle a `creft_search` message: resolve the name, query the index, and
@@ -875,7 +905,9 @@ fn handle_search_message(
 /// pair (and optionally the global flag) to the redb database in a single
 /// transaction, then rebuild the search index.
 ///
-/// Fire-and-forget — no response is written to fd 4.
+/// Returns a JSON ack string (`{"id":"<id>","ok":true}\n`) after the put and
+/// index rebuild complete, or after all retries are exhausted. The caller
+/// writes this string to fd 4.
 ///
 /// When `global` is `None`, the global flag is left unchanged. When
 /// `Some(true)` or `Some(false)`, the flag is set in the same transaction
@@ -883,8 +915,11 @@ fn handle_search_message(
 ///
 /// If the database is locked by another process (`DatabaseAlreadyOpen`),
 /// retries up to 3 times with 50ms backoff. If all retries fail, logs a
-/// warning to stderr and drops the put silently (fire-and-forget).
+/// warning to stderr. The ack is written regardless of outcome — the caller
+/// only needs synchronization, not error reporting.
+#[allow(clippy::too_many_arguments)] // All parameters are distinct; a struct would add indirection without clarity.
 fn handle_store_put(
+    id: &str,
     name: &str,
     key: &str,
     value: &str,
@@ -892,7 +927,7 @@ fn handle_store_put(
     skill_name: &str,
     plugin: Option<&str>,
     store_dir: &Path,
-) {
+) -> String {
     let ns = namespace::skill_namespace(skill_name);
     let qualified = namespace::qualify(name, ns, plugin);
 
@@ -908,15 +943,15 @@ fn handle_store_put(
             }
             Err(e) => {
                 eprintln!("warning: store put failed for '{qualified}': {e}");
-                return;
+                return format!("{{\"id\":\"{id}\",\"ok\":true}}\n");
             }
         }
 
         match store_kv::rebuild_store_index(store_dir, &qualified) {
-            Ok(()) => return,
+            Ok(()) => return format!("{{\"id\":\"{id}\",\"ok\":true}}\n"),
             Err(e) => {
                 eprintln!("warning: store index rebuild failed for '{qualified}': {e}");
-                return;
+                return format!("{{\"id\":\"{id}\",\"ok\":true}}\n");
             }
         }
     }
@@ -925,6 +960,7 @@ fn handle_store_put(
         .map(|e| e.to_string())
         .unwrap_or_else(|| "database locked after 3 attempts".to_owned());
     eprintln!("warning: store put failed for '{qualified}': {reason}");
+    format!("{{\"id\":\"{id}\",\"ok\":true}}\n")
 }
 
 /// Handle a `store_get` message: qualify the store name (local only), read
@@ -1934,14 +1970,17 @@ printf '%s' "$_resp"
     /// An Index message with explicit global:true deserializes correctly.
     #[test]
     fn channel_message_index_with_global_true_deserializes() {
-        let json = r#"{"type":"index","name":"beta","content":"some docs","global":true}"#;
+        let json =
+            r#"{"type":"index","id":"i1","name":"beta","content":"some docs","global":true}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::Index {
+                id,
                 name,
                 content,
                 global,
             } => {
+                assert_eq!(id, "i1");
                 assert_eq!(name, "beta");
                 assert_eq!(content, "some docs");
                 assert!(global, "global field must be true when set to true");
@@ -1953,14 +1992,16 @@ printf '%s' "$_resp"
     /// An Index message without global field defaults to false.
     #[test]
     fn channel_message_index_without_global_defaults_false() {
-        let json = r#"{"type":"index","name":"beta","content":"some docs"}"#;
+        let json = r#"{"type":"index","id":"i2","name":"beta","content":"some docs"}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::Index {
+                id,
                 name,
                 content,
                 global,
             } => {
+                assert_eq!(id, "i2");
                 assert_eq!(name, "beta");
                 assert_eq!(content, "some docs");
                 assert!(!global, "missing global field must default to false");
@@ -1972,7 +2013,7 @@ printf '%s' "$_resp"
     /// An Index message with global:false deserializes correctly.
     #[test]
     fn channel_message_index_with_global_false_deserializes() {
-        let json = r#"{"type":"index","name":"configs","content":"data","global":false}"#;
+        let json = r#"{"type":"index","id":"i3","name":"configs","content":"data","global":false}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::Index { global, .. } => {
@@ -2012,6 +2053,7 @@ printf '%s' "$_resp"
     fn handle_index_message_qualifies_name_with_namespace() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "beta",
             "rollback procedure",
             false,
@@ -2032,6 +2074,7 @@ printf '%s' "$_resp"
     fn handle_index_message_global_flag_propagates() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "configs",
             "shared data",
             true,
@@ -2053,7 +2096,15 @@ printf '%s' "$_resp"
     #[test]
     fn handle_index_message_without_global_is_local() {
         let indexes = make_runtime_indexes();
-        super::handle_index_message("private", "secret", false, "test skill", None, &indexes);
+        super::handle_index_message(
+            "i1",
+            "private",
+            "secret",
+            false,
+            "test skill",
+            None,
+            &indexes,
+        );
         let map = indexes.lock().unwrap();
         let entry = map
             .get("test.private")
@@ -2087,6 +2138,7 @@ printf '%s' "$_resp"
         let indexes = make_runtime_indexes();
         // Index a document containing "rollback".
         super::handle_index_message(
+            "i1",
             "beta",
             "rollback deployment procedure",
             false,
@@ -2119,6 +2171,7 @@ printf '%s' "$_resp"
     fn handle_search_message_returns_content_not_doc_id() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "recipes",
             "Chocolate cake needs cocoa powder.",
             false,
@@ -2153,6 +2206,7 @@ printf '%s' "$_resp"
         let indexes = make_runtime_indexes();
         // Index in "deploy" namespace, not global.
         super::handle_index_message(
+            "i1",
             "configs",
             "deploy configs",
             false,
@@ -2188,6 +2242,7 @@ printf '%s' "$_resp"
         let indexes = make_runtime_indexes();
         // Index in "deploy" namespace with global:true.
         super::handle_index_message(
+            "i1",
             "configs",
             "shared configuration data",
             true,
@@ -2217,6 +2272,7 @@ printf '%s' "$_resp"
     fn handle_index_message_includes_plugin_in_qualified_name() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "beta",
             "content",
             false,
@@ -2241,10 +2297,11 @@ printf '%s' "$_resp"
         let mut ch = SideChannel::new().unwrap();
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
-        // Bash script: index content, then search for a term in it.
+        // Bash script: index content, read the ack, then search for a term in it.
         // The response is the raw JSON line from fd 4.
         let script = r#"
-printf '{"type":"index","name":"beta","content":"rollback deployment","global":false}\n' >&3
+printf '{"type":"index","id":"idx1","name":"beta","content":"rollback deployment","global":false}\n' >&3
+read -r _ack <&4
 _id="search_test_1"
 printf '{"type":"search","id":"%s","query":"rollback","name":"beta"}\n' "$_id" >&3
 read -r _resp <&4
@@ -2393,6 +2450,7 @@ printf '%s' "$_resp"
     fn handle_index_message_accumulates_documents_across_calls() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "docs",
             "first document about rollback",
             false,
@@ -2401,6 +2459,7 @@ printf '%s' "$_resp"
             &indexes,
         );
         super::handle_index_message(
+            "i2",
             "docs",
             "second document about deployment",
             false,
@@ -2426,6 +2485,7 @@ printf '%s' "$_resp"
     fn handle_index_message_first_document_searchable_after_second_call() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "docs",
             "rollback procedure guide",
             false,
@@ -2434,6 +2494,7 @@ printf '%s' "$_resp"
             &indexes,
         );
         super::handle_index_message(
+            "i2",
             "docs",
             "deployment configuration steps",
             false,
@@ -2458,6 +2519,7 @@ printf '%s' "$_resp"
     fn handle_index_message_second_document_searchable_after_accumulation() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "docs",
             "rollback procedure guide",
             false,
@@ -2466,6 +2528,7 @@ printf '%s' "$_resp"
             &indexes,
         );
         super::handle_index_message(
+            "i2",
             "docs",
             "deployment configuration steps",
             false,
@@ -2500,6 +2563,7 @@ printf '%s' "$_resp"
     fn handle_search_message_multi_document_returns_content_not_doc_labels() {
         let indexes = make_runtime_indexes();
         super::handle_index_message(
+            "i1",
             "docs",
             "rollback procedure guide",
             false,
@@ -2508,6 +2572,7 @@ printf '%s' "$_resp"
             &indexes,
         );
         super::handle_index_message(
+            "i2",
             "docs",
             "deployment configuration steps",
             false,
@@ -2538,8 +2603,24 @@ printf '%s' "$_resp"
     #[test]
     fn handle_index_message_is_global_last_write_wins() {
         let indexes = make_runtime_indexes();
-        super::handle_index_message("docs", "content one", false, "deploy skill", None, &indexes);
-        super::handle_index_message("docs", "content two", true, "deploy skill", None, &indexes);
+        super::handle_index_message(
+            "i1",
+            "docs",
+            "content one",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        super::handle_index_message(
+            "i2",
+            "docs",
+            "content two",
+            true,
+            "deploy skill",
+            None,
+            &indexes,
+        );
 
         let map = indexes.lock().unwrap();
         let entry = map
@@ -2606,15 +2687,17 @@ printf '%s' "$_resp"
     /// StorePut with global:true deserializes to Some(true).
     #[test]
     fn channel_message_store_put_global_true_deserializes() {
-        let json = r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":true}"#;
+        let json = r#"{"type":"store_put","id":"p1","name":"data","key":"env","value":"prod","global":true}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::StorePut {
+                id,
                 name,
                 key,
                 value,
                 global,
             } => {
+                assert_eq!(id, "p1");
                 assert_eq!(name, "data");
                 assert_eq!(key, "env");
                 assert_eq!(value, "prod");
@@ -2627,7 +2710,7 @@ printf '%s' "$_resp"
     /// StorePut without global field deserializes to None (flag unchanged).
     #[test]
     fn channel_message_store_put_without_global_defaults_to_none() {
-        let json = r#"{"type":"store_put","name":"data","key":"env","value":"prod"}"#;
+        let json = r#"{"type":"store_put","id":"p2","name":"data","key":"env","value":"prod"}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::StorePut { global, .. } => {
@@ -2643,8 +2726,7 @@ printf '%s' "$_resp"
     /// StorePut with global:false deserializes to Some(false).
     #[test]
     fn channel_message_store_put_global_false_deserializes() {
-        let json =
-            r#"{"type":"store_put","name":"data","key":"env","value":"prod","global":false}"#;
+        let json = r#"{"type":"store_put","id":"p3","name":"data","key":"env","value":"prod","global":false}"#;
         let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
         match msg {
             super::ChannelMessage::StorePut { global, .. } => {
@@ -2691,6 +2773,7 @@ printf '%s' "$_resp"
     fn handle_store_put_creates_redb_and_index_files() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put(
+            "p1",
             "data",
             "env",
             "production",
@@ -2714,6 +2797,7 @@ printf '%s' "$_resp"
     fn handle_store_put_replaces_existing_key() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put(
+            "p2a",
             "data",
             "env",
             "staging",
@@ -2723,6 +2807,7 @@ printf '%s' "$_resp"
             dir.path(),
         );
         super::handle_store_put(
+            "p2b",
             "data",
             "env",
             "production",
@@ -2742,6 +2827,7 @@ printf '%s' "$_resp"
     fn handle_store_get_returns_value_for_existing_key() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put(
+            "p3",
             "data",
             "env",
             "prod",
@@ -2761,7 +2847,16 @@ printf '%s' "$_resp"
     #[test]
     fn handle_store_get_returns_empty_value_for_missing_key() {
         let dir = tempfile::tempdir().unwrap();
-        super::handle_store_put("data", "other", "x", None, "deploy skill", None, dir.path());
+        super::handle_store_put(
+            "p4",
+            "data",
+            "other",
+            "x",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
         let response = super::handle_store_get(
             "g2",
             "data",
@@ -2805,6 +2900,7 @@ printf '%s' "$_resp"
     fn handle_store_search_returns_matching_keys_after_put() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put(
+            "p5",
             "data",
             "config",
             "rollback procedure",
@@ -2828,6 +2924,7 @@ printf '%s' "$_resp"
     fn handle_store_search_returns_empty_when_no_match() {
         let dir = tempfile::tempdir().unwrap();
         super::handle_store_put(
+            "p6",
             "data",
             "env",
             "production",
@@ -2916,8 +3013,9 @@ printf '%s' "$_resp"
         // file with a non-DatabaseAlreadyOpen error — covering the Err(e) arm.
         let path = crate::store_kv::store_path(dir.path(), "deploy.data");
         std::fs::write(&path, b"not a redb file\xFF\xFE\xFD").unwrap();
-        // Must complete without panicking (fire-and-forget, writes warning to stderr).
+        // Must complete without panicking (returns ack regardless of outcome).
         super::handle_store_put(
+            "p7",
             "data",
             "env",
             "production",
@@ -2968,6 +3066,7 @@ printf '%s' "$_resp"
         let dir = tempfile::tempdir().unwrap();
         // Index "config" → "production environment rollback".
         super::handle_store_put(
+            "p8",
             "data",
             "config",
             "production environment rollback",
@@ -3122,9 +3221,10 @@ printf '%s' "$_resp"
         let mut ch = SideChannel::new().unwrap();
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
-        // The script puts a value, then gets it back and prints the raw JSON response.
+        // The script puts a value, reads the ack, then gets it back and prints the response.
         let script = r#"
-printf '{"type":"store_put","name":"data","key":"env","value":"production"}\n' >&3
+printf '{"type":"store_put","id":"put1","name":"data","key":"env","value":"production"}\n' >&3
+read -r _ack <&4
 _id="store_get_test_1"
 printf '{"type":"store_get","id":"%s","name":"data","key":"env"}\n' "$_id" >&3
 read -r _resp <&4
@@ -3172,7 +3272,8 @@ printf '%s' "$_resp"
         let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
 
         let script = r#"
-printf '{"type":"store_put","name":"data","key":"config","value":"rollback procedure"}\n' >&3
+printf '{"type":"store_put","id":"put2","name":"data","key":"config","value":"rollback procedure"}\n' >&3
+read -r _ack <&4
 _id="store_search_test_1"
 printf '{"type":"store_search","id":"%s","name":"data","query":"rollback"}\n' "$_id" >&3
 read -r _resp <&4
@@ -3207,5 +3308,172 @@ printf '%s' "$_resp"
             parsed["results"].as_str().unwrap_or("").contains("config"),
             "store search after put must return 'config' key; got: {stdout}"
         );
+    }
+
+    // ── Stage 1: ack response tests ──────────────────────────────────────────
+
+    /// StorePut with an id field deserializes correctly and the id is captured.
+    #[test]
+    fn channel_message_store_put_deserializes_with_id() {
+        let json = r#"{"type":"store_put","id":"sp_test_1","name":"data","key":"k","value":"v"}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::StorePut {
+                id,
+                name,
+                key,
+                value,
+                global,
+            } => {
+                assert_eq!(id, "sp_test_1");
+                assert_eq!(name, "data");
+                assert_eq!(key, "k");
+                assert_eq!(value, "v");
+                assert_eq!(global, None);
+            }
+            other => panic!("expected StorePut, got {other:?}"),
+        }
+    }
+
+    /// Index with an id field deserializes correctly and the id is captured.
+    #[test]
+    fn channel_message_index_deserializes_with_id() {
+        let json = r#"{"type":"index","id":"idx_test_1","name":"docs","content":"hello world","global":false}"#;
+        let msg: super::ChannelMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            super::ChannelMessage::Index {
+                id,
+                name,
+                content,
+                global,
+            } => {
+                assert_eq!(id, "idx_test_1");
+                assert_eq!(name, "docs");
+                assert_eq!(content, "hello world");
+                assert!(!global);
+            }
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    /// handle_store_put returns a JSON ack string containing the request id and ok:true.
+    #[test]
+    fn handle_store_put_returns_ack_with_id_and_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let ack = super::handle_store_put(
+            "ack_test_id",
+            "data",
+            "env",
+            "production",
+            None,
+            "deploy skill",
+            None,
+            dir.path(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(ack.trim()).unwrap();
+        assert_eq!(
+            parsed["id"], "ack_test_id",
+            "ack must contain the request id"
+        );
+        assert_eq!(parsed["ok"], true, "ack must contain ok:true");
+    }
+
+    /// handle_index_message returns a JSON ack string containing the request id and ok:true.
+    #[test]
+    fn handle_index_message_returns_ack_with_id_and_ok() {
+        let indexes = make_runtime_indexes();
+        let ack = super::handle_index_message(
+            "ack_idx_id",
+            "docs",
+            "some content",
+            false,
+            "deploy skill",
+            None,
+            &indexes,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(ack.trim()).unwrap();
+        assert_eq!(
+            parsed["id"], "ack_idx_id",
+            "ack must contain the request id"
+        );
+        assert_eq!(parsed["ok"], true, "ack must contain ok:true");
+    }
+
+    /// When spawn_reader receives a StorePut with ctx=None, it writes an ack so
+    /// the child does not hang.
+    #[test]
+    fn spawn_reader_no_ctx_writes_ack_for_store_put() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+printf '{"type":"store_put","id":"nc_put1","name":"data","key":"k","value":"v"}\n' >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        // ctx = None: exercises the else-if fallback for StorePut.
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "nc_put1");
+        assert_eq!(parsed["ok"], true);
+    }
+
+    /// When spawn_reader receives an Index with ctx=None, it writes an ack so
+    /// the child does not hang.
+    #[test]
+    fn spawn_reader_no_ctx_writes_ack_for_index() {
+        let mut ch = SideChannel::new().unwrap();
+        let (ctrl_w_fd, resp_r_fd) = ch.child_fds();
+
+        let script = r#"
+printf '{"type":"index","id":"nc_idx1","name":"docs","content":"hello","global":false}\n' >&3
+read -r _resp <&4
+printf '%s' "$_resp"
+"#;
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        cmd.stdout(std::process::Stdio::piped());
+        setup_child_fds(&mut cmd, ctrl_w_fd, resp_r_fd);
+
+        let ctrl_reader = ch.take_control_reader().unwrap();
+        let resp_writer_fd = ch.take_response_writer().unwrap();
+        let child = cmd.spawn().unwrap();
+        ch.close_child_ends();
+
+        let writer = Arc::new(super::TerminalWriter::new());
+        use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+        let resp_writer_file =
+            Some(unsafe { std::fs::File::from_raw_fd(resp_writer_fd.into_raw_fd()) });
+        // ctx = None: exercises the else-if fallback for Index.
+        let reader_handle =
+            super::spawn_reader(ctrl_reader, writer, None, resp_writer_file, None, None);
+
+        let output = child.wait_with_output().unwrap();
+        reader_handle.join().expect("reader thread must not panic");
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(parsed["id"], "nc_idx1");
+        assert_eq!(parsed["ok"], true);
     }
 }
