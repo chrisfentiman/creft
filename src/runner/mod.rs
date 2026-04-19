@@ -2316,4 +2316,145 @@ echo "search completed"
             result
         );
     }
+
+    // ── creft_search / creft_store in pipe-chain blocks ──────────────────────
+
+    /// A block in a multi-block pipe chain can call creft_index and creft_search
+    /// and receive actual results.
+    ///
+    /// Before the fix, spawn_reader was passed `None` for the PrimitiveContext
+    /// in pipe-chain mode, so Index messages were silently dropped and Search
+    /// queries returned empty results regardless of what was indexed. This test
+    /// verifies that the PrimitiveContext is wired correctly: index then search
+    /// within the same pipe-chain block returns the indexed content.
+    #[test]
+    #[cfg(unix)]
+    fn pipe_chain_block_creft_index_and_search_receive_results() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-pipe-search".into(),
+                description: "index and search within a pipe-chain block".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Block 0 (non-sponge): index content, search for it, and
+                    // write the result to stdout. Block 1 captures that output
+                    // and fails if the result is empty.
+                    code: r#"creft_index "notes" "rollback deployment procedure"
+result=$(creft_search "rollback" "notes")
+echo "$result"
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Block 1: read block 0's search result from stdin.
+                    // If PrimitiveContext was missing, creft_search in block 0
+                    // would return an empty string, and this test would fail.
+                    code: r#"stdin=$(cat)
+if [ -z "$stdin" ]; then
+  echo "ERROR: search returned empty result" >&2
+  exit 1
+fi
+exit 0
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+            ],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test pipe search");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "creft_index + creft_search in a pipe-chain block must return results: {:?}",
+            result
+        );
+    }
+
+    /// A block in a multi-block pipe chain can call creft_store_get and receive
+    /// an empty-value response without hanging.
+    ///
+    /// With PrimitiveContext wired to the reader thread, StoreGet is handled by
+    /// the real handler which returns `{"value":""}` when the key is absent.
+    /// Without it, the reader falls through to the "no ctx" branch, which also
+    /// returns an empty response — but this test documents that the handler is
+    /// reached and the block exits cleanly in both cases.
+    #[test]
+    #[cfg(unix)]
+    fn pipe_chain_block_creft_store_get_returns_empty_for_missing_key() {
+        let cmd = ParsedCommand {
+            def: CommandDef {
+                name: "test-pipe-store".into(),
+                description: "store_get for absent key in pipe-chain block".into(),
+                args: vec![],
+                flags: vec![],
+                env: vec![],
+                tags: vec![],
+                supports: vec![],
+            },
+            docs: None,
+            blocks: vec![
+                CodeBlock {
+                    lang: "bash".into(),
+                    code: "echo ready\n".into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+                CodeBlock {
+                    lang: "bash".into(),
+                    // Discard block 0 output, call store_get, verify it exits
+                    // cleanly (no hang, no non-zero exit from creft_store_get).
+                    code: r#"cat > /dev/null
+creft_store_get "mystore" "no_such_key" > /dev/null
+echo "get completed"
+"#
+                    .into(),
+                    deps: vec![],
+                    llm_config: None,
+                    llm_parse_error: None,
+                },
+            ],
+        };
+
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            std::path::PathBuf::from("/tmp"),
+            vec![],
+            false,
+            false,
+        )
+        .with_skill_name("test pipe store");
+
+        let args: Vec<String> = vec![];
+        let result = run(&cmd, &args, &ctx);
+        assert!(
+            result.is_ok(),
+            "creft_store_get for a missing key in a pipe-chain block must exit cleanly: {:?}",
+            result
+        );
+    }
 }

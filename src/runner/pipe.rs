@@ -11,7 +11,7 @@ use super::{
 };
 
 #[cfg(unix)]
-use super::channel::{ExitSignal, SideChannel, TerminalWriter};
+use super::channel::{ExitSignal, PrimitiveContext, SideChannel, TerminalWriter};
 #[cfg(unix)]
 use super::signal::PipeSignalGuard;
 
@@ -1173,13 +1173,19 @@ pub(super) fn run_pipe_chain(
                 .take_response_writer()
                 .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
             let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let primitive_ctx = Some(PrimitiveContext {
+                skill_name: ctx.skill_name.clone(),
+                plugin: ctx.plugin.clone(),
+                runtime_indexes: std::sync::Arc::clone(&ctx.runtime_indexes),
+                store_dir: ctx.store_dir.clone(),
+            });
             let handle = super::channel::spawn_reader(
                 ctrl_reader,
                 std::sync::Arc::clone(&terminal_writer),
                 None,
                 resp_writer,
                 Some(std::sync::Arc::clone(&signal)),
-                None, // search context not available in pipe-chain mode
+                primitive_ctx,
             );
             reader_handles.push(handle);
             exit_signals.push(signal);
