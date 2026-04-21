@@ -28,7 +28,7 @@ shell-escape = "0.1"
 ureq = "3"
 indicatif = "0.18"
 console = "0.16"
-redb = "3"
+redb = "4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
