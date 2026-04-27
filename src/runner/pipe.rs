@@ -1684,97 +1684,45 @@ mod tests {
     /// Verify `cancel_verdict` — the function the reaper calls after joining its
     /// reader to decide whether the downstream sponge should cancel.
     ///
-    /// The three cases cover: creft_exit alone, exit-99 alone, and clean exit
-    /// with no signal. End-to-end coverage (real process spawning + sponge
-    /// thread) is provided by the stage-3 skill-test fixture.
+    /// Cases: creft_exit alone, exit-99 alone, and clean exit with no signal.
+    /// End-to-end coverage (real process spawning + sponge thread) is provided
+    /// by the stage-3 skill-test fixture.
     #[cfg(unix)]
     mod cancel_verdict {
         use super::super::*;
         use pretty_assertions::assert_eq;
+        use rstest::rstest;
 
-        fn make_exit_signal(code: Option<i32>) -> ExitSignal {
-            std::sync::Arc::new(std::sync::Mutex::new(code))
-        }
-
-        /// creft_exit(0) with a clean process exit produces cancel = true.
-        #[test]
-        fn creft_exit_zero_cancels_downstream_sponge() {
-            let signal = make_exit_signal(Some(0));
-            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
-
-            // Simulate the reaper: join the reader (modelled as a no-op thread
-            // whose write is already reflected in the pre-populated slot), read
-            // the signal slot, and send the verdict produced by cancel_verdict.
-            let signal_clone = std::sync::Arc::clone(&signal);
-            let handle = std::thread::spawn(move || {
-                // "Reader" writes nothing — slot was pre-populated above.
-                drop(signal_clone);
-            });
-            handle.join().expect("reader thread must not panic");
+        #[rstest]
+        #[case::creft_exit_zero(false, Some(0), true)]
+        #[case::exit_99(true, None, true)]
+        #[case::clean_exit(false, None, false)]
+        fn cancel_verdict_matches_expected(
+            #[case] exit_99: bool,
+            #[case] signal_value: Option<i32>,
+            #[case] expected: bool,
+        ) {
+            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(signal_value));
             let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
-            let _ = cancel_tx.send(cancel_verdict(false, creft_exit_observed));
-
-            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
-            assert_eq!(
-                verdict, true,
-                "creft_exit(0) must cancel the downstream sponge"
-            );
+            assert_eq!(cancel_verdict(exit_99, creft_exit_observed), expected);
         }
 
-        /// exit-99 with no creft_exit signal produces cancel = true.
+        /// Joining the reader thread provides the happens-before guarantee that
+        /// the reaper's design relies on: a write to the exit-signal slot by the
+        /// reader is guaranteed to be visible to the reaper after `join()`.
+        ///
+        /// This is a property of `std::thread::JoinHandle::join` (not this
+        /// codebase specifically), included here as a living document of the
+        /// synchronisation assumption behind the reaper's read ordering.
         #[test]
-        fn exit_99_cancels_downstream_sponge() {
-            let signal = make_exit_signal(None);
-            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
-
-            let signal_clone = std::sync::Arc::clone(&signal);
-            let handle = std::thread::spawn(move || {
-                // "Reader" writes nothing — fd 3 carried no Exit message.
-                drop(signal_clone);
-            });
-            handle.join().expect("reader thread must not panic");
-            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
-            let _ = cancel_tx.send(cancel_verdict(true, creft_exit_observed));
-
-            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
-            assert_eq!(verdict, true, "exit 99 must cancel the downstream sponge");
-        }
-
-        /// Clean exit (status 0, no creft_exit) produces cancel = false.
-        #[test]
-        fn clean_exit_does_not_cancel_downstream_sponge() {
-            let signal = make_exit_signal(None);
-            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
-
-            let signal_clone = std::sync::Arc::clone(&signal);
-            let handle = std::thread::spawn(move || {
-                // "Reader" writes nothing — fd 3 carried no Exit message.
-                drop(signal_clone);
-            });
-            handle.join().expect("reader thread must not panic");
-            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
-            let _ = cancel_tx.send(cancel_verdict(false, creft_exit_observed));
-
-            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
-            assert_eq!(
-                verdict, false,
-                "clean exit must not cancel the downstream sponge"
-            );
-        }
-
-        /// creft_exit written by the reader thread is visible after the reaper
-        /// joins the reader — the join is a definitive synchronisation point.
-        #[test]
-        fn reaper_join_synchronises_reader_write_to_exit_signal() {
+        fn join_provides_happens_before_for_exit_signal_write() {
             let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
             let signal_for_reader = std::sync::Arc::clone(&signal);
 
-            // Reader thread: writes Some(0) to the slot before exiting.
             let reader_handle = std::thread::spawn(move || {
                 *signal_for_reader.lock().expect("exit signal lock poisoned") = Some(0);
             });
 
-            // Reaper: join the reader, then read the slot.
             reader_handle.join().expect("reader thread must not panic");
             let observed = *signal.lock().expect("exit signal lock poisoned");
             assert_eq!(
