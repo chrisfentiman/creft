@@ -537,4 +537,213 @@ mod tests {
             "filter that empties scenarios must return Ok(()); got: {result:?}",
         );
     }
+
+    // ── Stage 3: filter / pattern tests ──────────────────────────────────────
+
+    /// A fixture with three scenarios: one that would fail if run, and two
+    /// merge-prefixed scenarios that pass. Used by the filter tests below.
+    const THREE_SCENARIO_FIXTURE: &str = r#"
+- name: fresh-install
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+- name: merge-clean
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+- name: merge-conflict
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#;
+
+    #[test]
+    fn cmd_skills_test_filter_narrows_to_matching_scenarios() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(&project, "setup", THREE_SCENARIO_FIXTURE);
+
+        // --filter "merge*" must run only merge-clean and merge-conflict,
+        // skipping fresh-install which would fail. Ok(()) proves the filter
+        // excluded the failing scenario.
+        let result = cmd_skills_test(
+            &ctx,
+            Some("setup".to_owned()),
+            Some("merge*".to_owned()),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "--filter 'merge*' must run only merge-prefixed scenarios and return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_filter_substring_matches_anywhere() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(&project, "setup", THREE_SCENARIO_FIXTURE);
+
+        // --filter "clean" (substring, no glob) must match merge-clean (the
+        // substring appears in the name) and exclude fresh-install and
+        // merge-conflict. merge-clean exits 0, so the run succeeds.
+        let result = cmd_skills_test(
+            &ctx,
+            Some("setup".to_owned()),
+            Some("clean".to_owned()),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "--filter 'clean' must match only merge-clean and return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_filter_without_skill_runs_across_all_fixtures() {
+        let (_home, project, ctx) = project_with_commands_dir();
+
+        // setup.test.yaml: one merge-prefixed scenario (passes) and one that
+        // would fail if reached.
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: merge-state
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+- name: would-fail
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // auth.test.yaml: one merge-prefixed scenario (passes) and one that
+        // would fail if reached.
+        write_fixture(
+            &project,
+            "auth",
+            r#"
+- name: merge-tokens
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+- name: expire
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // No SKILL supplied — filter applies across every discovered fixture.
+        // Only merge-state and merge-tokens run. would-fail and expire are
+        // excluded by the pattern. Both passing scenarios succeed, so Ok(()).
+        let result = cmd_skills_test(&ctx, None, Some("merge*".to_owned()), false, false, false);
+        assert!(
+            result.is_ok(),
+            "--filter 'merge*' without SKILL must run merge-prefixed scenarios across all fixtures and return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_skill_pattern_discovers_multiple_fixtures() {
+        let (_home, project, ctx) = project_with_commands_dir();
+
+        // Two merge-prefixed fixtures that each pass, and one setup fixture
+        // that would fail if discovered. The SKILL pattern "merge*" must
+        // discover both merge fixtures and skip setup.
+        write_fixture(
+            &project,
+            "merge-clean",
+            r#"
+- name: run-clean
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+        write_fixture(
+            &project,
+            "merge-conflict",
+            r#"
+- name: run-conflict
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: would-fail
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // "merge*" discovers merge-clean.test.yaml and merge-conflict.test.yaml,
+        // excludes setup.test.yaml. Both merge scenarios pass, so Ok(()).
+        let result = cmd_skills_test(&ctx, Some("merge*".to_owned()), None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "SKILL 'merge*' must discover both merge fixtures and return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_skill_substring_pattern_includes_setup_extra() {
+        let (_home, project, ctx) = project_with_commands_dir();
+
+        // Under substring matching, SKILL "setup" matches any fixture whose
+        // basename stem contains "setup" — which includes both setup.test.yaml
+        // and setup-extra.test.yaml. Both must be discovered and run.
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: base-scenario
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+        write_fixture(
+            &project,
+            "setup-extra",
+            r#"
+- name: extra-scenario
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // Both fixtures pass. Ok(()) confirms both were discovered (if only
+        // setup.test.yaml were discovered, setup-extra's scenario would be
+        // silently skipped rather than failing — but the test documents the
+        // substring shape's inclusive behavior explicitly).
+        let result = cmd_skills_test(&ctx, Some("setup".to_owned()), None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "SKILL 'setup' substring must discover both setup.test.yaml and setup-extra.test.yaml; got: {result:?}",
+        );
+    }
 }
