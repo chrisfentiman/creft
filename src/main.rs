@@ -131,6 +131,8 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
 
         cli::Command::Remove { skill, global } => cmd::skill::cmd_rm(ctx, &skill, global),
 
+        cli::Command::RemoveTest { skill, name } => cmd::skill::cmd_remove_test(ctx, &skill, &name),
+
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
             cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),
             cli::PluginCommand::Update { name } => cmd::plugin::cmd_plugin_update(ctx, name),

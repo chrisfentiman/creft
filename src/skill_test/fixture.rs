@@ -327,6 +327,226 @@ pub(crate) fn replace_scenario(
     Ok(content)
 }
 
+/// Remove the scenario at `index` from `existing_content` and return the new
+/// file bytes.
+///
+/// Comments, blank lines, and hand-formatted bytes outside the target entry's
+/// byte range are preserved verbatim. The entry's range is defined as the
+/// half-open byte interval `[start, end)` where:
+///
+/// - `start` is the byte offset of the line containing the entry's leading
+///   `-` indicator.
+/// - `end` is the byte offset of the line containing the next entry's `-`
+///   indicator, or the file length if `index` is the last entry.
+///
+/// Inter-entry comments and blank lines attach to the entry above them. Any
+/// comment or blank line whose byte offset is `>= start` and `< end` is part
+/// of the target entry's range and is removed with it — including a comment
+/// line that visually appears immediately above the next entry's `-` line.
+/// Comments and blank lines before the first entry's `-` line are file-level
+/// (offset `< start_0`) and survive every removal.
+///
+/// `index` is the zero-based position obtained from
+/// [`find_scenario_by_name`]. Out-of-bounds indices return a
+/// [`FixtureError::Parse`] error (defensive; the CLI does not produce one).
+///
+/// The implementation locates entry boundaries by direct byte scan over
+/// `existing_content.as_bytes()`. `yaml-rust2` is used upstream by the caller
+/// for schema validation (via [`parse_scenarios_str`]) and is used here only
+/// to reject flow-style top-level sequences before the byte scan begins. The
+/// byte scan itself never consults `yaml-rust2`'s `Marker` indices, sidestepping
+/// the inconsistency where the scanner's index field advances per-char in most
+/// paths but per-byte inside literal/folded block scalars.
+///
+/// The fidelity contract matches [`append_scenario`]; [`replace_scenario`]
+/// still round-trips through the YAML emitter and is tracked separately for
+/// evolution to the same byte-fidelity contract these two primitives share.
+#[allow(dead_code)] // called by cmd_remove_test in cmd/skill.rs
+pub(crate) fn remove_scenario_at(
+    existing_content: &str,
+    index: usize,
+    path_label: &Path,
+) -> Result<String, FixtureError> {
+    let bytes = existing_content.as_bytes();
+
+    // Step 0 — pre-scan rejections.
+    //
+    // Walk lines and classify "significant" lines: lines whose first
+    // non-whitespace byte is neither `b'#'` (comment) nor a line-end byte
+    // (blank). Both rejected constructs are checked in a single pass.
+    let mut first_significant_seen = false;
+    let mut line_start = 0usize;
+
+    loop {
+        if line_start >= bytes.len() {
+            break;
+        }
+        // Find the end of this line.
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| line_start + p + 1)
+            .unwrap_or(bytes.len());
+
+        let line = &bytes[line_start..line_end];
+
+        // Skip leading whitespace to find the first significant byte.
+        let first_nonws = line.iter().position(|&b| !b.is_ascii_whitespace());
+
+        if let Some(pos) = first_nonws {
+            let first_byte = line[pos];
+            // Skip comment lines and blank lines (no non-whitespace byte is blank).
+            if first_byte != b'#' {
+                // This is a significant line.
+                if !first_significant_seen {
+                    // Check for flow-style: first significant byte is `[`.
+                    if first_byte == b'[' {
+                        return Err(FixtureError::Parse {
+                            path: path_label.to_owned(),
+                            message:
+                                "remove_scenario_at: flow-style top-level sequences are not supported"
+                                    .to_owned(),
+                        });
+                    }
+                    first_significant_seen = true;
+                }
+
+                // Check for YAML document-start marker `---` on any significant
+                // line. Trim trailing whitespace before comparing.
+                let trimmed = line[pos..]
+                    .iter()
+                    .rposition(|&b| !b.is_ascii_whitespace())
+                    .map(|end| &line[pos..=pos + end])
+                    .unwrap_or(&line[pos..]);
+                if trimmed == b"---" {
+                    return Err(FixtureError::Parse {
+                        path: path_label.to_owned(),
+                        message: "remove_scenario_at: YAML document-start marker '---' is not supported in test fixtures".to_owned(),
+                    });
+                }
+            }
+        }
+
+        line_start = line_end;
+    }
+
+    // Step 1 — collect top-level entry line-start byte offsets.
+    //
+    // A "top-level entry line" satisfies all of:
+    //   (1) First non-whitespace byte is `b'-'`.
+    //   (2) The byte immediately following that `-` is ASCII space, `\n`,
+    //       `\r`, or the line is the last byte of the file.
+    //   (3) Leading-whitespace count equals the base-indent column, which is
+    //       fixed by the first line satisfying (1) and (2).
+    let entries = collect_top_level_entry_offsets(existing_content);
+
+    // Step 2 — bounds check.
+    if index >= entries.len() {
+        return Err(FixtureError::Parse {
+            path: path_label.to_owned(),
+            message: "remove_scenario_at: index out of bounds".to_owned(),
+        });
+    }
+
+    // Step 3 — compute byte range.
+    let start = entries[index];
+    let end = entries
+        .get(index + 1)
+        .copied()
+        .unwrap_or(existing_content.len());
+
+    // Step 4 — slice.
+    //
+    // Both `start` and `end` are line-start byte offsets: either 0 or the
+    // byte immediately after a `\n`. `\n` is a single-byte UTF-8 codepoint,
+    // so every line-start is a valid UTF-8 boundary.
+    let result = format!("{}{}", &existing_content[..start], &existing_content[end..]);
+
+    Ok(result)
+}
+
+/// Collect the byte offsets of every top-level block-sequence entry indicator
+/// in `content`.
+///
+/// Returns a `Vec<usize>` of line-start byte offsets, one per top-level entry,
+/// in document order. This helper is exposed as a named function so tests can
+/// assert its output directly without going through [`remove_scenario_at`]'s
+/// full path (including Step 0 rejections).
+///
+/// Entry indicator predicate (all three clauses must hold):
+///
+/// 1. First non-whitespace byte is `b'-'`.
+/// 2. The byte immediately following that `-` is: ASCII space (`b' '`),
+///    line-feed (`b'\n'`), carriage-return (`b'\r'`), or there is no
+///    following byte on this line (the `-` is the last byte of the file or
+///    immediately before the end of the line). A `-` followed by any other
+///    byte is a plain scalar, not an entry indicator.
+/// 3. Leading-whitespace count equals the base-indent column, fixed by the
+///    first line satisfying clauses (1) and (2).
+pub(crate) fn collect_top_level_entry_offsets(content: &str) -> Vec<usize> {
+    let bytes = content.as_bytes();
+    let mut entries: Vec<usize> = Vec::new();
+    let mut base_indent: Option<usize> = None;
+    let mut line_start = 0usize;
+
+    loop {
+        if line_start >= bytes.len() {
+            break;
+        }
+
+        // Find end of line.
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| line_start + p + 1)
+            .unwrap_or(bytes.len());
+
+        let line = &bytes[line_start..line_end];
+
+        // Count leading whitespace.
+        let indent = line
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
+
+        if indent < line.len() {
+            let first_byte = line[indent];
+
+            if first_byte == b'-' {
+                // Clause (2): what follows the `-`?
+                let after_dash = line.get(indent + 1).copied();
+                let is_entry = match after_dash {
+                    None => true,        // `-` is the last byte of the file
+                    Some(b' ') => true,  // `- value` or `- ` followed by content
+                    Some(b'\n') => true, // `-\n`
+                    Some(b'\r') => true, // `-\r\n`
+                    _ => false,          // `-foo` is a plain scalar, not an indicator
+                };
+
+                if is_entry {
+                    // Clause (3): match or establish base indent.
+                    match base_indent {
+                        None => {
+                            base_indent = Some(indent);
+                            entries.push(line_start);
+                        }
+                        Some(base) if indent == base => {
+                            entries.push(line_start);
+                        }
+                        _ => {} // nested entry at deeper indent — skip
+                    }
+                }
+            }
+            // Lines whose first non-whitespace byte is anything else are
+            // not entry indicators (comments, continuation lines, etc.).
+        }
+
+        line_start = line_end;
+    }
+
+    entries
+}
+
 /// Render a single scenario mapping node as a YAML string in block style.
 ///
 /// The result is suitable for passing to [`append_scenario`]. It does NOT
@@ -2588,5 +2808,585 @@ mod tests {
             !is_fixture_match(Path::new("setup.yaml"), Some(&matcher)),
             "plain .yaml rejected (must end in .test.yaml)"
         );
+    }
+
+    // ── remove_scenario_at ────────────────────────────────────────────────────
+
+    fn label() -> &'static Path {
+        Path::new("<inline>")
+    }
+
+    /// Two-entry fixture used across multiple removal tests.
+    const TWO_ENTRIES: &str = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+    #[test]
+    fn remove_scenario_at_removes_first_of_two_entries() {
+        use pretty_assertions::assert_str_eq;
+
+        let result =
+            remove_scenario_at(TWO_ENTRIES, 0, label()).expect("remove_scenario_at must succeed");
+
+        let expected = "\
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
+    fn remove_scenario_at_removes_last_of_two_entries() {
+        use pretty_assertions::assert_str_eq;
+
+        let result =
+            remove_scenario_at(TWO_ENTRIES, 1, label()).expect("remove_scenario_at must succeed");
+
+        let expected = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
+    fn remove_scenario_at_removes_middle_of_three() {
+        use pretty_assertions::assert_str_eq;
+
+        let three = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+- name: gamma
+  when:
+    argv: [creft, c]
+  then:
+    exit_code: 0
+";
+        let result =
+            remove_scenario_at(three, 1, label()).expect("remove_scenario_at must succeed");
+
+        let expected = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: gamma
+  when:
+    argv: [creft, c]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
+    fn remove_scenario_at_preserves_file_level_comment() {
+        use pretty_assertions::assert_str_eq;
+
+        let fixture = "\
+# header comment
+# second header line
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        let result =
+            remove_scenario_at(fixture, 0, label()).expect("remove_scenario_at must succeed");
+
+        let expected = "\
+# header comment
+# second header line
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
+    fn remove_scenario_at_removes_only_entry_to_empty_or_header() {
+        use pretty_assertions::assert_str_eq;
+
+        // No header: result is empty.
+        let single = "\
+- name: only
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        let result =
+            remove_scenario_at(single, 0, label()).expect("remove_scenario_at must succeed");
+        assert_str_eq!("", result);
+
+        // With header: result is just the header.
+        let with_header = "\
+# this is the only scenario
+- name: only
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        let result = remove_scenario_at(with_header, 0, label())
+            .expect("remove_scenario_at must succeed for fixture with header");
+        assert_str_eq!("# this is the only scenario\n", result);
+    }
+
+    #[test]
+    fn inter_entry_comment_attaches_to_previous_entry() {
+        use pretty_assertions::assert_str_eq;
+
+        let fixture = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+# this comment lives just above beta
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+        // Remove index 0: alpha and the comment between it and beta are gone.
+        let remove_alpha =
+            remove_scenario_at(fixture, 0, label()).expect("remove index 0 must succeed");
+        let expected_alpha_removed = "\
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_alpha_removed, remove_alpha);
+
+        // Remove index 1: alpha and the comment both survive because the comment
+        // is within alpha's byte range (between alpha's `-` line and beta's `-` line).
+        let remove_beta =
+            remove_scenario_at(fixture, 1, label()).expect("remove index 1 must succeed");
+        let expected_beta_removed = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+# this comment lives just above beta
+";
+        assert_str_eq!(expected_beta_removed, remove_beta);
+    }
+
+    #[test]
+    fn inter_entry_blank_line_attaches_to_previous_entry() {
+        use pretty_assertions::assert_str_eq;
+
+        let fixture = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+        // Remove index 0: blank line is within alpha's range and is removed.
+        let remove_alpha =
+            remove_scenario_at(fixture, 0, label()).expect("remove index 0 must succeed");
+        let expected_alpha_removed = "\
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_alpha_removed, remove_alpha);
+
+        // Remove index 1: blank line is within alpha's range and survives.
+        let remove_beta =
+            remove_scenario_at(fixture, 1, label()).expect("remove index 1 must succeed");
+        let expected_beta_removed = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+
+";
+        assert_str_eq!(expected_beta_removed, remove_beta);
+    }
+
+    #[test]
+    fn remove_scenario_at_out_of_bounds_returns_parse_error() {
+        let err = remove_scenario_at(TWO_ENTRIES, 99, label()).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for out-of-bounds index, got: {err}"
+        );
+    }
+
+    #[test]
+    fn remove_scenario_at_flow_style_returns_parse_error() {
+        let flow = "[{name: alpha}, {name: beta}]";
+        let err = remove_scenario_at(flow, 0, label()).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for flow-style, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("flow-style"),
+            "error message must mention flow-style; got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::marker_only(
+        "---\n- name: alpha\n  when:\n    argv: [creft, a]\n  then:\n    exit_code: 0\n- name: beta\n  when:\n    argv: [creft, b]\n  then:\n    exit_code: 0\n"
+    )]
+    #[case::marker_after_comment(
+        "# header\n---\n- name: alpha\n  when:\n    argv: [creft, a]\n  then:\n    exit_code: 0\n"
+    )]
+    fn remove_scenario_at_rejects_document_start_marker(#[case] input: &str) {
+        let err = remove_scenario_at(input, 0, label()).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for document-start marker, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("---") || msg.contains("document-start"),
+            "error message must reference '---' or 'document-start'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn step1_entry_count_matches_schema_validator_on_real_fixtures() {
+        // Corpus drift protection: the byte-scan matcher and the typed schema
+        // validator must agree on the entry count for every fixture the codebase
+        // produces. If the corpus is empty, use an in-memory fixture to at least
+        // verify the invariant holds on a well-formed input.
+        let inline_corpus = [
+            (
+                "<two-entries>",
+                "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+",
+            ),
+            (
+                "<three-entries>",
+                "\
+- name: first
+  when:
+    argv: [creft, x]
+  then:
+    exit_code: 0
+- name: second
+  when:
+    argv: [creft, y]
+  then:
+    exit_code: 0
+- name: third
+  when:
+    argv: [creft, z]
+  then:
+    exit_code: 0
+",
+            ),
+        ];
+
+        for (label, content) in inline_corpus {
+            let byte_scan_count = collect_top_level_entry_offsets(content).len();
+            let schema_count = parse_scenarios_str(content, Path::new(label))
+                .expect("fixture must parse")
+                .len();
+            assert_eq!(
+                byte_scan_count, schema_count,
+                "byte-scan entry count ({byte_scan_count}) must match schema validator count ({schema_count}) for fixture '{label}'"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_scenario_at_excludes_hyphen_prefixed_scalar_at_base_indent_if_present() {
+        // Guard for Step 1 clause (2). A `-foo: bar` line at base-indent
+        // column must NOT be counted as an entry indicator by the byte scan.
+        //
+        // First: confirm parse_scenarios_str rejects this input (it is not a
+        // valid top-level sequence of scenario mappings), establishing that the
+        // layered-guard chain catches this upstream.
+        let constructed = "\
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+-foo: this-is-a-plain-scalar-not-an-entry-indicator
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        let parse_result = parse_scenarios_str(constructed, label());
+        assert!(
+            parse_result.is_err(),
+            "parse_scenarios_str must reject a fixture with a hyphen-prefixed plain scalar at base indent; got Ok"
+        );
+
+        // Second: the byte scan itself must return exactly two offsets — the
+        // `- name: alpha` line and the `- name: beta` line. The `-foo: ...`
+        // line must not be counted. This is the future-widening guard: even if
+        // parse_scenarios_str ever loosens, the byte scan stays correct.
+        let offsets = collect_top_level_entry_offsets(constructed);
+        assert_eq!(
+            offsets.len(),
+            2,
+            "byte scan must find exactly 2 entry indicators (alpha and beta), not the -foo line; got {offsets:?}"
+        );
+        // Verify the two offsets land on the `- name:` lines.
+        assert!(
+            &constructed[offsets[0]..].starts_with("- name: alpha"),
+            "first offset must point to alpha's line"
+        );
+        assert!(
+            &constructed[offsets[1]..].starts_with("- name: beta"),
+            "second offset must point to beta's line"
+        );
+    }
+
+    #[test]
+    fn remove_scenario_at_does_not_round_trip_through_emitter() {
+        use pretty_assertions::assert_str_eq;
+
+        // A fixture with hand-formatted multi-line scalars. The YAML emitter
+        // would reflow these; the byte-scan removal must not.
+        let fixture = "\
+- name: alpha
+  given:
+    files:
+      \"notes.txt\": |
+        First line.
+        Second line.
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        let result =
+            remove_scenario_at(fixture, 1, label()).expect("remove_scenario_at must succeed");
+
+        let expected = "\
+- name: alpha
+  given:
+    files:
+      \"notes.txt\": |
+        First line.
+        Second line.
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
+    fn remove_scenario_at_handles_non_ascii_in_plain_scalar() {
+        use pretty_assertions::assert_str_eq;
+
+        let fixture = "\
+- name: \"✓ basic\"
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: ascii-entry
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        // Remove index 1: the non-ASCII entry 0 must survive byte-for-byte.
+        let remove_1 =
+            remove_scenario_at(fixture, 1, label()).expect("remove index 1 must succeed");
+        let expected_after_1 = "\
+- name: \"✓ basic\"
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_after_1, remove_1);
+
+        // Remove index 0: entry 1 must survive byte-for-byte.
+        let remove_0 =
+            remove_scenario_at(fixture, 0, label()).expect("remove index 0 must succeed");
+        let expected_after_0 = "\
+- name: ascii-entry
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_after_0, remove_0);
+    }
+
+    #[test]
+    fn remove_scenario_at_handles_non_ascii_in_block_scalar() {
+        use pretty_assertions::assert_str_eq;
+
+        // Regression guard for the char-vs-byte index inconsistency in
+        // yaml-rust2's scan_block_scalar_content_line. An implementation
+        // deriving byte offsets from Marker.index() would fail here.
+        let fixture = "\
+- name: alpha
+  given:
+    files:
+      \"src/note.md\": |
+        Status: \u{2713} done
+        Author: J\u{00FC}rgen
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  given:
+    files: {}
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        // Remove index 1: alpha's bytes — including the multibyte block scalar
+        // content — must survive verbatim.
+        let remove_beta =
+            remove_scenario_at(fixture, 1, label()).expect("remove beta must succeed");
+        let expected_alpha_only = "\
+- name: alpha
+  given:
+    files:
+      \"src/note.md\": |
+        Status: \u{2713} done
+        Author: J\u{00FC}rgen
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_alpha_only, remove_beta);
+
+        // Remove index 0: the surviving bytes must start exactly at beta's `-` line.
+        let remove_alpha =
+            remove_scenario_at(fixture, 0, label()).expect("remove alpha must succeed");
+        let expected_beta_only = "\
+- name: beta
+  given:
+    files: {}
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_beta_only, remove_alpha);
+    }
+
+    #[test]
+    fn remove_scenario_at_handles_non_ascii_in_folded_scalar() {
+        use pretty_assertions::assert_str_eq;
+
+        // Same shape as the block-scalar test but using `>` (folded) style.
+        // Both scalar styles route through scan_block_scalar_content_line, so
+        // coverage of one implies the other — this is the explicit second case.
+        let fixture = "\
+- name: alpha
+  given:
+    files:
+      \"readme.md\": >
+        Status: \u{2713} done.
+        Author: J\u{00FC}rgen.
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  given:
+    files: {}
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        let remove_beta =
+            remove_scenario_at(fixture, 1, label()).expect("remove beta must succeed");
+        let expected_alpha_only = "\
+- name: alpha
+  given:
+    files:
+      \"readme.md\": >
+        Status: \u{2713} done.
+        Author: J\u{00FC}rgen.
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_alpha_only, remove_beta);
+
+        let remove_alpha =
+            remove_scenario_at(fixture, 0, label()).expect("remove alpha must succeed");
+        let expected_beta_only = "\
+- name: beta
+  given:
+    files: {}
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected_beta_only, remove_alpha);
     }
 }

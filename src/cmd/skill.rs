@@ -783,6 +783,59 @@ pub(crate) fn cmd_add_test_with_reader(
     Ok(())
 }
 
+/// Remove a single scenario from a skill's `*.test.yaml` fixture.
+///
+/// Errors hard if the skill does not exist, the fixture file does not exist,
+/// or the named scenario is not present. The remaining scenarios and any
+/// comments outside the removed entry's byte range are preserved verbatim —
+/// the entry is excised by direct byte slice without re-emitting the file.
+pub fn cmd_remove_test(
+    ctx: &AppContext,
+    skill: &str,
+    scenario_name: &str,
+) -> Result<(), CreftError> {
+    // 1. Verify the skill exists in the local scope. Fixtures live next to
+    //    skills, so a missing skill is the same kind of error here.
+    let skill_path = store::name_to_path_in(ctx, skill, model::Scope::Local)?;
+    if !skill_path.exists() {
+        return Err(CreftError::CommandNotFound(skill.to_owned()));
+    }
+
+    // 2. Compute the fixture path and require its existence.
+    let fixture_path = store::skill_test_fixture_path(ctx, skill, model::Scope::Local)?;
+    if !fixture_path.exists() {
+        return Err(CreftError::Setup(format!(
+            "no test fixture for skill '{skill}': {} does not exist",
+            fixture_path.display()
+        )));
+    }
+
+    // 3. Read and parse for index lookup.
+    let existing_content = std::fs::read_to_string(&fixture_path)?;
+    let scenarios = fixture::parse_scenarios_str(&existing_content, &fixture_path)
+        .map_err(|e| CreftError::Setup(format!("existing fixture is malformed: {e}")))?;
+
+    let index = fixture::find_scenario_by_name(&scenarios, scenario_name).ok_or_else(|| {
+        CreftError::Setup(format!(
+            "no test scenario named '{scenario_name}' in {skill} (fixture: {})",
+            fixture_path.display()
+        ))
+    })?;
+
+    // 4. Surgical byte-range removal.
+    let new_content = fixture::remove_scenario_at(&existing_content, index, &fixture_path)
+        .map_err(|e| CreftError::Setup(format!("remove failed: {e}")))?;
+
+    // 5. Write the result.
+    std::fs::write(&fixture_path, &new_content)?;
+
+    eprintln!(
+        "removed test: {skill} / {scenario_name} (in {})",
+        fixture_path.display()
+    );
+    Ok(())
+}
+
 /// Return an error if the body YAML contains a top-level `name:` key.
 ///
 /// The frontmatter supplies `name` as part of the list-entry framing; a
@@ -1508,6 +1561,222 @@ mod tests {
         assert!(
             !output.contains("artifacts deploy"),
             "fully-qualified skill name must not appear in namespace listing;\ngot:\n{output}",
+        );
+    }
+}
+
+// ── cmd_remove_test tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cmd_remove_test_tests {
+    use pretty_assertions::{assert_eq, assert_str_eq};
+
+    use crate::error::CreftError;
+    use crate::model::AppContext;
+
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    fn write_skill(project: &tempfile::TempDir, skill_name: &str) {
+        let parts: Vec<&str> = skill_name.split_whitespace().collect();
+        let mut path = project.path().join(".creft/commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        std::fs::create_dir_all(&path).expect("create skill namespace dirs");
+        let leaf = parts.last().unwrap();
+        std::fs::write(
+            path.join(format!("{leaf}.md")),
+            "---\nname: test\ndescription: test\n---\n```bash\necho hi\n```\n",
+        )
+        .expect("write skill md");
+    }
+
+    fn write_fixture(project: &tempfile::TempDir, skill_name: &str, yaml: &str) {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create fixture parent dirs");
+        }
+        std::fs::write(&path, yaml).expect("write fixture");
+    }
+
+    fn read_fixture(project: &tempfile::TempDir, skill_name: &str) -> String {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::read_to_string(&path).expect("read fixture")
+    }
+
+    const TWO_SCENARIO_FIXTURE: &str = "\
+- name: first scenario
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: second scenario
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+    #[test]
+    fn cmd_remove_test_removes_named_scenario() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", TWO_SCENARIO_FIXTURE);
+
+        super::cmd_remove_test(&ctx, "setup", "first scenario")
+            .expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert!(
+            !content.contains("first scenario"),
+            "removed scenario must not appear in fixture; got:\n{content}"
+        );
+        assert!(
+            content.contains("second scenario"),
+            "remaining scenario must survive; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_preserves_comments_byte_for_byte() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        let fixture_with_comments = "\
+# header comment — survives every removal
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        write_fixture(&project, "setup", fixture_with_comments);
+
+        super::cmd_remove_test(&ctx, "setup", "alpha").expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert_str_eq!(
+            "# header comment — survives every removal\n- name: beta\n  when:\n    argv: [creft, b]\n  then:\n    exit_code: 0\n",
+            content
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_skill_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+
+        let result = super::cmd_remove_test(&ctx, "nonexistent", "some scenario");
+        assert!(
+            matches!(result, Err(CreftError::CommandNotFound(_))),
+            "missing skill must return CommandNotFound; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_fixture_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        // No fixture written — setup.test.yaml does not exist.
+
+        let result = super::cmd_remove_test(&ctx, "setup", "some scenario");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("does not exist")),
+            "missing fixture must return Setup with 'does not exist'; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_scenario_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", TWO_SCENARIO_FIXTURE);
+
+        let result = super::cmd_remove_test(&ctx, "setup", "no such scenario");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("no such scenario")),
+            "missing scenario must return Setup containing the scenario name; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_malformed_fixture_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", "this: is: not: valid: yaml: [\n");
+
+        let result = super::cmd_remove_test(&ctx, "setup", "any");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("malformed")),
+            "malformed fixture must return Setup containing 'malformed'; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_namespaced_skill_resolves_correct_path() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "gh issue-body");
+
+        // Write the fixture at the namespaced path.
+        let ns_fixture_path = project
+            .path()
+            .join(".creft/commands/gh/issue-body.test.yaml");
+        std::fs::create_dir_all(ns_fixture_path.parent().unwrap()).expect("create namespace dir");
+        std::fs::write(&ns_fixture_path, TWO_SCENARIO_FIXTURE).expect("write fixture");
+
+        super::cmd_remove_test(&ctx, "gh issue-body", "first scenario")
+            .expect("cmd_remove_test must succeed for namespaced skill");
+
+        let content = std::fs::read_to_string(&ns_fixture_path).expect("read fixture");
+        assert!(
+            !content.contains("first scenario"),
+            "removed scenario must be gone from namespaced fixture; got:\n{content}"
+        );
+        assert!(
+            content.contains("second scenario"),
+            "remaining scenario must survive in namespaced fixture; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_last_scenario_leaves_empty_or_header() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        let single_entry = "\
+- name: only scenario
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        write_fixture(&project, "setup", single_entry);
+
+        super::cmd_remove_test(&ctx, "setup", "only scenario")
+            .expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert_eq!(
+            "", content,
+            "fixture after removing last scenario must be empty; got:\n{content}"
         );
     }
 }
