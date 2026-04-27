@@ -325,12 +325,12 @@ pub(crate) fn json_subset(expected: &serde_json::Value, actual: &serde_json::Val
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Truncate a string for display in failure messages, appending `"..."` when cut.
+/// Truncate a string to at most `max` characters for display in failure messages,
+/// appending `"..."` when cut. Character-boundary-safe; never panics on multi-byte input.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_owned()
-    } else {
-        format!("{}...", &s[..max])
+    match s.char_indices().nth(max) {
+        None => s.to_owned(),
+        Some((byte_pos, _)) => format!("{}...", &s[..byte_pos]),
     }
 }
 
@@ -565,62 +565,44 @@ mod tests {
 
     // ── json_subset ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn json_subset_scalar_equal() {
-        assert!(json_subset(&serde_json::json!(42), &serde_json::json!(42)));
-    }
-
-    #[test]
-    fn json_subset_scalar_not_equal() {
-        assert!(!json_subset(&serde_json::json!(42), &serde_json::json!(43)));
-    }
-
-    #[test]
-    fn json_subset_object_key_present() {
-        assert!(json_subset(
-            &serde_json::json!({"a": 1}),
-            &serde_json::json!({"a": 1, "b": 2}),
-        ));
-    }
-
-    #[test]
-    fn json_subset_object_key_missing() {
-        assert!(!json_subset(
-            &serde_json::json!({"c": 3}),
-            &serde_json::json!({"a": 1, "b": 2}),
-        ));
-    }
-
-    #[test]
-    fn json_subset_nested_object() {
-        assert!(json_subset(
-            &serde_json::json!({"hooks": {"PreToolUse": [{"matcher": ""}]}}),
-            &serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "", "extra": true}]}}),
-        ));
-    }
-
-    #[test]
-    fn json_subset_array_order_insensitive() {
-        // Expected element {"x":1} must subset-match at least one actual element.
-        assert!(json_subset(
-            &serde_json::json!([{"x": 1}]),
-            &serde_json::json!([{"x": 2}, {"x": 1, "y": 3}]),
-        ));
-    }
-
-    #[test]
-    fn json_subset_array_element_missing() {
-        assert!(!json_subset(
-            &serde_json::json!([{"x": 99}]),
-            &serde_json::json!([{"x": 1}, {"x": 2}]),
-        ));
-    }
-
-    #[test]
-    fn json_subset_type_mismatch_object_vs_array() {
-        assert!(!json_subset(
-            &serde_json::json!({"a": 1}),
-            &serde_json::json!([1, 2, 3]),
-        ));
+    #[rstest]
+    #[case::scalar_equal(serde_json::json!(42), serde_json::json!(42), true)]
+    #[case::scalar_not_equal(serde_json::json!(42), serde_json::json!(43), false)]
+    #[case::object_key_present(
+        serde_json::json!({"a": 1}),
+        serde_json::json!({"a": 1, "b": 2}),
+        true
+    )]
+    #[case::object_key_missing(
+        serde_json::json!({"c": 3}),
+        serde_json::json!({"a": 1, "b": 2}),
+        false
+    )]
+    #[case::nested_object(
+        serde_json::json!({"hooks": {"PreToolUse": [{"matcher": ""}]}}),
+        serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "", "extra": true}]}}),
+        true
+    )]
+    #[case::array_order_insensitive(
+        serde_json::json!([{"x": 1}]),
+        serde_json::json!([{"x": 2}, {"x": 1, "y": 3}]),
+        true
+    )]
+    #[case::array_element_missing(
+        serde_json::json!([{"x": 99}]),
+        serde_json::json!([{"x": 1}, {"x": 2}]),
+        false
+    )]
+    #[case::type_mismatch_object_vs_array(
+        serde_json::json!({"a": 1}),
+        serde_json::json!([1, 2, 3]),
+        false
+    )]
+    fn json_subset_contract(
+        #[case] expected: serde_json::Value,
+        #[case] actual: serde_json::Value,
+        #[case] should_match: bool,
+    ) {
+        assert_eq!(json_subset(&expected, &actual), should_match);
     }
 }

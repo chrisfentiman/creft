@@ -378,7 +378,9 @@ fn execute_scenario(
     let stdin_handle = {
         let stdin_payload = match &scenario.when.stdin {
             Some(StdinPayload::Text(s)) => Some(s.as_bytes().to_vec()),
-            Some(StdinPayload::Json(v)) => Some(serde_json::to_vec(v).unwrap_or_default()),
+            Some(StdinPayload::Json(v)) => {
+                Some(serde_json::to_vec(v).expect("serde_json::Value always serialises"))
+            }
             None => None,
         };
 
@@ -387,7 +389,12 @@ fn execute_scenario(
             if let Some(data) = stdin_payload {
                 use std::io::Write as _;
                 match child_stdin.write_all(&data) {
-                    Ok(()) | Err(_) => {} // BrokenPipe means child exited early — fine
+                    Ok(()) => {}
+                    // Child exited before consuming stdin — not an error.
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    // Any other write failure: best-effort; the assertion phase
+                    // will surface the real problem via stdout/exit-code checks.
+                    Err(_) => {}
                 }
             }
             // stdin_handle drops here, closing the pipe end.
@@ -677,10 +684,12 @@ mod tests {
         let ScenarioStatus::Fail(failures) = outcome.status else {
             panic!("expected Fail, got {:?}", outcome.status);
         };
-        let ec_failure = failures.iter().find(|f| f.kind == "exit_code");
-        assert!(ec_failure.is_some(), "expected exit_code failure");
-        assert_eq!(ec_failure.unwrap().expected, "0");
-        assert_eq!(ec_failure.unwrap().actual, "2");
+        let ec_failure = failures
+            .iter()
+            .find(|f| f.kind == "exit_code")
+            .expect("expected an exit_code failure");
+        assert_eq!(ec_failure.expected, "0");
+        assert_eq!(ec_failure.actual, "2");
     }
 
     // ── Stdout containment ────────────────────────────────────────────────────
@@ -782,11 +791,8 @@ mod tests {
             "creft_print \"coverage check\"\n",
             "```\n",
         );
-        std::fs::write(
-            commands_dir.join(format!("{}.md", skill_name)),
-            skill_src,
-        )
-        .expect("write skill");
+        std::fs::write(commands_dir.join(format!("{}.md", skill_name)), skill_src)
+            .expect("write skill");
         (home, skill_name.to_owned())
     }
 
@@ -807,10 +813,7 @@ mod tests {
         )];
         scenario.then.coverage = Some(CoverageExpectation {
             blocks: vec![0],
-            primitives: BTreeMap::from([(
-                0,
-                BTreeMap::from([("print".to_owned(), 1u32)]),
-            )]),
+            primitives: BTreeMap::from([(0, BTreeMap::from([("print".to_owned(), 1u32)]))]),
         });
 
         let outcome = run(&scenario, &app, &test_opts());
