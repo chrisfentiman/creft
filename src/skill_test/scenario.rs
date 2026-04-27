@@ -496,6 +496,26 @@ fn execute_scenario(
     }
 
     // Determine the child's exit code.
+    //
+    // When the child exits normally, `code()` is `Some`. When it is killed by a
+    // signal (OOM kill, SIGTERM from CI, a stray signal to the group despite
+    // `setpgid`) `code()` is `None` and `signal()` is `Some`. The spec treats
+    // any signal-killed exit as `Timeout` because the useful distinction for
+    // authors is "process ran too long or was killed" vs "process exited with
+    // a known code". Watchdog-driven kills are already handled above; this
+    // branch handles external kills that arrive without the watchdog firing.
+    #[cfg(unix)]
+    let exit_code = {
+        use std::os::unix::process::ExitStatusExt as _;
+        match exit_status {
+            Ok(s) if s.signal().is_some() => {
+                return (ScenarioStatus::Timeout, stdout, stderr, trace);
+            }
+            Ok(s) => s.code().unwrap_or(1),
+            Err(_) => 1,
+        }
+    };
+    #[cfg(not(unix))]
     let exit_code = match exit_status {
         Ok(s) => s.code().unwrap_or(1),
         Err(_) => 1,
@@ -745,6 +765,110 @@ mod tests {
     }
 
     // ── Coverage trace ────────────────────────────────────────────────────────
+
+    /// Write a minimal one-block bash skill into a temp CREFT_HOME and return
+    /// the temp dir (caller must keep it alive) and the skill name.
+    ///
+    /// The skill calls `creft_print` once, so the trace record for block 0 will
+    /// have `primitives.print == 1`.
+    fn make_trace_skill_home() -> (tempfile::TempDir, String) {
+        let home = tempfile::TempDir::new().expect("tmp creft_home");
+        let commands_dir = home.path().join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("commands dir");
+        let skill_name = "trace-coverage-skill";
+        let skill_src = concat!(
+            "---\nname: trace-coverage-skill\ndescription: trace coverage test skill\n---\n\n",
+            "```bash\n",
+            "creft_print \"coverage check\"\n",
+            "```\n",
+        );
+        std::fs::write(
+            commands_dir.join(format!("{}.md", skill_name)),
+            skill_src,
+        )
+        .expect("write skill");
+        (home, skill_name.to_owned())
+    }
+
+    /// The full Stage-4 seam: `scenario::run` spawns `creft <skill>`, the child
+    /// writes NDJSON to fd 5, `parse_trace` deserialises each line into
+    /// `TraceRecord`, and `check_coverage` matches the expectation. A passing
+    /// `then.coverage` expectation on both `blocks` and `primitives` must yield
+    /// `ScenarioStatus::Pass` and a non-empty trace.
+    #[test]
+    fn coverage_trace_end_to_end_passes_for_matching_expectation() {
+        let (creft_home, skill_name) = make_trace_skill_home();
+        let (_tmp, app) = bare_app();
+
+        let mut scenario = minimal_scenario(vec!["creft".to_owned(), skill_name]);
+        scenario.when.env = vec![(
+            "CREFT_HOME".to_owned(),
+            creft_home.path().to_string_lossy().into_owned(),
+        )];
+        scenario.then.coverage = Some(CoverageExpectation {
+            blocks: vec![0],
+            primitives: BTreeMap::from([(
+                0,
+                BTreeMap::from([("print".to_owned(), 1u32)]),
+            )]),
+        });
+
+        let outcome = run(&scenario, &app, &test_opts());
+
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "expected Pass; stdout={:?} stderr={:?} trace={:?}",
+            outcome.stdout,
+            outcome.stderr,
+            outcome.trace,
+        );
+        assert!(
+            !outcome.trace.is_empty(),
+            "trace must contain at least one record when creft runs a skill"
+        );
+    }
+
+    /// When `then.coverage.blocks` names a block index that never executed (the
+    /// skill has only one block, block 0, but the expectation also requires block
+    /// 1), `check_coverage` must report a `coverage`-kind `AssertionFailure`
+    /// whose message identifies the missing block. This exercises the
+    /// parse_trace → check_coverage path through real NDJSON over the trace pipe.
+    #[test]
+    fn coverage_trace_end_to_end_fails_for_missing_block() {
+        let (creft_home, skill_name) = make_trace_skill_home();
+        let (_tmp, app) = bare_app();
+
+        let mut scenario = minimal_scenario(vec!["creft".to_owned(), skill_name]);
+        scenario.when.env = vec![(
+            "CREFT_HOME".to_owned(),
+            creft_home.path().to_string_lossy().into_owned(),
+        )];
+        // Expect both block 0 and block 1, but the skill only has block 0.
+        scenario.then.coverage = Some(CoverageExpectation {
+            blocks: vec![0, 1],
+            primitives: BTreeMap::new(),
+        });
+
+        let outcome = run(&scenario, &app, &test_opts());
+
+        let ScenarioStatus::Fail(failures) = outcome.status else {
+            panic!(
+                "expected Fail for missing block 1; got {:?} stdout={:?} stderr={:?}",
+                outcome.status, outcome.stdout, outcome.stderr,
+            );
+        };
+        let cov_failure = failures
+            .iter()
+            .find(|f| f.kind == "coverage")
+            .expect("expected a coverage-kind failure");
+        assert!(
+            cov_failure.expected.contains('1') || cov_failure.locator.as_deref() == Some("block 1"),
+            "failure must identify block 1; got expected={:?} locator={:?}",
+            cov_failure.expected,
+            cov_failure.locator,
+        );
+    }
 
     #[test]
     fn non_creft_binary_with_coverage_expectation_returns_no_trace_failure() {
