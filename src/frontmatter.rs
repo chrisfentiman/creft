@@ -1,18 +1,18 @@
 use crate::error::CreftError;
 use crate::model::CommandDef;
 
-/// Parse a markdown file with YAML frontmatter into metadata and body.
+/// Split a frontmatter document into its YAML header and body slices.
 ///
-/// Format:
-/// ```text
-/// ---
-/// name: hello
-/// description: greet someone
-/// ---
+/// Returns `(yaml, body)` where `yaml` is the text between the opening and
+/// closing `---` delimiters and `body` is everything after the closing
+/// delimiter (including any leading newline before the body's first byte).
 ///
-/// body content here
-/// ```
-pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
+/// Errors with `CreftError::MissingFrontmatterDelimiter` when either delimiter
+/// is missing. Accepts both `\n` and `\r\n` line endings.
+///
+/// This is the substring-extraction step of [`parse`]. Callers that need a
+/// custom YAML schema (i.e., not [`CommandDef`]) use this directly.
+pub fn split(content: &str) -> Result<(&str, &str), CreftError> {
     let after_open = if let Some(rest) = content.strip_prefix("---\r\n") {
         rest
     } else if let Some(rest) = content.strip_prefix("---\n") {
@@ -33,7 +33,24 @@ pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
         } else {
             5
         };
-    let body = after_open[body_start..].to_string();
+    let body = &after_open[body_start..];
+
+    Ok((yaml, body))
+}
+
+/// Parse a markdown file with YAML frontmatter into metadata and body.
+///
+/// Format:
+/// ```text
+/// ---
+/// name: hello
+/// description: greet someone
+/// ---
+///
+/// body content here
+/// ```
+pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
+    let (yaml, body) = split(content)?;
 
     let def: CommandDef =
         crate::yaml::from_str(yaml).map_err(|e| CreftError::Frontmatter(e.to_string()))?;
@@ -42,7 +59,7 @@ pub fn parse(content: &str) -> Result<(CommandDef, String), CreftError> {
         return Err(CreftError::InvalidName("name cannot be empty".into()));
     }
 
-    Ok((def, body))
+    Ok((def, body.to_string()))
 }
 
 /// Serialize a CommandDef back to frontmatter + body markdown.
@@ -154,5 +171,41 @@ mod tests {
         let (def2, body2) = parse(&serialized).unwrap();
         assert_eq!(def2.name, "hello");
         assert_eq!(body, body2);
+    }
+
+    // ── split ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn split_returns_yaml_and_body_for_unix_endings() {
+        let input = "---\nname: hello\n---\nbody text here\n";
+        let (yaml, body) = split(input).unwrap();
+        assert_eq!(yaml, "name: hello");
+        assert_eq!(body, "body text here\n");
+    }
+
+    #[test]
+    fn split_returns_yaml_and_body_for_windows_endings() {
+        let input = "---\r\nname: hello\r\n---\r\nbody text here\r\n";
+        let (yaml, body) = split(input).unwrap();
+        assert_eq!(yaml, "name: hello\r");
+        assert_eq!(body, "body text here\r\n");
+    }
+
+    #[test]
+    fn split_returns_error_for_missing_open() {
+        let input = "name: hello\n---\nbody\n";
+        assert!(
+            matches!(split(input), Err(CreftError::MissingFrontmatterDelimiter)),
+            "expected MissingFrontmatterDelimiter for missing opening ---"
+        );
+    }
+
+    #[test]
+    fn split_returns_error_for_missing_close() {
+        let input = "---\nname: hello\n";
+        assert!(
+            matches!(split(input), Err(CreftError::MissingFrontmatterDelimiter)),
+            "expected MissingFrontmatterDelimiter for missing closing ---"
+        );
     }
 }

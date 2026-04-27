@@ -70,6 +70,33 @@ pub fn name_to_path_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<Pat
     Ok(path)
 }
 
+/// Compute the fixture file path for a skill in a given scope.
+///
+/// `<scope-root>/commands/<path>/<basename>.test.yaml` — the same path
+/// structure as the skill's `.md` file with a `.test.yaml` extension instead.
+///
+/// Returns `Err` for invalid or reserved skill names, matching the validation
+/// that all other skill-write operations perform. Does NOT check that the path
+/// exists or that the skill exists; callers validate skill existence
+/// separately, before writing the fixture.
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub fn skill_test_fixture_path(
+    ctx: &AppContext,
+    name: &str,
+    scope: Scope,
+) -> Result<PathBuf, CreftError> {
+    validate_name(name)?;
+    let md_path = name_to_path_in(ctx, name, scope)?;
+    // Replace the ".md" extension with ".test.yaml".
+    let stem = md_path
+        .file_stem()
+        .expect("name_to_path_in always produces a path with a filename");
+    let parent = md_path
+        .parent()
+        .expect("name_to_path_in always produces a path with a parent");
+    Ok(parent.join(format!("{}.test.yaml", stem.to_string_lossy())))
+}
+
 /// Validate that a path token is safe to join into a filesystem path.
 ///
 /// Rejects tokens containing path traversal components:
@@ -1944,6 +1971,51 @@ mod tests {
         assert!(
             !exists,
             "namespace_exists should return false when no skills exist under 'tavily'"
+        );
+    }
+
+    // ── skill_test_fixture_path ───────────────────────────────────────────────
+
+    #[test]
+    fn skill_test_fixture_path_for_top_level_skill() {
+        let ctx = AppContext::for_test_with_creft_home(
+            PathBuf::from("/tmp/creft-test"),
+            PathBuf::from("/tmp"),
+        );
+        let path = skill_test_fixture_path(&ctx, "setup", Scope::Global).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/creft-test/commands/setup.test.yaml")
+        );
+    }
+
+    #[test]
+    fn skill_test_fixture_path_for_namespaced_skill() {
+        let ctx = AppContext::for_test_with_creft_home(
+            PathBuf::from("/tmp/creft-test"),
+            PathBuf::from("/tmp"),
+        );
+        let path = skill_test_fixture_path(&ctx, "hooks guard bash", Scope::Global).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/creft-test/commands/hooks/guard/bash.test.yaml")
+        );
+    }
+
+    #[test]
+    fn skill_test_fixture_path_rejects_invalid_name() {
+        let ctx = AppContext::for_test_with_creft_home(
+            PathBuf::from("/tmp/creft-test"),
+            PathBuf::from("/tmp"),
+        );
+        // An empty name is rejected by name_to_path_in's underlying validation.
+        let err = skill_test_fixture_path(&ctx, "", Scope::Global).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CreftError::InvalidName(_) | CreftError::ReservedName(_)
+            ),
+            "expected InvalidName or ReservedName for empty input, got: {err}"
         );
     }
 }

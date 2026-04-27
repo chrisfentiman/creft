@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use yaml_rust2::{Yaml, YamlLoader};
+use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -195,36 +195,208 @@ pub(crate) fn load_file(path: &Path) -> Result<Vec<Scenario>, FixtureError> {
         path: path.to_owned(),
         source: e,
     })?;
+    parse_scenarios_str(&content, path)
+}
 
-    let docs = YamlLoader::load_from_str(&content).map_err(|e| FixtureError::Parse {
-        path: path.to_owned(),
+/// Parse zero-or-more scenarios from a YAML string into the typed view.
+///
+/// `path_label` is used only in error messages — it is not opened. Pass the
+/// real fixture path when validating an existing file's content; pass a
+/// synthetic label like `Path::new("<stdin>")` when validating user input.
+///
+/// Returns `Ok(Vec::new())` for empty input or a YAML null document, matching
+/// the behavior of [`load_file`]. Returns `Err` for syntax errors, schema
+/// violations, or a non-list top-level value.
+pub(crate) fn parse_scenarios_str(
+    content: &str,
+    path_label: &Path,
+) -> Result<Vec<Scenario>, FixtureError> {
+    let list = yaml_top_level_list(content, path_label)?;
+    let mut scenarios = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let scenario = parse_scenario(path_label, index, item)?;
+        scenarios.push(scenario);
+    }
+    Ok(scenarios)
+}
+
+/// Parse zero-or-more scenarios from a YAML string into the raw `Yaml::Hash`
+/// mapping nodes. Used for byte-fidelity rendering when appending or replacing
+/// scenarios in an existing fixture file.
+///
+/// Returns `Ok(Vec::new())` for empty input or a YAML null document. Returns
+/// `Err` for syntax errors or a non-list top-level value. Schema validation is
+/// NOT performed here — callers that need schema validation pair this with
+/// [`parse_scenarios_str`].
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub(crate) fn parse_scenarios_yaml(
+    content: &str,
+    path_label: &Path,
+) -> Result<Vec<Yaml>, FixtureError> {
+    Ok(yaml_top_level_list(content, path_label)?.to_vec())
+}
+
+/// Find the index of a scenario whose `name` field equals `name`.
+///
+/// Returns `None` when no scenario matches. Used by the add-test path to
+/// detect collisions before writing.
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub(crate) fn find_scenario_by_name(scenarios: &[Scenario], name: &str) -> Option<usize> {
+    scenarios.iter().position(|s| s.name == name)
+}
+
+/// Append a scenario's serialized YAML to an existing fixture file's content.
+///
+/// The new scenario is rendered as a single list entry (`- name: ...\n  ...`)
+/// using the YAML emitter's block style. Existing bytes are preserved verbatim —
+/// comments, blank lines, and hand-formatted YAML are not touched. A trailing
+/// newline is added to the existing content if absent.
+///
+/// `existing_content` is `""` when the fixture file does not yet exist.
+/// `new_scenario_yaml` is the full YAML for one mapping produced by
+/// [`render_scenario_yaml`], without the leading `- ` list marker (this
+/// function adds the marker and indentation).
+///
+/// Returns the bytes to write to the fixture file.
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub(crate) fn append_scenario(existing_content: &str, new_scenario_yaml: &str) -> String {
+    let mut out = String::new();
+
+    if existing_content.is_empty() {
+        // New fixture: emit a list with one entry.
+        format_list_entry(&mut out, new_scenario_yaml);
+    } else {
+        out.push_str(existing_content);
+        // Ensure the existing content ends with a newline before appending.
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        format_list_entry(&mut out, new_scenario_yaml);
+    }
+
+    out
+}
+
+/// Replace the scenario at `index` in `existing_content` with `new_scenario`.
+///
+/// This round-trips the file through `yaml-rust2`'s emitter, which does NOT
+/// preserve comments. The `--force` path is the only caller; users are warned
+/// in the success message that comments may be lost.
+///
+/// `index` is the zero-based position in the YAML list — typically obtained
+/// from [`find_scenario_by_name`]. `new_scenario` is the raw `Yaml::Hash` for
+/// the replacement entry (callers obtain it by parsing the candidate via
+/// [`parse_scenarios_yaml`] and taking the first element). Out-of-bounds
+/// indices return a `Parse` error (defensive — the CLI never supplies an
+/// out-of-bounds index, but the function is robust to misuse).
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub(crate) fn replace_scenario(
+    existing_content: &str,
+    index: usize,
+    new_scenario: &Yaml,
+    path_label: &Path,
+) -> Result<String, FixtureError> {
+    let mut nodes = yaml_top_level_list(existing_content, path_label)?.to_vec();
+
+    if index >= nodes.len() {
+        return Err(FixtureError::Parse {
+            path: path_label.to_owned(),
+            message: format!(
+                "replace_scenario: index {index} is out of bounds (file has {} scenarios)",
+                nodes.len()
+            ),
+        });
+    }
+
+    nodes[index] = new_scenario.clone();
+
+    let list_doc = Yaml::Array(nodes);
+    let mut out = String::new();
+    let mut emitter = YamlEmitter::new(&mut out);
+    emitter.dump(&list_doc).map_err(|e| FixtureError::Parse {
+        path: path_label.to_owned(),
+        message: format!("YAML emission failed: {e}"),
+    })?;
+
+    // YamlEmitter writes "---\n" as a document marker; strip it so the file
+    // starts with the list directly.
+    let content = out.strip_prefix("---\n").unwrap_or(&out).to_string();
+
+    Ok(content)
+}
+
+/// Render a single scenario mapping node as a YAML string in block style.
+///
+/// The result is suitable for passing to [`append_scenario`]. It does NOT
+/// include the leading `- ` list marker — `append_scenario` adds the framing.
+/// The document marker (`---\n`) emitted by `YamlEmitter` is stripped.
+#[allow(dead_code)] // called by cmd_add_test in cmd/skill.rs
+pub(crate) fn render_scenario_yaml(node: &Yaml) -> String {
+    let mut out = String::new();
+    let mut emitter = YamlEmitter::new(&mut out);
+    // Emit the node directly; on error produce an empty string (defensive — a
+    // well-formed Yaml::Hash always emits cleanly).
+    let _ = emitter.dump(node);
+    // Strip the leading "---\n" document marker.
+    out.strip_prefix("---\n").unwrap_or(&out).to_string()
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Parse `content` and return a reference to its top-level YAML array.
+///
+/// Returns an owned `Vec<Yaml>` because the parsed document is not `'static`
+/// but callers need to work with the elements beyond the lifetime of the
+/// temporary document vec.
+fn yaml_top_level_list(content: &str, path_label: &Path) -> Result<Vec<Yaml>, FixtureError> {
+    let docs = YamlLoader::load_from_str(content).map_err(|e| FixtureError::Parse {
+        path: path_label.to_owned(),
         message: e.to_string(),
     })?;
 
-    // An empty file or a file with no documents is valid — it contains no scenarios.
     let doc = match docs.into_iter().next() {
         Some(d) => d,
         None => return Ok(Vec::new()),
     };
 
-    let list = match &doc {
-        Yaml::Array(arr) => arr,
-        Yaml::Null => return Ok(Vec::new()),
-        _ => {
-            return Err(FixtureError::Parse {
-                path: path.to_owned(),
-                message: "top-level value must be a YAML list of scenarios".to_owned(),
-            });
-        }
-    };
-
-    let mut scenarios = Vec::with_capacity(list.len());
-    for (index, item) in list.iter().enumerate() {
-        let scenario = parse_scenario(path, index, item)?;
-        scenarios.push(scenario);
+    match doc {
+        Yaml::Array(arr) => Ok(arr),
+        Yaml::Null => Ok(Vec::new()),
+        _ => Err(FixtureError::Parse {
+            path: path_label.to_owned(),
+            message: "top-level value must be a YAML list of scenarios".to_owned(),
+        }),
     }
+}
 
-    Ok(scenarios)
+/// Format a YAML mapping string as a list entry, writing into `out`.
+///
+/// The first line gets `- ` prefix; subsequent non-empty lines get `  `
+/// (two-space) indentation to match the block-list convention used throughout
+/// the project's fixture files.
+#[allow(dead_code)] // called by append_scenario
+fn format_list_entry(out: &mut String, scenario_yaml: &str) {
+    let mut first = true;
+    for line in scenario_yaml.lines() {
+        if first {
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+            first = false;
+        } else if line.is_empty() {
+            // Preserve blank lines without spurious leading spaces.
+            out.push('\n');
+        } else {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // If the input ended without a trailing newline, ensure the entry ends
+    // with one so subsequent appends don't run together.
+    if !scenario_yaml.ends_with('\n') && !first {
+        out.push('\n');
+    }
 }
 
 /// Walk a skill-tree root and return every `*.test.yaml` path in lexicographic order.
@@ -2080,6 +2252,239 @@ mod tests {
         assert!(
             matches!(err, FixtureError::Parse { .. }),
             "expected Parse error for files as list, got: {err}"
+        );
+    }
+
+    // ── parse_scenarios_str ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_scenarios_str_loads_zero_scenarios_from_empty_string() {
+        let result = parse_scenarios_str("", Path::new("<inline>")).expect("parse");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_scenarios_str_loads_one_scenario_from_single_entry_list() {
+        let yaml = "- name: hello\n  when:\n    argv: [creft, foo]\n";
+        let scenarios =
+            parse_scenarios_str(yaml, Path::new("<inline>")).expect("parse single entry");
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].name, "hello");
+        assert_eq!(scenarios[0].when.argv, vec!["creft", "foo"]);
+    }
+
+    #[test]
+    fn parse_scenarios_str_rejects_non_list_top_level() {
+        let yaml = "name: hello\nwhen:\n  argv: [creft, foo]\n";
+        let err = parse_scenarios_str(yaml, Path::new("<inline>")).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for non-list top level, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_scenarios_str_rejects_missing_when_argv() {
+        let yaml = "- name: no-argv\n  when:\n    stdin: hello\n";
+        let err = parse_scenarios_str(yaml, Path::new("<inline>")).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::MissingField { field, .. } if field == "when.argv"),
+            "expected MissingField(when.argv), got: {err}"
+        );
+    }
+
+    // ── parse_scenarios_yaml ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_scenarios_yaml_returns_raw_mapping_nodes() {
+        let yaml = "- name: hello\n  when:\n    argv: [creft, foo]\n";
+        let nodes = parse_scenarios_yaml(yaml, Path::new("<inline>")).expect("parse yaml");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].as_hash().is_some(), "expected a Yaml::Hash node");
+    }
+
+    #[test]
+    fn parse_scenarios_yaml_skips_schema_validation() {
+        // Missing when.argv would fail parse_scenarios_str but parse_scenarios_yaml
+        // returns the raw nodes without schema validation.
+        let yaml = "- name: no-argv\n  when:\n    stdin: hello\n";
+        let nodes = parse_scenarios_yaml(yaml, Path::new("<inline>"))
+            .expect("raw parse must succeed even without when.argv");
+        assert_eq!(nodes.len(), 1);
+    }
+
+    #[test]
+    fn parse_scenarios_yaml_rejects_non_list_top_level() {
+        let yaml = "name: hello\nwhen:\n  argv: [creft, foo]\n";
+        let err = parse_scenarios_yaml(yaml, Path::new("<inline>")).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for non-list top level, got: {err}"
+        );
+    }
+
+    // ── find_scenario_by_name ─────────────────────────────────────────────────
+
+    fn make_scenario(name: &str) -> Scenario {
+        Scenario {
+            name: name.to_owned(),
+            source_file: PathBuf::from("<test>"),
+            source_index: 0,
+            notes: None,
+            given: Given::default(),
+            before: None,
+            when: When {
+                argv: vec!["creft".to_owned(), "foo".to_owned()],
+                stdin: None,
+                env: Vec::new(),
+                timeout_seconds: None,
+            },
+            then: Then::default(),
+            after: None,
+        }
+    }
+
+    #[test]
+    fn find_scenario_by_name_returns_some_for_match() {
+        let scenarios = vec![
+            make_scenario("alpha"),
+            make_scenario("beta"),
+            make_scenario("gamma"),
+        ];
+        assert_eq!(find_scenario_by_name(&scenarios, "beta"), Some(1));
+    }
+
+    #[test]
+    fn find_scenario_by_name_returns_none_for_no_match() {
+        let scenarios = vec![make_scenario("alpha"), make_scenario("gamma")];
+        assert_eq!(find_scenario_by_name(&scenarios, "beta"), None);
+    }
+
+    // ── append_scenario ───────────────────────────────────────────────────────
+
+    #[test]
+    fn append_scenario_to_empty_string_creates_single_entry_list() {
+        let new_yaml = "name: hello\nwhen:\n  argv:\n  - creft\n  - foo\n";
+        let result = append_scenario("", new_yaml);
+        assert!(
+            result.starts_with("- name: hello"),
+            "result should start with list entry: {result:?}"
+        );
+        // Must parse as a valid single-scenario fixture.
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].name, "hello");
+    }
+
+    #[test]
+    fn append_scenario_to_existing_file_preserves_existing_bytes() {
+        let existing = "- name: first\n  when:\n    argv: [creft, foo]\n";
+        let new_yaml = "name: second\nwhen:\n  argv:\n  - creft\n  - bar\n";
+        let result = append_scenario(existing, new_yaml);
+        // Original bytes are unchanged at the start.
+        assert!(
+            result.starts_with(existing),
+            "existing content must be preserved verbatim"
+        );
+        // Both scenarios parse cleanly.
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 2);
+        assert_eq!(scenarios[0].name, "first");
+        assert_eq!(scenarios[1].name, "second");
+    }
+
+    #[test]
+    fn append_scenario_handles_missing_trailing_newline() {
+        // Existing content with no trailing newline.
+        let existing = "- name: first\n  when:\n    argv: [creft, foo]";
+        let new_yaml = "name: second\nwhen:\n  argv:\n  - creft\n  - bar\n";
+        let result = append_scenario(existing, new_yaml);
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 2);
+    }
+
+    #[test]
+    fn append_scenario_round_trips_through_parse_scenarios_str() {
+        let existing =
+            "- name: original\n  when:\n    argv: [creft, setup]\n  then:\n    exit_code: 0\n";
+        let rendered = {
+            let nodes = parse_scenarios_yaml(
+                "- name: appended\n  when:\n    argv: [creft, list]\n",
+                Path::new("<inline>"),
+            )
+            .expect("parse new");
+            render_scenario_yaml(&nodes[0])
+        };
+        let result = append_scenario(existing, &rendered);
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 2);
+        assert_eq!(scenarios[0].name, "original");
+        assert_eq!(scenarios[1].name, "appended");
+    }
+
+    #[test]
+    fn append_scenario_preserves_trailing_comments() {
+        let existing = "- name: first\n  when:\n    argv: [creft, foo]\n# trailing comment\n";
+        let new_yaml = "name: second\nwhen:\n  argv:\n  - creft\n  - bar\n";
+        let result = append_scenario(existing, new_yaml);
+        assert!(
+            result.contains("# trailing comment"),
+            "trailing comment must be preserved verbatim"
+        );
+        // The comment is before the new entry but that's fine — we preserve existing bytes.
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 2);
+    }
+
+    #[test]
+    fn append_scenario_preserves_leading_comments() {
+        let existing = "# leading comment\n- name: first\n  when:\n    argv: [creft, foo]\n";
+        let new_yaml = "name: second\nwhen:\n  argv:\n  - creft\n  - bar\n";
+        let result = append_scenario(existing, new_yaml);
+        assert!(
+            result.starts_with("# leading comment"),
+            "leading comment must be preserved verbatim"
+        );
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 2);
+    }
+
+    // ── replace_scenario ──────────────────────────────────────────────────────
+
+    #[test]
+    fn replace_scenario_swaps_only_the_named_entry() {
+        let existing = concat!(
+            "- name: alpha\n  when:\n    argv: [creft, a]\n",
+            "- name: beta\n  when:\n    argv: [creft, b]\n",
+            "- name: gamma\n  when:\n    argv: [creft, c]\n",
+        );
+        let replacement_yaml = "- name: beta-replaced\n  when:\n    argv: [creft, b2]\n";
+        let new_node = &parse_scenarios_yaml(replacement_yaml, Path::new("<inline>"))
+            .expect("parse replacement")[0];
+        let result =
+            replace_scenario(existing, 1, new_node, Path::new("<inline>")).expect("replace");
+        let scenarios =
+            parse_scenarios_str(&result, Path::new("<inline>")).expect("round-trip parse");
+        assert_eq!(scenarios.len(), 3);
+        assert_eq!(scenarios[0].name, "alpha");
+        assert_eq!(scenarios[1].name, "beta-replaced");
+        assert_eq!(scenarios[2].name, "gamma");
+    }
+
+    #[test]
+    fn replace_scenario_out_of_bounds_returns_parse_error() {
+        let existing = "- name: only\n  when:\n    argv: [creft, foo]\n";
+        let node = Yaml::Hash(Default::default());
+        let err = replace_scenario(existing, 5, &node, Path::new("<inline>")).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for out-of-bounds index, got: {err}"
         );
     }
 }
