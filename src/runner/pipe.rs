@@ -1001,21 +1001,19 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let terminal_writer = std::sync::Arc::new(TerminalWriter::new());
 
-    // Join handles for side-channel reader threads (one per non-sponge block).
-    // Joined after all children exit to flush any buffered side-channel output.
-    #[cfg(unix)]
-    let mut reader_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
-
-    // ExitSignal slots parallel to reader_handles (same index = same block).
-    // Written by reader threads when they receive ChannelMessage::Exit;
-    // read by run_pipe_chain after reader threads are joined (no concurrent access).
+    // ExitSignal slots, one per non-sponge block in spawn order (same index as
+    // primitive_counters). Written by reader threads when they observe
+    // ChannelMessage::Exit; each reaper joins its reader before sending its
+    // ReaperResult, so by the time wait_pipe_children_unix returns every slot is
+    // final and the main thread can read without synchronisation.
     #[cfg(unix)]
     let mut exit_signals: Vec<ExitSignal> = Vec::new();
 
-    // Primitive counters keyed by block index (same order as reader_handles).
-    // The reader thread increments these; run_pipe_chain reads them after joining
-    // all reader threads to assemble TraceRecord.primitives for each block.
-    // Stored as (block_index, counter) so records can be emitted in block order.
+    // Primitive counters keyed by block index (same order as exit_signals).
+    // The reader thread increments these; run_pipe_chain reads them after
+    // wait_pipe_children_unix returns to assemble TraceRecord.primitives for each
+    // block.  Stored as (block_index, counter) so records can be emitted in block
+    // order.
     #[cfg(unix)]
     let mut primitive_counters: Vec<(usize, super::channel::PrimitiveCounter)> = Vec::new();
 
@@ -1188,6 +1186,16 @@ pub(super) fn run_pipe_chain(
 
         // Close parent's copies of the child's pipe ends immediately after
         // spawn. If kept open, the reader thread will never see EOF.
+        //
+        // Bridge values from the reader-setup block below into the reaper spawn
+        // block further below.  Both are always Some(...) after the reader-setup
+        // block executes; the None initialiser is intentional scaffolding.
+        #[cfg(unix)]
+        #[allow(unused_assignments)]
+        let mut reader_handle_opt: Option<std::thread::JoinHandle<()>> = None;
+        #[cfg(unix)]
+        #[allow(unused_assignments)]
+        let mut exit_signal_for_reaper: Option<ExitSignal> = None;
         #[cfg(unix)]
         {
             use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
@@ -1208,7 +1216,7 @@ pub(super) fn run_pipe_chain(
                 store_dir: ctx.store_dir.clone(),
                 counter: std::sync::Arc::clone(&counter),
             });
-            let handle = super::channel::spawn_reader(
+            let reader_handle = super::channel::spawn_reader(
                 ctrl_reader,
                 std::sync::Arc::clone(&terminal_writer),
                 None,
@@ -1216,9 +1224,14 @@ pub(super) fn run_pipe_chain(
                 Some(std::sync::Arc::clone(&signal)),
                 primitive_ctx,
             );
-            reader_handles.push(handle);
-            exit_signals.push(signal);
+            // A clone of signal is kept in exit_signals for the post-loop trace
+            // and early-exit verdict logic.  The original handle and a second
+            // signal clone are moved into this block's reaper closure so the
+            // reaper can join the reader and read the slot after child.wait().
+            exit_signals.push(std::sync::Arc::clone(&signal));
             primitive_counters.push((i, counter));
+            reader_handle_opt = Some(reader_handle);
+            exit_signal_for_reaper = Some(signal);
         }
         node_deps_dirs.push(node_deps_dir);
 
@@ -1315,6 +1328,15 @@ pub(super) fn run_pipe_chain(
                 let _ = prev_tx.send(());
             }
             next_block_spawned_txs.push(next_spawned_tx);
+            // Move the reader handle and its associated exit signal into the
+            // reaper so the reaper can join the reader after child.wait() and
+            // read the signal slot before deciding the cancel verdict.
+            let reader_handle = reader_handle_opt
+                .take()
+                .expect("reader_handle always set by the reader-setup block above");
+            let exit_signal = exit_signal_for_reaper
+                .take()
+                .expect("exit_signal always set by the reader-setup block above");
             std::thread::Builder::new()
                 .name(format!("creft-reaper-{i}"))
                 .spawn(move || {
@@ -1339,17 +1361,33 @@ pub(super) fn run_pipe_chain(
                     let status = child.wait();
                     let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
                         == Some(crate::runner::EARLY_EXIT);
-                    // Kill the process group immediately on exit 99, before any channel hop.
-                    // The main thread's kill is a redundant safety net.
-                    if exit_99 {
+                    // Join the reader thread so the exit_signal slot is final.
+                    // The child closed its fd 3 write end on exit; close_child_ends()
+                    // closed the parent's copy at spawn time. So the reader has already
+                    // seen EOF and is either done or in its last BufReader iteration.
+                    reader_handle
+                        .join()
+                        .expect("side-channel reader thread panicked");
+                    let creft_exit_observed = exit_signal
+                        .lock()
+                        .expect("exit signal lock poisoned")
+                        .is_some();
+                    // Cancel the downstream sponge when either short-circuit
+                    // signal fired: exit 99 (legacy) or creft_exit (side channel).
+                    let should_cancel = exit_99 || creft_exit_observed;
+                    // Kill the process group on either cancel cause so orphaned
+                    // grandchildren that still hold pipe write ends are cleaned up.
+                    // Already-exited PIDs are silently ignored by kill_group.
+                    if should_cancel {
                         kill_group(pgid);
                     }
-                    // Always send the exit-99 determination to the downstream sponge so
-                    // it can unblock from recv(). Send before the ReaperResult so the
-                    // sponge unblocks before the main thread begins its kill/cancel cascade.
-                    // Ignore send error: sponge already exited or was never spawned.
+                    // Always send the cancel verdict to the downstream sponge so
+                    // it can unblock from recv(). Send before the ReaperResult so
+                    // the sponge unblocks before the main thread begins its
+                    // kill/cancel cascade. Ignore send error: sponge already
+                    // exited or was never spawned.
                     if let Some(cancel) = cancel_tx {
-                        let _ = cancel.send(exit_99);
+                        let _ = cancel.send(should_cancel);
                     }
                     // Ignore send error: main thread dropped rx only if it panicked.
                     let _ = reaper_tx_clone.send(ReaperResult {
@@ -1420,16 +1458,12 @@ pub(super) fn run_pipe_chain(
     #[cfg(not(unix))]
     let (results, early_exit) = wait_pipe_children_fallback(non_unix_children)?;
 
-    // Join all side-channel reader threads now that every child has exited.
-    // The children's fd 3 write ends are closed on exit; close_child_ends()
-    // above closed the parent's copies, so every reader has seen EOF.
-    // Joining here flushes any buffered side-channel output to the terminal.
-    #[cfg(unix)]
-    for handle in reader_handles {
-        handle.join().expect("side-channel reader thread panicked");
-    }
-
-    // Reader threads are joined — all ExitSignal slots and primitive counters are final.
+    // Every reader thread has already been joined by its reaper before the
+    // reaper sent its ReaperResult. wait_pipe_children_unix returns only after
+    // all ReaperResults are received, so every signal slot and primitive counter
+    // is final here — no additional joins are needed.
+    //
+    // ExitSignal slots and primitive counters are final.
     // Emit one TraceRecord per non-sponge block in block order so the coverage trace
     // is written even when a block called creft_exit.
     //
@@ -1647,5 +1681,123 @@ mod tests {
             .read_to_end(&mut buf)
             .expect("read from dup'd fd must succeed");
         assert_eq!(buf, b"hello from pipe");
+    }
+
+    /// Verify the cancel-verdict logic the reaper uses after joining its reader.
+    ///
+    /// The reaper computes `should_cancel = exit_99 || creft_exit_observed` and
+    /// sends it on the cancel channel.  These tests exercise the three relevant
+    /// cases: creft_exit alone, exit-99 alone, and clean exit with no signal.
+    ///
+    /// End-to-end coverage (real process spawning + sponge thread) is provided
+    /// by the stage-3 skill-test fixture; no unit-level harness for the full
+    /// pipe topology exists in this module.
+    #[cfg(unix)]
+    mod cancel_verdict {
+        use super::super::*;
+        use pretty_assertions::assert_eq;
+
+        fn make_exit_signal(code: Option<i32>) -> ExitSignal {
+            std::sync::Arc::new(std::sync::Mutex::new(code))
+        }
+
+        /// creft_exit(0) with a clean process exit produces cancel = true.
+        #[test]
+        fn creft_exit_zero_cancels_downstream_sponge() {
+            let signal = make_exit_signal(Some(0));
+            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
+
+            // Simulate the reaper: join the reader (modelled as a no-op thread),
+            // read the signal slot, compute the verdict, and send it.
+            let signal_clone = std::sync::Arc::clone(&signal);
+            let handle = std::thread::spawn(move || {
+                // "Reader" writes nothing — slot was pre-populated above.
+            });
+            handle.join().expect("reader thread must not panic");
+            let creft_exit_observed = signal_clone
+                .lock()
+                .expect("exit signal lock poisoned")
+                .is_some();
+            let exit_99 = false; // process exited 0
+            let should_cancel = exit_99 || creft_exit_observed;
+            let _ = cancel_tx.send(should_cancel);
+
+            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
+            assert_eq!(
+                verdict, true,
+                "creft_exit(0) must cancel the downstream sponge"
+            );
+        }
+
+        /// exit-99 with no creft_exit signal produces cancel = true.
+        #[test]
+        fn exit_99_cancels_downstream_sponge() {
+            let signal = make_exit_signal(None);
+            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
+
+            let signal_clone = std::sync::Arc::clone(&signal);
+            let handle = std::thread::spawn(move || {
+                // "Reader" writes nothing — fd 3 carried no Exit message.
+            });
+            handle.join().expect("reader thread must not panic");
+            let creft_exit_observed = signal_clone
+                .lock()
+                .expect("exit signal lock poisoned")
+                .is_some();
+            let exit_99 = true; // process exited 99
+            let should_cancel = exit_99 || creft_exit_observed;
+            let _ = cancel_tx.send(should_cancel);
+
+            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
+            assert_eq!(verdict, true, "exit 99 must cancel the downstream sponge");
+        }
+
+        /// Clean exit (status 0, no creft_exit) produces cancel = false.
+        #[test]
+        fn clean_exit_does_not_cancel_downstream_sponge() {
+            let signal = make_exit_signal(None);
+            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
+
+            let signal_clone = std::sync::Arc::clone(&signal);
+            let handle = std::thread::spawn(move || {
+                // "Reader" writes nothing — fd 3 carried no Exit message.
+            });
+            handle.join().expect("reader thread must not panic");
+            let creft_exit_observed = signal_clone
+                .lock()
+                .expect("exit signal lock poisoned")
+                .is_some();
+            let exit_99 = false; // process exited 0
+            let should_cancel = exit_99 || creft_exit_observed;
+            let _ = cancel_tx.send(should_cancel);
+
+            let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
+            assert_eq!(
+                verdict, false,
+                "clean exit must not cancel the downstream sponge"
+            );
+        }
+
+        /// creft_exit written by the reader thread is visible after the reaper
+        /// joins the reader — the join is a definitive synchronisation point.
+        #[test]
+        fn reaper_join_synchronises_reader_write_to_exit_signal() {
+            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let signal_for_reader = std::sync::Arc::clone(&signal);
+
+            // Reader thread: writes Some(0) to the slot before exiting.
+            let reader_handle = std::thread::spawn(move || {
+                *signal_for_reader.lock().expect("exit signal lock poisoned") = Some(0);
+            });
+
+            // Reaper: join the reader, then read the slot.
+            reader_handle.join().expect("reader thread must not panic");
+            let observed = *signal.lock().expect("exit signal lock poisoned");
+            assert_eq!(
+                observed,
+                Some(0),
+                "exit signal written by reader must be visible after join"
+            );
+        }
     }
 }
