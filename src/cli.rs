@@ -696,6 +696,7 @@ fn parse_skills_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
 
     let mut skill = None;
     let mut scenario = None;
+    let mut filter: Option<String> = None;
     let mut keep = false;
     let mut detail = false;
     let mut where_ = false;
@@ -705,6 +706,15 @@ fn parse_skills_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             Long("keep") => keep = true,
             Long("detail") => detail = true,
             Long("where") => where_ = true,
+            Long("filter") => {
+                let value = parser.value()?.string()?;
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--filter pattern cannot be empty".to_owned(),
+                    ));
+                }
+                filter = Some(value);
+            }
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SkillsTest)),
             Long("docs") => return docs_or_search(parser, BuiltinHelp::SkillsTest),
             Value(v) if skill.is_none() => skill = Some(v.string()?),
@@ -718,6 +728,20 @@ fn parse_skills_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
     }
+
+    // --filter and a bare SCENARIO positional both populate the scenario field.
+    // Supplying both is ambiguous; reject it loudly rather than silently
+    // dropping one.
+    if filter.is_some() && scenario.is_some() {
+        return Err(CliError::Usage(
+            "--filter and a SCENARIO positional cannot be combined; use one or the other"
+                .to_owned(),
+        ));
+    }
+
+    // Route --filter into the scenario field. The runner treats the field as
+    // a pattern regardless of which surface populated it.
+    let scenario = filter.or(scenario);
 
     Ok(Parsed::Command(Command::Skills(SkillsCommand::Test {
         skill,
@@ -1163,6 +1187,79 @@ mod tests {
             matches!(result, Err(CliError::Usage(_))),
             "third positional must return Usage error; got: {result:?}",
         );
+    }
+
+    // ── `creft skills test --filter` parser tests ────────────────────────────
+
+    #[test]
+    fn skills_test_filter_without_skill_populates_scenario_field() {
+        // --filter with no SKILL: cross-skill run.
+        let result = parse_args(&["skills", "test", "--filter", "fresh"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill, scenario, ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert!(skill.is_none(), "SKILL must be None when not supplied");
+        assert_eq!(
+            scenario.as_deref(),
+            Some("fresh"),
+            "--filter value flows into scenario field"
+        );
+    }
+
+    #[test]
+    fn skills_test_filter_with_skill_positional() {
+        // SKILL positional + --filter: narrows fixture set then scenario set.
+        let result = parse_args(&["skills", "test", "setup", "--filter", "merge*"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill, scenario, ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert_eq!(skill.as_deref(), Some("setup"));
+        assert_eq!(scenario.as_deref(), Some("merge*"));
+    }
+
+    #[test]
+    fn skills_test_filter_and_scenario_positional_is_usage_error() {
+        // Both --filter and SCENARIO positional: ambiguous, must be rejected.
+        let result = parse_args(&["skills", "test", "setup", "fresh", "--filter", "merge*"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("cannot be combined")),
+            "combining --filter with SCENARIO positional must be a Usage error; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_test_filter_empty_pattern_is_usage_error() {
+        let result = parse_args(&["skills", "test", "--filter", ""]);
+        assert!(
+            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("cannot be empty")),
+            "--filter with empty pattern must be a Usage error; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_test_scenario_positional_still_works() {
+        // Regression guard: the bare SCENARIO positional (no --filter) still works.
+        let result = parse_args(&["skills", "test", "setup", "fresh-install"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill, scenario, ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert_eq!(skill.as_deref(), Some("setup"));
+        assert_eq!(scenario.as_deref(), Some("fresh-install"));
     }
 
     // ── `creft add test` parser tests ────────────────────────────────────────

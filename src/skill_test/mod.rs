@@ -7,6 +7,7 @@
 pub(crate) mod assertion;
 pub(crate) mod coverage;
 pub(crate) mod fixture;
+pub(crate) mod match_pattern;
 pub(crate) mod placeholder;
 pub(crate) mod sandbox;
 pub(crate) mod scenario;

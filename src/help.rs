@@ -606,15 +606,37 @@ Example fixture:
         \"{home}/.claude/rules/x.md\":
           contains: \"rule\"
       coverage:
-        blocks: [0]";
+        blocks: [0]
+
+Filtering by name:
+  SKILL and SCENARIO are patterns. A pattern with no `*` or `?` is a
+  substring — any name containing it matches. A pattern with `*` or `?`
+  is an fnmatch glob anchored at both ends: `*` matches a run of
+  characters, `?` matches one character.
+
+  --filter <pattern> matches scenario names across every discovered
+  fixture. SKILL is optional with --filter; when supplied, it narrows
+  the discovered fixture set first and --filter then narrows scenarios
+  within it. The SCENARIO positional always requires SKILL (positional
+  grammar) and is mutually exclusive with --filter. Empty --filter
+  pattern is rejected.
+
+Examples:
+  creft skills test merge*                  # all skills starting with \"merge\"
+  creft skills test setup fresh-install     # one scenario in the setup skill
+  creft skills test --filter \"merge*\"       # every scenario starting with \"merge\" (any skill)
+  creft skills test setup --filter \"fresh\"  # setup scenarios containing \"fresh\"";
 
 const SKILLS_TEST_SHORT_ABOUT: &str = "\
 Tests are YAML fixtures co-located with the skill they test.
 
 Examples:
-  creft skills test            Run all fixture tests
-  creft skills test setup      Run tests for the 'setup' skill
-  creft skills test --where    List discovered fixtures
+  creft skills test                       Run all fixture tests
+  creft skills test setup                 Run tests for the 'setup' skill
+  creft skills test \"merge*\"              Run tests for skills starting with \"merge\"
+  creft skills test --filter \"merge*\"     Run every scenario starting with \"merge\", across all skills
+  creft skills test setup --filter fresh  Run setup scenarios whose name contains \"fresh\"
+  creft skills test --where               List discovered fixtures
 
 Run 'creft skills test --docs' for the full reference.";
 
@@ -1177,12 +1199,23 @@ mod renderer {
             &[
                 (
                     "SKILL",
-                    "Limit to scenarios defined for this skill (file basename \
-                     matching `*.test.yaml`). Omit to run every skill in the local root.",
+                    "Pattern matching skill basenames (the part of the filename before \
+                     `.test.yaml`). Plain text matches any skill whose name contains it. \
+                     Patterns containing `*` or `?` are anchored fnmatch globs.",
                 ),
                 (
                     "SCENARIO",
-                    "Limit to one scenario by its `name`. Requires SKILL.",
+                    "Pattern matching scenario names within the supplied SKILL. Plain text \
+                     matches any scenario whose name contains it. Patterns containing `*` or \
+                     `?` are anchored fnmatch globs. Cannot be combined with `--filter`. \
+                     Requires SKILL to precede it (positional grammar).",
+                ),
+                (
+                    "--filter <PATTERN>",
+                    "Pattern matching scenario names across every discovered fixture. Same \
+                     pattern shape as SCENARIO. SKILL is optional; when supplied, narrows \
+                     the discovered fixture set first. Cannot be combined with the SCENARIO \
+                     positional. Cannot be empty.",
                 ),
                 (
                     "--keep",
@@ -1401,6 +1434,15 @@ mod renderer {
             "creft skills test [SKILL] [SCENARIO] [OPTIONS]",
             SKILLS_TEST_SHORT_ABOUT,
             &[
+                (
+                    "--filter <PATTERN>",
+                    "Run only scenarios matching this pattern, across every \
+                     discovered fixture. Plain text matches any name \
+                     containing it; patterns with `*` or `?` are anchored \
+                     fnmatch globs. SKILL is optional; when supplied, it \
+                     narrows the discovered fixture set first. Cannot be \
+                     combined with the SCENARIO positional. Cannot be empty.",
+                ),
                 (
                     "--keep",
                     "Preserve sandbox directories for failed scenarios",

@@ -14,6 +14,7 @@
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::skill_test::fixture::{self, FixtureError, Scenario};
+use crate::skill_test::match_pattern;
 use crate::skill_test::scenario::{RunOpts, ScenarioOutcome, ScenarioStatus, run};
 
 // ── Output formatting constants ───────────────────────────────────────────────
@@ -74,9 +75,17 @@ fn cmd_skills_test_unix(
 
     let commands_dir = local_root.join("commands");
 
-    // Discover fixture files, applying the skill basename filter at the
+    // Compile the SKILL pattern once before the filesystem walk. When the
+    // caller supplied no skill filter, the walk returns every fixture.
+    let skill_matcher = skill
+        .as_deref()
+        .map(match_pattern::compile)
+        .transpose()
+        .map_err(|e| CreftError::Setup(e.to_string()))?;
+
+    // Discover fixture files, applying the skill basename matcher at the
     // filesystem level (before any file is opened).
-    let fixture_paths = fixture::discover(&commands_dir, skill.as_deref())
+    let fixture_paths = fixture::discover(&commands_dir, skill_matcher.as_ref())
         .map_err(|e| CreftError::Setup(e.to_string()))?;
 
     // Parse every fixture file, collecting parse errors to report before running.
@@ -99,9 +108,12 @@ fn cmd_skills_test_unix(
         )));
     }
 
-    // Apply the scenario-name filter (post-parse, because the name is inside the file).
-    if let Some(ref name_filter) = scenario_filter {
-        all_scenarios.retain(|s| &s.name == name_filter);
+    // Apply the scenario-name pattern filter (post-parse, because the name is
+    // inside the file). Compile once and apply per-name via the matcher.
+    if let Some(ref pattern) = scenario_filter {
+        let scenario_matcher =
+            match_pattern::compile(pattern).map_err(|e| CreftError::Setup(e.to_string()))?;
+        all_scenarios.retain(|s| scenario_matcher.matches(&s.name));
     }
 
     // --where: list discovered fixtures and scenarios, then exit.

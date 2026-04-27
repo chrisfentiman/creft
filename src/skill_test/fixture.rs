@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
+use crate::skill_test::match_pattern::Matcher;
+
 // ── Error ─────────────────────────────────────────────────────────────────────
 
 /// Errors that can occur while loading or walking fixture files.
@@ -406,13 +408,13 @@ fn format_list_entry(out: &mut String, scenario_yaml: &str) {
 /// walk `target/`, `.git/`, `workbench/`, and vendored crates, none of which contain
 /// fixtures by convention.
 ///
-/// When `skill_filter` is `Some(name)`, only paths whose basename is exactly
-/// `<name>.test.yaml` are returned. The filter is applied during the walk, before
-/// any file is opened, so a parse error in an unrelated fixture cannot fail a
-/// focused-skill run.
+/// When `skill_filter` is `Some(matcher)`, only paths whose basename stem (the
+/// filename with `.test.yaml` stripped) matches the pattern are returned. The
+/// filter is applied during the walk, before any file is opened, so a parse
+/// error in an unrelated fixture cannot fail a focused-skill run.
 pub(crate) fn discover(
     root: &Path,
-    skill_filter: Option<&str>,
+    skill_filter: Option<&Matcher>,
 ) -> Result<Vec<PathBuf>, FixtureError> {
     let mut found = Vec::new();
     collect_fixtures(root, skill_filter, &mut found)?;
@@ -425,7 +427,7 @@ pub(crate) fn discover(
 /// Recursively collect `*.test.yaml` files under `dir`, skipping symlinks.
 fn collect_fixtures(
     dir: &Path,
-    skill_filter: Option<&str>,
+    skill_filter: Option<&Matcher>,
     out: &mut Vec<PathBuf>,
 ) -> Result<(), FixtureError> {
     let raw_entries = std::fs::read_dir(dir).map_err(|e| FixtureError::Io {
@@ -467,22 +469,25 @@ fn collect_fixtures(
 }
 
 /// Whether `path` is a `*.test.yaml` file that passes the optional skill filter.
-fn is_fixture_match(path: &Path, skill_filter: Option<&str>) -> bool {
+///
+/// When `skill_filter` is `None`, every `*.test.yaml` file matches. When a
+/// matcher is supplied, the basename stem (the filename with `.test.yaml`
+/// stripped) is tested against it. This allows both exact names (`setup`)
+/// and glob patterns (`merge*`) to work uniformly at the discovery boundary.
+fn is_fixture_match(path: &Path, skill_filter: Option<&Matcher>) -> bool {
     let name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
         None => return false,
     };
 
-    if !name.ends_with(".test.yaml") {
-        return false;
-    }
+    let stem = match name.strip_suffix(".test.yaml") {
+        Some(s) => s,
+        None => return false,
+    };
 
     match skill_filter {
         None => true,
-        Some(filter) => {
-            // The expected basename is "<filter>.test.yaml".
-            name == format!("{filter}.test.yaml")
-        }
+        Some(matcher) => matcher.matches(stem),
     }
 }
 
@@ -1355,6 +1360,7 @@ fn yaml_to_json_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_test::match_pattern;
     use pretty_assertions::assert_eq;
     use rstest::rstest;
     use std::io::Write;
@@ -1744,6 +1750,11 @@ mod tests {
         assert_eq!(names, vec!["bar/baz.test.yaml", "foo.test.yaml"]);
     }
 
+    /// Compile a pattern into a `Matcher`, panicking on any error (test helper).
+    fn mk(pattern: &str) -> Matcher {
+        match_pattern::compile(pattern).expect("test pattern must compile")
+    }
+
     #[rstest]
     #[case::top_level("foo", "foo.test.yaml", true)]
     #[case::nested("baz", "bar/baz.test.yaml", true)]
@@ -1759,7 +1770,8 @@ mod tests {
             ("unrelated.md", ""),
         ]);
 
-        let found = discover(tree.path(), Some(filter)).expect("discover");
+        let matcher = mk(filter);
+        let found = discover(tree.path(), Some(&matcher)).expect("discover");
         if should_find {
             assert_eq!(found.len(), 1);
             assert!(
@@ -1787,8 +1799,9 @@ mod tests {
             ("unrelated.test.yaml", "not: valid: yaml: at all:::::"),
         ]);
 
-        // With filter=Some("foo"), the invalid file is never opened.
-        let found = discover(tree.path(), Some("foo")).expect("discover must not error");
+        // With a pattern matching only "foo", the invalid file is never opened.
+        let matcher = mk("foo");
+        let found = discover(tree.path(), Some(&matcher)).expect("discover must not error");
         assert_eq!(found.len(), 1);
         assert!(found[0].ends_with("foo.test.yaml"));
     }
@@ -1801,7 +1814,8 @@ mod tests {
             ("bar/baz.test.yaml", ""),
         ]);
 
-        let found = discover(tree.path(), Some("foo")).expect("discover");
+        let matcher = mk("foo");
+        let found = discover(tree.path(), Some(&matcher)).expect("discover");
         assert_eq!(found.len(), 2);
         let names: Vec<_> = found
             .iter()
@@ -2485,6 +2499,94 @@ mod tests {
         assert!(
             matches!(err, FixtureError::Parse { .. }),
             "expected Parse error for out-of-bounds index, got: {err}"
+        );
+    }
+
+    // ── is_fixture_match with Matcher ─────────────────────────────────────────
+
+    #[test]
+    fn is_fixture_match_with_no_filter_accepts_any_test_yaml() {
+        assert!(
+            is_fixture_match(Path::new("setup.test.yaml"), None),
+            "no filter: .test.yaml accepted"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.md"), None),
+            "no filter: .md rejected"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.yaml"), None),
+            "no filter: plain .yaml rejected (must end in .test.yaml)"
+        );
+    }
+
+    #[test]
+    fn is_fixture_match_with_exact_pattern_matches_existing_behavior() {
+        // Substring "setup" matches the stem "setup" — a strict superset of
+        // the previous exact-match behavior. Regression guard.
+        let matcher = mk("setup");
+        assert!(
+            is_fixture_match(Path::new("setup.test.yaml"), Some(&matcher)),
+            "exact name matches via substring"
+        );
+        assert!(
+            !is_fixture_match(Path::new("other.test.yaml"), Some(&matcher)),
+            "non-matching name rejected"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.md"), Some(&matcher)),
+            ".md extension rejected even with matching stem"
+        );
+    }
+
+    #[test]
+    fn is_fixture_match_with_glob_matches_prefix() {
+        let matcher = mk("merge*");
+        assert!(
+            is_fixture_match(Path::new("merge-clean.test.yaml"), Some(&matcher)),
+            "merge-clean matches merge*"
+        );
+        assert!(
+            is_fixture_match(Path::new("merge-conflict.test.yaml"), Some(&matcher)),
+            "merge-conflict matches merge*"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.test.yaml"), Some(&matcher)),
+            "setup does not match merge*"
+        );
+        assert!(
+            !is_fixture_match(Path::new("pre-merge.test.yaml"), Some(&matcher)),
+            "pre-merge does not match anchored merge*"
+        );
+    }
+
+    #[test]
+    fn is_fixture_match_with_substring_matches_anywhere() {
+        let matcher = mk("clean");
+        assert!(
+            is_fixture_match(Path::new("merge-clean.test.yaml"), Some(&matcher)),
+            "merge-clean contains 'clean'"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.test.yaml"), Some(&matcher)),
+            "setup does not contain 'clean'"
+        );
+    }
+
+    #[test]
+    fn is_fixture_match_rejects_non_test_yaml_extension() {
+        let matcher = mk("setup");
+        assert!(
+            !is_fixture_match(Path::new("setup.md"), Some(&matcher)),
+            ".md rejected"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.txt"), Some(&matcher)),
+            ".txt rejected"
+        );
+        assert!(
+            !is_fixture_match(Path::new("setup.yaml"), Some(&matcher)),
+            "plain .yaml rejected (must end in .test.yaml)"
         );
     }
 }
