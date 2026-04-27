@@ -429,26 +429,36 @@ Examples:
 
 Run 'creft remove --docs' for the full reference.";
 
-const REMOVE_TEST_LONG_ABOUT: &str = "\
-Deletes a single named scenario from a skill's test fixture
+/// Extended description shown by `creft remove test --docs`.
+pub const REMOVE_TEST_LONG_ABOUT: &str = "\
+Delete a single scenario from a skill's *.test.yaml fixture.
 
-Removes the scenario entry from the fixture file by direct byte slice so
-surrounding comments and formatting are preserved verbatim. Errors hard if
-the skill, the fixture file, or the named scenario does not exist.
+The named scenario is excised by direct byte slice; surrounding scenarios,
+comments, and hand-formatting are preserved verbatim. Comments that appear
+between the removed entry's `-` indicator and the next entry's `-` indicator
+are removed with the entry — they are treated as belonging to it.
 
 Required flags:
-  --skill <name>   The skill whose fixture to modify (e.g. setup, gh issue-body)
-  --name  <name>   The exact scenario name to delete
+  --skill <name>   The target skill (e.g. `setup`, `hooks guard bash`).
+                   The skill must exist in the local commands/ tree.
+  --name <name>    The exact value of the scenario's `name:` field.
+
+Errors:
+  Skill not found              command not found: <skill>
+  Fixture file missing         no test fixture for skill '<skill>': <path>
+  Scenario not found           no test scenario named '<name>' in <skill>
+  Malformed fixture            existing fixture is malformed: <reason>
 
 Examples:
-  creft remove test --skill setup --name \"fresh install succeeds\"
-  creft remove test --skill \"gh issue-body\" --name \"creates issue body\"";
+  creft remove test --skill setup --name 'fresh install succeeds'
+  creft remove test --skill 'hooks guard bash' --name 'rejects rm -rf'";
 
+/// Short description shown by `creft remove test --help`.
 const REMOVE_TEST_SHORT_ABOUT: &str = "\
-Deletes a single named scenario from a skill's test fixture.
+Delete a single scenario from a skill's *.test.yaml fixture.
 
-Example:
-  creft remove test --skill setup --name \"fresh install succeeds\"
+Examples:
+  creft remove test --skill setup --name 'fresh install succeeds'
 
 Run 'creft remove test --docs' for the full reference.";
 
