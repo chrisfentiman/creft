@@ -6,8 +6,8 @@
 //! ([`Then`]).
 //!
 //! Placeholders (`{sandbox}`, `{source}`, `{home}`) are stored unexpanded in
-//! the parsed types. Expansion happens at scenario execution time (Stage 4) so
-//! the same `Scenario` value could be re-run in a different sandbox.
+//! the parsed types. Expansion happens at scenario execution time so the same
+//! `Scenario` value could be re-run in a different sandbox.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,9 +52,9 @@ pub(crate) enum FixtureError {
 /// A single test scenario parsed from a `*.test.yaml` file.
 ///
 /// All path and string fields contain unexpanded `{sandbox}`, `{source}`, and
-/// `{home}` placeholders. Expansion happens at scenario execution time (Stage 4),
-/// not at parse time, so the same `Scenario` could be re-run in a different
-/// sandbox without re-parsing.
+/// `{home}` placeholders. Expansion happens at scenario execution time, not at
+/// parse time, so the same `Scenario` could be re-run in a different sandbox
+/// without re-parsing.
 #[derive(Debug, Clone)]
 pub(crate) struct Scenario {
     /// Human-readable name, required, used in test output.
@@ -130,7 +130,7 @@ pub(crate) struct Then {
     pub files: Vec<(String, FileAssertion)>,
     /// Paths that must not exist in the sandbox after the scenario.
     pub files_absent: Vec<String>,
-    /// Coverage expectations checked against the trace records from Stage 1.
+    /// Coverage expectations checked against the runtime coverage trace.
     pub coverage: Option<CoverageExpectation>,
 }
 
@@ -165,7 +165,7 @@ pub(crate) enum FileAssertion {
     JsonSubset(serde_json::Value),
 }
 
-/// Coverage expectations checked against Stage 1 trace records.
+/// Coverage expectations checked against the runtime coverage trace.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CoverageExpectation {
     /// Block indices that must have executed at least once.
@@ -254,13 +254,19 @@ fn collect_fixtures(
     skill_filter: Option<&str>,
     out: &mut Vec<PathBuf>,
 ) -> Result<(), FixtureError> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| FixtureError::Io {
+    let raw_entries = std::fs::read_dir(dir).map_err(|e| FixtureError::Io {
+        path: dir.to_owned(),
+        source: e,
+    })?;
+
+    let mut entries = Vec::new();
+    for entry_result in raw_entries {
+        let entry = entry_result.map_err(|e| FixtureError::Io {
             path: dir.to_owned(),
             source: e,
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        })?;
+        entries.push(entry);
+    }
 
     // Visit entries in lexicographic order so recursion is deterministic even on
     // filesystems whose read_dir ordering varies (HFS+, ext4, tmpfs).
@@ -269,10 +275,10 @@ fn collect_fixtures(
     for entry in entries {
         let entry_path = entry.path();
         // Skip symlinks to avoid loops and because no creft use case traverses them.
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+        let file_type = entry.file_type().map_err(|e| FixtureError::Io {
+            path: entry_path.clone(),
+            source: e,
+        })?;
         if file_type.is_symlink() {
             continue;
         }
@@ -537,10 +543,23 @@ fn parse_when(
     let stdin = match map.get(&yaml_str("stdin")) {
         Some(Yaml::String(s)) => Some(StdinPayload::Text(s.clone())),
         Some(Yaml::Null) | None => None,
-        Some(other) => {
-            // Map or array → serialise as JSON.
+        Some(Yaml::Hash(_) | Yaml::Array(_)) => {
+            // Object/list → serialise as compact JSON before writing to stdin.
+            let other = map
+                .get(&yaml_str("stdin"))
+                .expect("key confirmed present in the arms above");
             let json_val = yaml_to_json_value(path, scenario, "when.stdin", other)?;
             Some(StdinPayload::Json(json_val))
+        }
+        Some(_) => {
+            // Bare scalars (integer, boolean, float) are not valid stdin values.
+            // Use a string or an object/list.
+            return Err(FixtureError::Parse {
+                path: path.to_owned(),
+                message: format!(
+                    "scenario '{scenario}': 'when.stdin' must be a string, mapping, or list"
+                ),
+            });
         }
     };
 
@@ -831,7 +850,8 @@ fn parse_file_assertion(
                 path,
                 scenario,
                 &format!("then.files['{file_path}'].json_equals"),
-                map.get(&yaml_str("json_equals")).unwrap(),
+                map.get(&yaml_str("json_equals"))
+                    .expect("key presence confirmed by assertion_keys filter above"),
             )?;
             Ok(FileAssertion::JsonEquals(v))
         }
@@ -840,7 +860,8 @@ fn parse_file_assertion(
                 path,
                 scenario,
                 &format!("then.files['{file_path}'].json_subset"),
-                map.get(&yaml_str("json_subset")).unwrap(),
+                map.get(&yaml_str("json_subset"))
+                    .expect("key presence confirmed by assertion_keys filter above"),
             )?;
             Ok(FileAssertion::JsonSubset(v))
         }
@@ -1330,7 +1351,7 @@ mod tests {
 "#;
         let err = load(yaml).unwrap_err();
         assert!(
-            matches!(err, FixtureError::MissingField { ref field, .. } if *field == "name"),
+            matches!(err, FixtureError::MissingField { field, .. } if field == "name"),
             "expected MissingField(name), got: {err}"
         );
     }
@@ -1342,7 +1363,7 @@ mod tests {
 "#;
         let err = load(yaml).unwrap_err();
         assert!(
-            matches!(err, FixtureError::MissingField { ref field, .. } if *field == "when"),
+            matches!(err, FixtureError::MissingField { field, .. } if field == "when"),
             "expected MissingField(when), got: {err}"
         );
     }
@@ -1356,7 +1377,7 @@ mod tests {
 "#;
         let err = load(yaml).unwrap_err();
         assert!(
-            matches!(err, FixtureError::MissingField { ref field, .. } if *field == "when.argv"),
+            matches!(err, FixtureError::MissingField { field, .. } if field == "when.argv"),
             "expected MissingField(when.argv), got: {err}"
         );
     }
@@ -1701,26 +1722,24 @@ mod tests {
     // ── Section type errors ───────────────────────────────────────────────────
 
     #[rstest]
-    #[case::given_not_mapping("given: string_value")]
-    #[case::before_not_mapping("before: string_value")]
-    #[case::when_not_mapping("when: string_value")]
-    #[case::then_not_mapping("then: string_value")]
-    #[case::after_not_mapping("after: string_value")]
-    fn section_as_non_mapping_returns_parse_error(#[case] bad_field: &str) {
-        let yaml = format!("- name: test\n  when:\n    argv: [creft, foo]\n  {bad_field}\n");
-        // "when: string_value" overrides the valid when block, so we use a different name
-        let yaml = if bad_field == "when: string_value" {
-            "- name: test\n  when: not_a_mapping\n".to_owned()
-        } else {
-            yaml
-        };
-        let err = load(&yaml).unwrap_err();
+    #[case::given_not_mapping(
+        "- name: test\n  given: string_value\n  when:\n    argv: [creft, foo]\n"
+    )]
+    #[case::before_not_mapping(
+        "- name: test\n  before: string_value\n  when:\n    argv: [creft, foo]\n"
+    )]
+    #[case::when_not_mapping("- name: test\n  when: not_a_mapping\n")]
+    #[case::then_not_mapping(
+        "- name: test\n  when:\n    argv: [creft, foo]\n  then: string_value\n"
+    )]
+    #[case::after_not_mapping(
+        "- name: test\n  when:\n    argv: [creft, foo]\n  after: string_value\n"
+    )]
+    fn section_as_non_mapping_returns_parse_error(#[case] yaml: &str) {
+        let err = load(yaml).unwrap_err();
         assert!(
-            matches!(
-                err,
-                FixtureError::Parse { .. } | FixtureError::MissingField { .. }
-            ),
-            "expected Parse or MissingField error, got: {err}"
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for non-mapping section, got: {err}"
         );
     }
 
@@ -1853,14 +1872,14 @@ mod tests {
 
     #[test]
     fn then_files_no_assertion_key_returns_parse_error() {
+        // The assertion-key check runs before the unknown-key check, so a mapping
+        // with no recognised assertion key produces a Parse error naming the valid
+        // keys, not an UnknownKey error.
         let yaml = "- name: t\n  when:\n    argv: [creft, foo]\n  then:\n    files:\n      path.txt:\n        unexpected_key: value\n";
         let err = load(yaml).unwrap_err();
         assert!(
-            matches!(
-                err,
-                FixtureError::Parse { .. } | FixtureError::UnknownKey { .. }
-            ),
-            "expected error for missing assertion key, got: {err}"
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for missing assertion key, got: {err}"
         );
     }
 
@@ -1998,16 +2017,31 @@ mod tests {
 
     #[test]
     fn given_files_json_value_with_float_parses() {
-        let yaml = "- name: t\n  given:\n    files:\n      config.json:\n        score: 3.14\n  when:\n    argv: [creft, foo]\n";
+        let yaml = "- name: t\n  given:\n    files:\n      config.json:\n        score: 2.5\n  when:\n    argv: [creft, foo]\n";
         let scenarios = load(yaml).expect("parse");
         let (_, content) = &scenarios[0].given.files[0];
         match content {
             FileContent::Json(v) => {
                 let score = v["score"].as_f64().expect("score is f64");
-                assert!((score - 3.14).abs() < 1e-6);
+                assert!((score - 2.5).abs() < 1e-6);
             }
             FileContent::Text(_) => panic!("expected Json content"),
         }
+    }
+
+    // ── stdin: bare scalar values rejected ───────────────────────────────────
+
+    #[rstest]
+    #[case::integer("42")]
+    #[case::boolean("true")]
+    #[case::float("1.5")]
+    fn stdin_bare_scalar_returns_parse_error(#[case] val: &str) {
+        let yaml = format!("- name: t\n  when:\n    argv: [creft, foo]\n    stdin: {val}\n");
+        let err = load(&yaml).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::Parse { .. }),
+            "expected Parse error for stdin bare scalar {val}, got: {err}"
+        );
     }
 
     // ── stdin: list value ─────────────────────────────────────────────────────
