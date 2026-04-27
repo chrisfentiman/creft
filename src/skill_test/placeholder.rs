@@ -50,6 +50,7 @@ mod tests {
     use std::path::PathBuf;
 
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     use super::*;
 
@@ -77,25 +78,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_placeholder_expanded() {
+    #[rstest]
+    #[case::source_placeholder("{source}/foo.txt", "/tmp/sb/source/foo.txt")]
+    #[case::home_placeholder("{home}/.creft", "/tmp/sb/home/.creft")]
+    #[case::sandbox_placeholder("{sandbox}/scratch", "/tmp/sb/scratch")]
+    fn placeholder_expanded(#[case] input: &str, #[case] expected: &str) {
         let tp = TestPaths::new();
         let p = tp.as_paths();
-        assert_eq!(expand("{source}/foo.txt", &p), "/tmp/sb/source/foo.txt");
-    }
-
-    #[test]
-    fn home_placeholder_expanded() {
-        let tp = TestPaths::new();
-        let p = tp.as_paths();
-        assert_eq!(expand("{home}/.creft", &p), "/tmp/sb/home/.creft");
-    }
-
-    #[test]
-    fn sandbox_placeholder_expanded() {
-        let tp = TestPaths::new();
-        let p = tp.as_paths();
-        assert_eq!(expand("{sandbox}/scratch", &p), "/tmp/sb/scratch");
+        assert_eq!(expand(input, &p), expected);
     }
 
     #[test]
