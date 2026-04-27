@@ -117,7 +117,11 @@ impl SideChannel {
 /// `pre_exec` hook in `spawn_block` clears this flag (implicitly) after
 /// `dup2` — `dup2` does not inherit `FD_CLOEXEC`, so the duplicated fds
 /// remain open across `exec` as intended.
-fn os_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+///
+/// Re-exported at the runner module surface as `crate::runner::os_pipe` so
+/// that `cmd::run` and the Stage 4 scenario runner can construct trace pipes
+/// without a parallel implementation.
+pub(crate) fn os_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
     // SAFETY: `fds` is a valid two-element array. pipe(2) writes exactly
     // two file descriptor integers into it and returns -1 on error, 0 on
@@ -147,6 +151,17 @@ fn os_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     }
 
     Ok((r, w))
+}
+
+/// Increment a primitive counter entry by one.
+///
+/// Acquires the `PrimitiveCounter` lock, bumps `counts[tag]`, and drops the
+/// lock immediately. Called from the reader thread for each matched
+/// `ChannelMessage` variant (except `Exit`).
+fn increment_counter(counter: &PrimitiveCounter, tag: &str) {
+    if let Ok(mut counts) = counter.lock() {
+        *counts.entry(tag.to_owned()).or_insert(0) += 1;
+    }
 }
 
 /// Shared slot for the `creft_exit` signal from the side channel.
@@ -527,12 +542,20 @@ impl TerminalWriter {
     }
 }
 
+/// Count of primitive messages seen on the side channel for a single block.
+///
+/// Keys are `ChannelMessage` JSON tag strings (e.g. `"print"`, `"store_put"`).
+/// Wrapped in `Arc<Mutex<>>` so the reader thread owns a clone and the caller
+/// reads the totals after `join()` without holding the lock concurrently.
+pub(crate) type PrimitiveCounter = Arc<std::sync::Mutex<std::collections::BTreeMap<String, u32>>>;
+
 /// Context for handling runtime primitive messages on the side channel.
 ///
 /// Carried into the reader thread when a skill is executing. The thread uses
 /// `skill_name` to derive the caller's namespace for name qualification,
-/// `runtime_indexes` for in-memory search indexes, and `store_dir` for
-/// persistent key-value store I/O.
+/// `runtime_indexes` for in-memory search indexes, `store_dir` for persistent
+/// key-value store I/O, and `counter` to tally primitive invocations for the
+/// coverage trace.
 pub(crate) struct PrimitiveContext {
     /// Fully-qualified name of the skill being executed.
     pub skill_name: String,
@@ -546,6 +569,14 @@ pub(crate) struct PrimitiveContext {
     /// construction time. Store operations open and close the redb database
     /// per-call; this directory is where the `.redb` and `.store.idx` files live.
     pub store_dir: PathBuf,
+    /// Per-block primitive-tag counter for coverage trace emission.
+    ///
+    /// The reader thread increments `counter[tag]` once per matched
+    /// `ChannelMessage` variant (except `Exit`, which is tracked separately via
+    /// the `exit` field on `TraceRecord`). The trace-emitting call sites in
+    /// `execute_block` and `run_pipe_chain` hold an `Arc::clone` of this counter
+    /// and read its contents after the reader thread joins.
+    pub counter: PrimitiveCounter,
 }
 
 /// Spawn a reader thread that drains the control pipe and renders messages.
@@ -607,17 +638,28 @@ pub(crate) fn spawn_reader(
 
                 match msg {
                     ChannelMessage::Print { message } => {
+                        if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "print");
+                        }
                         writer.print(&message);
                     }
-                    ChannelMessage::Status { message, progress } => match progress {
-                        None => writer.status(&message),
-                        Some(pct) => writer.progress(&message, pct),
-                    },
+                    ChannelMessage::Status { message, progress } => {
+                        if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "status");
+                        }
+                        match progress {
+                            None => writer.status(&message),
+                            Some(pct) => writer.progress(&message, pct),
+                        }
+                    }
                     ChannelMessage::Prompt {
                         id,
                         question,
                         choices,
                     } => {
+                        if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "prompt");
+                        }
                         if let Some(tx) = &prompt_tx {
                             // Forward to the prompt handler thread.
                             let _ = tx.send(ChannelMessage::Prompt {
@@ -650,6 +692,7 @@ pub(crate) fn spawn_reader(
                         global,
                     } => {
                         if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "index");
                             let response = handle_index_message(
                                 &id,
                                 &name,
@@ -672,6 +715,7 @@ pub(crate) fn spawn_reader(
                     }
                     ChannelMessage::Search { id, query, name } => {
                         if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "search");
                             let response = handle_search_message(
                                 &id,
                                 &query,
@@ -699,6 +743,7 @@ pub(crate) fn spawn_reader(
                         global,
                     } => {
                         if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "store_put");
                             let response = handle_store_put(
                                 &id,
                                 &name,
@@ -722,6 +767,7 @@ pub(crate) fn spawn_reader(
                     }
                     ChannelMessage::StoreGet { id, name, key } => {
                         if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "store_get");
                             let response = handle_store_get(
                                 &id,
                                 &name,
@@ -743,6 +789,7 @@ pub(crate) fn spawn_reader(
                     }
                     ChannelMessage::StoreSearch { id, name, query } => {
                         if let Some(ref ctx) = ctx {
+                            increment_counter(&ctx.counter, "store_search");
                             let response = handle_store_search(
                                 &id,
                                 &name,
@@ -2341,6 +2388,7 @@ printf '%s' "$_resp"
             plugin: None,
             runtime_indexes: Arc::clone(&indexes),
             store_dir: std::path::PathBuf::from("/tmp/creft-test-store"),
+            counter: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         });
 
         let writer = Arc::new(super::TerminalWriter::new());
@@ -2414,6 +2462,7 @@ printf '%s' "$_resp"
             plugin: None,
             runtime_indexes: Arc::clone(&indexes),
             store_dir: std::path::PathBuf::from("/tmp/creft-test-store"),
+            counter: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         });
 
         let writer = Arc::new(super::TerminalWriter::new());
@@ -3187,6 +3236,7 @@ printf '%s' "$_resp"
             plugin: None,
             runtime_indexes: make_runtime_indexes(),
             store_dir,
+            counter: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 

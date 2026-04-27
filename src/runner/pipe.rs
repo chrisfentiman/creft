@@ -1012,6 +1012,13 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let mut exit_signals: Vec<ExitSignal> = Vec::new();
 
+    // Primitive counters keyed by block index (same order as reader_handles).
+    // The reader thread increments these; run_pipe_chain reads them after joining
+    // all reader threads to assemble TraceRecord.primitives for each block.
+    // Stored as (block_index, counter) so records can be emitted in block order.
+    #[cfg(unix)]
+    let mut primitive_counters: Vec<(usize, super::channel::PrimitiveCounter)> = Vec::new();
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -1192,11 +1199,14 @@ pub(super) fn run_pipe_chain(
                 .take_response_writer()
                 .map(|fd| unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) });
             let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let counter: super::channel::PrimitiveCounter =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
             let primitive_ctx = Some(PrimitiveContext {
                 skill_name: ctx.skill_name.clone(),
                 plugin: ctx.plugin.clone(),
                 runtime_indexes: std::sync::Arc::clone(&ctx.runtime_indexes),
                 store_dir: ctx.store_dir.clone(),
+                counter: std::sync::Arc::clone(&counter),
             });
             let handle = super::channel::spawn_reader(
                 ctrl_reader,
@@ -1208,6 +1218,7 @@ pub(super) fn run_pipe_chain(
             );
             reader_handles.push(handle);
             exit_signals.push(signal);
+            primitive_counters.push((i, counter));
         }
         node_deps_dirs.push(node_deps_dir);
 
@@ -1418,7 +1429,54 @@ pub(super) fn run_pipe_chain(
         handle.join().expect("side-channel reader thread panicked");
     }
 
-    // Reader threads are joined — all ExitSignal slots are now final.
+    // Reader threads are joined — all ExitSignal slots and primitive counters are final.
+    // Emit one TraceRecord per non-sponge block in block order so the coverage trace
+    // is written even when a block called creft_exit.
+    //
+    // primitive_counters and exit_signals are built in the same spawn loop in the same
+    // order, so index i in both vectors refers to the same reader thread.
+    #[cfg(unix)]
+    {
+        // Build records sorted by block index so they are written in execution order.
+        let mut records: Vec<super::TraceRecord> = primitive_counters
+            .iter()
+            .zip(exit_signals.iter())
+            .map(|((block_idx, counter), signal)| {
+                let primitives = counter.lock().map(|g| g.clone()).unwrap_or_default();
+                let creft_exit_code = *signal.lock().expect("exit signal lock poisoned");
+                let exit_code = {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(code) = creft_exit_code {
+                        code
+                    } else if let Some(r) = results.iter().find(|r| r.block == *block_idx) {
+                        if let Some(sig) = r.status.signal() {
+                            128 + sig
+                        } else {
+                            r.status.code().unwrap_or(1)
+                        }
+                    } else {
+                        1
+                    }
+                };
+                let lang = cmd
+                    .blocks
+                    .get(*block_idx)
+                    .map(|b| b.lang.clone())
+                    .unwrap_or_default();
+                super::TraceRecord {
+                    block: *block_idx,
+                    lang,
+                    exit: exit_code,
+                    primitives,
+                }
+            })
+            .collect();
+        records.sort_by_key(|r| r.block);
+        for record in &records {
+            super::emit_trace(ctx, record);
+        }
+    }
+
     // Check whether any block called creft_exit. This happens after reader
     // joins because the reader thread writes the signal; the main thread
     // must not read until the writer has exited.
