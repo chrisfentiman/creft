@@ -171,9 +171,14 @@ Deletes a skill from the registry
 Removes the skill file. Empty namespace directories are cleaned up
 automatically.
 
+The skill name is supplied via --skill; bare positional names are not
+accepted. Quote multi-word names so the shell passes them as a single
+argument: --skill \"gh issue-body\".
+
 Examples:
-  creft remove hello
-  creft remove gh issue-body";
+  creft remove --skill hello
+  creft remove --skill \"gh issue-body\"
+  creft remove --skill hello --global";
 
 /// Extended description shown by `creft up --docs`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
@@ -422,10 +427,44 @@ Run 'creft show --docs' for the full reference.";
 const REMOVE_SHORT_ABOUT: &str = "\
 Removes the skill file. Empty namespace directories are cleaned up.
 
-Example:
-  creft remove gh issue-body
+Examples:
+  creft remove --skill hello
+  creft remove --skill \"gh issue-body\"
 
 Run 'creft remove --docs' for the full reference.";
+
+/// Extended description shown by `creft remove test --docs`.
+pub const REMOVE_TEST_LONG_ABOUT: &str = "\
+Delete a single scenario from a skill's *.test.yaml fixture.
+
+The named scenario is excised by direct byte slice; surrounding scenarios,
+comments, and hand-formatting are preserved verbatim. Comments that appear
+between the removed entry's `-` indicator and the next entry's `-` indicator
+are removed with the entry — they are treated as belonging to it.
+
+Required flags:
+  --skill <name>   The target skill (e.g. `setup`, `hooks guard bash`).
+                   The skill must exist in the local commands/ tree.
+  --name <name>    The exact value of the scenario's `name:` field.
+
+Errors:
+  Skill not found              command not found: <skill>
+  Fixture file missing         no test fixture for skill '<skill>': <path>
+  Scenario not found           no test scenario named '<name>' in <skill>
+  Malformed fixture            existing fixture is malformed: <reason>
+
+Examples:
+  creft remove test --skill setup --name 'fresh install succeeds'
+  creft remove test --skill 'hooks guard bash' --name 'rejects rm -rf'";
+
+/// Short description shown by `creft remove test --help`.
+const REMOVE_TEST_SHORT_ABOUT: &str = "\
+Delete a single scenario from a skill's *.test.yaml fixture.
+
+Examples:
+  creft remove test --skill setup --name 'fresh install succeeds'
+
+Run 'creft remove test --docs' for the full reference.";
 
 const UP_SHORT_ABOUT: &str = "\
 Installs creft into your coding AI tools. Hook-based for Claude Code and
@@ -550,6 +589,96 @@ Examples:
 
 Run 'creft settings set --docs' for the full reference.";
 
+const SKILLS_LONG_ABOUT: &str = "\
+Manages authored skills
+
+Subcommands:
+  test  Run table-driven tests for skills
+
+Options:
+  -h, --help   Show this help.
+  --docs       Show full documentation.
+
+See 'creft skills <command> --help' for details.";
+
+const SKILLS_SHORT_ABOUT: &str = "\
+Subcommands: test
+
+Example:
+  creft skills test
+
+Run 'creft skills --docs' for the full reference.";
+
+const SKILLS_TEST_LONG_ABOUT: &str = "\
+Skill tests are co-located with the skill they test. A skill at
+`.creft/commands/foo.md` is tested by `.creft/commands/foo.test.yaml`,
+which contains a YAML list of scenarios.
+
+Each scenario describes:
+  - given:    initial filesystem state in a hermetic sandbox
+  - before:   optional shell mutation between given and when
+  - when:     the `creft` invocation under test (argv, stdin, env)
+  - then:     expected exit code, stdout, stderr, files, JSON shape,
+              and coverage of the skill's blocks
+  - after:    optional shell teardown that always runs
+
+Placeholders `{sandbox}`, `{source}`, and `{home}` expand to paths
+inside the sandbox.
+
+Coverage assertions are evaluated against a trace the runner emits per
+scenario. The trace records which blocks executed and which
+side-channel primitives (creft_print, creft_search, creft_store_*) each
+block invoked. The framework compares the trace against the scenario's
+`then.coverage` block.
+
+Example fixture:
+
+  - name: setup populates target dir
+    given:
+      files:
+        \"{source}/.claude/rules/x.md\": \"# rule\"
+    when:
+      argv: [creft, setup, --claude-dir, \"{home}/.claude\"]
+    then:
+      exit_code: 0
+      files:
+        \"{home}/.claude/rules/x.md\":
+          contains: \"rule\"
+      coverage:
+        blocks: [0]
+
+Filtering by name:
+  SKILL and SCENARIO are patterns. A pattern with no `*` or `?` is a
+  substring — any name containing it matches. A pattern with `*` or `?`
+  is an fnmatch glob anchored at both ends: `*` matches a run of
+  characters, `?` matches one character.
+
+  --filter <pattern> matches scenario names across every discovered
+  fixture. SKILL is optional with --filter; when supplied, it narrows
+  the discovered fixture set first and --filter then narrows scenarios
+  within it. The SCENARIO positional always requires SKILL (positional
+  grammar) and is mutually exclusive with --filter. Empty --filter
+  pattern is rejected.
+
+Examples:
+  creft skills test merge*                  # all skills starting with \"merge\"
+  creft skills test setup fresh-install     # one scenario in the setup skill
+  creft skills test --filter \"merge*\"       # every scenario starting with \"merge\" (any skill)
+  creft skills test setup --filter \"fresh\"  # setup scenarios containing \"fresh\"";
+
+const SKILLS_TEST_SHORT_ABOUT: &str = "\
+Tests are YAML fixtures co-located with the skill they test.
+
+Examples:
+  creft skills test                       Run all fixture tests
+  creft skills test setup                 Run tests for the 'setup' skill
+  creft skills test \"merge*\"              Run tests for skills starting with \"merge\"
+  creft skills test --filter \"merge*\"     Run every scenario starting with \"merge\", across all skills
+  creft skills test setup --filter fresh  Run setup scenarios whose name contains \"fresh\"
+  creft skills test --where               List discovered fixtures
+
+Run 'creft skills test --docs' for the full reference.";
+
 const COMPLETIONS_SHORT_ABOUT: &str = "\
 Supported shells: bash, zsh, fish
 
@@ -558,6 +687,83 @@ Examples:
   creft completions zsh > ~/.zfunc/_creft
 
 Run 'creft completions --docs' for the full reference.";
+
+const ADD_TEST_LONG_ABOUT: &str = "\
+Author a new scenario from stdin, mirroring `creft add` for skills.
+
+The stdin envelope uses YAML frontmatter (`---` delimiters) to supply the
+target skill and scenario name, followed by the scenario YAML body:
+
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup]
+  then:
+    exit_code: 0
+
+Required frontmatter fields:
+  skill   The target skill name (e.g. `setup`, `hooks guard bash`).
+          The skill must exist in the local root.
+  name    The new scenario's name. Must be unique within the fixture
+          unless --force is supplied.
+
+The scenario body uses the same shape as hand-authored `*.test.yaml` entries:
+`given`, `before`, `when`, `then`, `after`, and `notes` keys.
+
+The fixture file is `<local-root>/commands/<skill-path>.test.yaml`.
+If the file does not exist it is created. The existing file is otherwise
+preserved verbatim -- comments, blank lines, and hand-formatted YAML survive.
+
+When --force is supplied and a scenario with the same name exists, the entire
+file is re-emitted through the YAML emitter to perform the replacement. YAML
+comments are not preserved by the emitter; the success message names this
+trade-off so it is visible to the caller.
+
+When --force is supplied but no matching scenario exists, the command writes a
+warning to stderr and proceeds to append the new scenario:
+  warning: --force given but no scenario named '<name>' exists in <path>; appending as a new scenario
+
+Examples:
+  creft add test <<'EOF'
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup, --claude-dir, /tmp/target]
+  then:
+    exit_code: 0
+  EOF
+
+  creft add test --force <<'EOF'
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup, --claude-dir, /tmp/target]
+  then:
+    exit_code: 1
+  EOF
+
+Errors:
+  Missing piped stdin             creft add test requires piped stdin
+  Missing skill: field            missing required frontmatter field 'skill'
+  Missing name: field             missing required frontmatter field 'name'
+  Skill not found                 command not found: <skill>
+  Malformed scenario body         scenario validation failed: ...
+  Name collision (no --force)     command already exists: test '<name>' ...";
+
+const ADD_TEST_SHORT_ABOUT: &str = "\
+Pipe a scenario envelope (frontmatter + YAML body) to stdin.
+
+Examples:
+  creft add test <<'EOF'          Append a new scenario
+  creft add test --force <<'EOF'  Replace an existing scenario by name
+
+Run 'creft add test --docs' for the full reference.";
 
 // ── Builtin entry list ──────────────────────────────────────────────────────
 
@@ -607,6 +813,10 @@ const BUILTIN_ENTRIES: &[BuiltinEntry] = &[
         description: "Show a skill's full definition",
     },
     BuiltinEntry {
+        name: "skills",
+        description: "Manage authored skills",
+    },
+    BuiltinEntry {
         name: "up",
         description: "Install creft for your coding AI",
     },
@@ -629,9 +839,11 @@ pub(crate) fn builtins() -> &'static [BuiltinEntry] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinHelp {
     Add,
+    AddTest,
     List,
     Show,
     Remove,
+    RemoveTest,
     Plugin,
     PluginInstall,
     PluginUpdate,
@@ -643,6 +855,8 @@ pub(crate) enum BuiltinHelp {
     Settings,
     SettingsShow,
     SettingsSet,
+    Skills,
+    SkillsTest,
     Up,
     Init,
     Doctor,
@@ -658,9 +872,11 @@ impl BuiltinHelp {
     pub(crate) fn cli_name(self) -> &'static str {
         match self {
             Self::Add => "add",
+            Self::AddTest => "add test",
             Self::List => "list",
             Self::Show => "show",
             Self::Remove => "remove",
+            Self::RemoveTest => "remove test",
             Self::Plugin => "plugin",
             Self::PluginInstall => "plugin install",
             Self::PluginUpdate => "plugin update",
@@ -672,6 +888,8 @@ impl BuiltinHelp {
             Self::Settings => "settings",
             Self::SettingsShow => "settings show",
             Self::SettingsSet => "settings set",
+            Self::Skills => "skills",
+            Self::SkillsTest => "skills test",
             Self::Up => "up",
             Self::Init => "init",
             Self::Doctor => "doctor",
@@ -696,9 +914,11 @@ impl BuiltinHelp {
     pub(crate) fn all_variants() -> &'static [BuiltinHelp] {
         &[
             Self::Add,
+            Self::AddTest,
             Self::List,
             Self::Show,
             Self::Remove,
+            Self::RemoveTest,
             Self::Plugin,
             Self::PluginInstall,
             Self::PluginUpdate,
@@ -710,6 +930,8 @@ impl BuiltinHelp {
             Self::Settings,
             Self::SettingsShow,
             Self::SettingsSet,
+            Self::Skills,
+            Self::SkillsTest,
             Self::Up,
             Self::Init,
             Self::Doctor,
@@ -727,9 +949,11 @@ impl BuiltinHelp {
 pub(crate) fn render_short(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add_short(),
+        BuiltinHelp::AddTest => renderer::render_add_test_short(),
         BuiltinHelp::List => renderer::render_list_short(),
         BuiltinHelp::Show => renderer::render_show_short(),
         BuiltinHelp::Remove => renderer::render_remove_short(),
+        BuiltinHelp::RemoveTest => renderer::render_remove_test_short(),
         BuiltinHelp::Plugin => renderer::render_plugin_short(),
         BuiltinHelp::PluginInstall => renderer::render_plugin_install_short(),
         BuiltinHelp::PluginUpdate => renderer::render_plugin_update_short(),
@@ -741,6 +965,8 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
         BuiltinHelp::Settings => renderer::render_settings_short(),
         BuiltinHelp::SettingsShow => renderer::render_settings_show_short(),
         BuiltinHelp::SettingsSet => renderer::render_settings_set_short(),
+        BuiltinHelp::Skills => renderer::render_skills_short(),
+        BuiltinHelp::SkillsTest => renderer::render_skills_test_short(),
         BuiltinHelp::Up => renderer::render_up_short(),
         BuiltinHelp::Init => renderer::render_init_short(),
         BuiltinHelp::Doctor => renderer::render_doctor_short(),
@@ -755,9 +981,11 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
 pub(crate) fn render_docs(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add(),
+        BuiltinHelp::AddTest => renderer::render_add_test(),
         BuiltinHelp::List => renderer::render_list(),
         BuiltinHelp::Show => renderer::render_show(),
         BuiltinHelp::Remove => renderer::render_remove(),
+        BuiltinHelp::RemoveTest => renderer::render_remove_test(),
         BuiltinHelp::Plugin => renderer::render_plugin(),
         BuiltinHelp::PluginInstall => renderer::render_plugin_install(),
         BuiltinHelp::PluginUpdate => renderer::render_plugin_update(),
@@ -769,6 +997,8 @@ pub(crate) fn render_docs(which: BuiltinHelp) -> String {
         BuiltinHelp::Settings => renderer::render_settings(),
         BuiltinHelp::SettingsShow => renderer::render_settings_show(),
         BuiltinHelp::SettingsSet => renderer::render_settings_set(),
+        BuiltinHelp::Skills => renderer::render_skills(),
+        BuiltinHelp::SkillsTest => renderer::render_skills_test(),
         BuiltinHelp::Up => renderer::render_up(),
         BuiltinHelp::Init => renderer::render_init(),
         BuiltinHelp::Doctor => renderer::render_doctor(),
@@ -793,16 +1023,19 @@ mod renderer {
     use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 
     use super::{
-        ADD_LONG_ABOUT, ADD_SHORT_ABOUT, COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT,
-        DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT, INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT,
-        LIST_SHORT_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT,
-        PLUGIN_DEACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT,
-        PLUGIN_INSTALL_SHORT_ABOUT, PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT,
-        PLUGIN_LONG_ABOUT, PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
+        ADD_LONG_ABOUT, ADD_SHORT_ABOUT, ADD_TEST_LONG_ABOUT, ADD_TEST_SHORT_ABOUT,
+        COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT, DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT,
+        INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT, LIST_SHORT_ABOUT,
+        PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT,
+        PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_INSTALL_SHORT_ABOUT,
+        PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT, PLUGIN_LONG_ABOUT,
+        PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
         PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
-        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, SETTINGS_LONG_ABOUT,
-        SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT,
-        SHOW_SHORT_ABOUT, UP_LONG_ABOUT, UP_SHORT_ABOUT,
+        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, REMOVE_TEST_LONG_ABOUT,
+        REMOVE_TEST_SHORT_ABOUT, SETTINGS_LONG_ABOUT, SETTINGS_SET_SHORT_ABOUT,
+        SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT, SHOW_SHORT_ABOUT,
+        SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT, SKILLS_TEST_SHORT_ABOUT,
+        UP_LONG_ABOUT, UP_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -857,6 +1090,21 @@ mod renderer {
         )
     }
 
+    pub fn render_add_test() -> String {
+        page_with_options(
+            "Append or replace a test scenario from stdin",
+            "creft add test [OPTIONS]",
+            ADD_TEST_LONG_ABOUT,
+            &[(
+                "--force",
+                "Replace an existing scenario with the same name. Without a \
+                 collision, --force is a no-op (the scenario is appended) and \
+                 a warning is printed. Note: replacement re-emits the file via \
+                 the YAML emitter; comments may be lost.",
+            )],
+        )
+    }
+
     pub fn render_list() -> String {
         page_with_options(
             "List available skills",
@@ -881,9 +1129,21 @@ mod renderer {
     pub fn render_remove() -> String {
         page_with_options(
             "Delete a skill",
-            "creft remove <skill> [OPTIONS]",
+            "creft remove --skill <name> [OPTIONS]",
             REMOVE_LONG_ABOUT,
             &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_remove_test() -> String {
+        page_with_options(
+            "Delete one scenario from a skill's *.test.yaml fixture",
+            "creft remove test --skill <name> --name <scenario>",
+            REMOVE_TEST_LONG_ABOUT,
+            &[
+                ("--skill <name>", "Target skill"),
+                ("--name <name>", "Exact value of the scenario's name field"),
+            ],
         )
     }
 
@@ -980,6 +1240,57 @@ mod renderer {
         )
     }
 
+    pub fn render_skills() -> String {
+        page(
+            "Manage authored skills",
+            "creft skills <command> [OPTIONS]",
+            SKILLS_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_skills_test() -> String {
+        page_with_options(
+            "Run table-driven tests for skills",
+            "creft skills test [SKILL] [SCENARIO] [OPTIONS]",
+            SKILLS_TEST_LONG_ABOUT,
+            &[
+                (
+                    "SKILL",
+                    "Pattern matching skill basenames (the part of the filename before \
+                     `.test.yaml`). Plain text matches any skill whose name contains it. \
+                     Patterns containing `*` or `?` are anchored fnmatch globs.",
+                ),
+                (
+                    "SCENARIO",
+                    "Pattern matching scenario names within the supplied SKILL. Plain text \
+                     matches any scenario whose name contains it. Patterns containing `*` or \
+                     `?` are anchored fnmatch globs. Cannot be combined with `--filter`. \
+                     Requires SKILL to precede it (positional grammar).",
+                ),
+                (
+                    "--filter <PATTERN>",
+                    "Pattern matching scenario names across every discovered fixture. Same \
+                     pattern shape as SCENARIO. SKILL is optional; when supplied, narrows \
+                     the discovered fixture set first. Cannot be combined with the SCENARIO \
+                     positional. Cannot be empty.",
+                ),
+                (
+                    "--keep",
+                    "Preserve sandbox directories for failed scenarios; their \
+                     paths are printed on stderr.",
+                ),
+                (
+                    "--detail",
+                    "Show stdout/stderr for every scenario, not just failures.",
+                ),
+                (
+                    "--where",
+                    "List discovered fixtures and scenarios, then exit.",
+                ),
+            ],
+        )
+    }
+
     pub fn render_up() -> String {
         page_with_options(
             "Install creft for your coding AI",
@@ -1031,6 +1342,18 @@ mod renderer {
         )
     }
 
+    pub fn render_add_test_short() -> String {
+        page_with_options(
+            "Append or replace a test scenario from stdin",
+            "creft add test [OPTIONS]",
+            ADD_TEST_SHORT_ABOUT,
+            &[(
+                "--force",
+                "Replace an existing scenario by name (warns if no collision)",
+            )],
+        )
+    }
+
     pub fn render_list_short() -> String {
         page_with_options(
             "List available skills",
@@ -1055,9 +1378,21 @@ mod renderer {
     pub fn render_remove_short() -> String {
         page_with_options(
             "Delete a skill",
-            "creft remove <skill> [OPTIONS]",
+            "creft remove --skill <name> [OPTIONS]",
             REMOVE_SHORT_ABOUT,
             &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_remove_test_short() -> String {
+        page_with_options(
+            "Delete one scenario from a skill's *.test.yaml fixture",
+            "creft remove test --skill <name> --name <scenario>",
+            REMOVE_TEST_SHORT_ABOUT,
+            &[
+                ("--skill <name>", "Target skill"),
+                ("--name <name>", "Exact value of the scenario's name field"),
+            ],
         )
     }
 
@@ -1154,6 +1489,42 @@ mod renderer {
         )
     }
 
+    pub fn render_skills_short() -> String {
+        page(
+            "Manage authored skills",
+            "creft skills <command> [OPTIONS]",
+            SKILLS_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_skills_test_short() -> String {
+        page_with_options(
+            "Run table-driven tests for skills",
+            "creft skills test [SKILL] [SCENARIO] [OPTIONS]",
+            SKILLS_TEST_SHORT_ABOUT,
+            &[
+                (
+                    "--filter <PATTERN>",
+                    "Run only scenarios matching this pattern, across every \
+                     discovered fixture. Plain text matches any name \
+                     containing it; patterns with `*` or `?` are anchored \
+                     fnmatch globs. SKILL is optional; when supplied, it \
+                     narrows the discovered fixture set first. Cannot be \
+                     combined with the SCENARIO positional. Cannot be empty.",
+                ),
+                (
+                    "--keep",
+                    "Preserve sandbox directories for failed scenarios",
+                ),
+                ("--detail", "Show stdout/stderr for every scenario"),
+                (
+                    "--where",
+                    "List discovered fixtures and scenarios, then exit",
+                ),
+            ],
+        )
+    }
+
     pub fn render_up_short() -> String {
         page_with_options(
             "Install creft for your coding AI",
@@ -1199,8 +1570,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_returns_ten_entries() {
-        assert_eq!(builtins().len(), 10);
+    fn builtins_returns_eleven_entries() {
+        assert_eq!(builtins().len(), 11);
     }
 
     #[test]
@@ -1251,6 +1622,7 @@ mod tests {
             "remove",
             "settings",
             "show",
+            "skills",
             "up",
         ];
         for cmd in &expected {

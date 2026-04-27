@@ -25,7 +25,7 @@ fn rm_package_skill_is_rejected() {
     .unwrap();
 
     creft_with(&creft_home)
-        .args(["remove", "rm-guard-pkg", "build"])
+        .args(["remove", "--skill", "rm-guard-pkg build"])
         .assert()
         .failure()
         .code(1)

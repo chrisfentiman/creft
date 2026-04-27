@@ -206,11 +206,38 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     let store_dir = ctx
         .store_dir_for(Scope::Global)
         .unwrap_or_else(|_| std::path::PathBuf::new());
+
+    // Resolve the optional trace writer from CREFT_TRACE_FD. The framework dup'd
+    // a writeable pipe end into this process at the named fd via pre_exec. When
+    // the var is unset (every terminal-driven invocation), no writer is attached
+    // and trace emission is skipped with no overhead.
+    //
+    // Construction goes through RunContext::trace_writer_from_fd so the shape of
+    // TraceWriter stays owned by the runner module — this site only plumbs the fd.
+    #[cfg(unix)]
+    let trace_writer = std::env::var("CREFT_TRACE_FD")
+        .ok()
+        .and_then(|s| s.parse::<std::os::unix::io::RawFd>().ok())
+        // Reject stdin/stdout/stderr: taking ownership of fd 0/1/2 would close
+        // those streams for the process when the TraceWriter is dropped.
+        .filter(|&fd| fd > 2)
+        .map(|fd| {
+            // SAFETY: CREFT_TRACE_FD names an fd the framework dup'd into this
+            // process via pre_exec before exec; ownership transferred to this
+            // process at exec time. We are the unique owner of the fd from this
+            // point until the returned TraceWriter is dropped at end-of-run.
+            // The fd > 2 guard above ensures stdin/stdout/stderr are never claimed.
+            unsafe { runner::RunContext::trace_writer_from_fd(fd) }
+        });
+    #[cfg(not(unix))]
+    let trace_writer: Option<runner::TraceWriter> = None;
+
     let run_ctx = runner::RunContext::new(Arc::clone(&cancel), cwd, extra_env, verbose, dry_run)
         .with_shell_preference(shell::detect(settings_shell_pref.as_deref()))
         .with_skill_name(name.clone())
         .with_plugin(plugin_name)
-        .with_store_dir(store_dir);
+        .with_store_dir(store_dir)
+        .with_trace_writer(trace_writer);
 
     if run_ctx.is_verbose() || run_ctx.is_dry_run() {
         // Bind args first so render_blocks can substitute them.

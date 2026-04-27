@@ -8,6 +8,36 @@ use crate::error::CreftError;
 use crate::model::{CodeBlock, LlmConfig, ParsedCommand};
 use crate::search::index::SearchIndex;
 
+/// Per-block coverage trace record, serialised as NDJSON on `CREFT_TRACE_FD`.
+///
+/// One record is emitted per block on completion. The framework reads these from
+/// the child process to build per-skill coverage reports without parsing block
+/// source code.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TraceRecord {
+    /// Zero-based block index in the parsed command's `blocks` vector.
+    pub block: usize,
+    /// Block language tag as it appeared in the markdown fence (e.g. `"bash"`).
+    pub lang: String,
+    /// Final exit code. Follows the Unix shell convention:
+    /// - Normal exit: the wait-status code.
+    /// - `creft_exit <code>`: the side-channel code (not the wait status, which is 0).
+    /// - Signal kill: `128 + signal` (e.g. SIGINT → 130).
+    pub exit: i32,
+    /// Count of side-channel primitive invocations observed by the runner.
+    ///
+    /// Keys are `ChannelMessage` JSON tag strings. Variants the block did not
+    /// invoke are omitted to keep records compact.
+    pub primitives: std::collections::BTreeMap<String, u32>,
+}
+
+/// Shared trace writer, guarded by a mutex for cross-thread serialisation.
+///
+/// Pipe chains spawn reader threads that may all emit trace records. A `Mutex`
+/// ensures each NDJSON record is written atomically. `Arc` allows cheap cloning
+/// across threads without duplicating the underlying `Mutex<File>`.
+pub(crate) type TraceWriter = Arc<std::sync::Mutex<std::fs::File>>;
+
 mod blocks;
 #[cfg(unix)]
 pub(crate) mod channel;
@@ -19,6 +49,11 @@ mod substitute;
 
 pub(crate) use self::blocks::spawn_block;
 pub(crate) use self::substitute::substitute;
+// Re-exported for use by cmd::run and the Stage 4 scenario runner; not yet
+// called in production code until Stage 4 lands.
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub(crate) use self::channel::os_pipe;
 
 /// A runtime search index with its access control flag.
 ///
@@ -114,6 +149,16 @@ pub(crate) struct RunContext {
     /// implement `Clone`. All clones of a `RunContext` share the same index map,
     /// so indexes created in one execution phase are visible in subsequent phases.
     pub(crate) runtime_indexes: Arc<std::sync::Mutex<HashMap<String, RuntimeIndex>>>,
+
+    /// Optional NDJSON trace sink for per-block coverage emission.
+    ///
+    /// `None` for every terminal-driven `creft <skill>` invocation. `Some` only
+    /// when `cmd::run::run_user_command` resolved a writer from `CREFT_TRACE_FD`.
+    ///
+    /// `Arc` allows the rebuild in `run_inner` to clone the field cheaply; the
+    /// underlying `Mutex<File>` is shared across every reader and sponge thread
+    /// so all threads write through the same lock to the same fd.
+    trace_writer: Option<TraceWriter>,
 }
 
 impl RunContext {
@@ -135,6 +180,7 @@ impl RunContext {
             skill_name: String::new(),
             plugin: None,
             runtime_indexes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            trace_writer: None,
         }
     }
 
@@ -174,6 +220,48 @@ impl RunContext {
     pub(crate) fn with_shell_preference(mut self, preference: Option<String>) -> Self {
         self.shell_preference = preference;
         self
+    }
+
+    /// Attach a writer for per-block trace emission.
+    ///
+    /// When set, the runner writes one NDJSON `TraceRecord` per block after the
+    /// block exits. When `None` (the default for all terminal-driven invocations),
+    /// no records are written and there is no measurable overhead.
+    pub(crate) fn with_trace_writer(mut self, writer: Option<TraceWriter>) -> Self {
+        self.trace_writer = writer;
+        self
+    }
+
+    /// Borrow the trace writer, if one was attached.
+    pub(crate) fn trace_writer(&self) -> Option<&TraceWriter> {
+        self.trace_writer.as_ref()
+    }
+
+    /// Build a `TraceWriter` from an inherited file descriptor.
+    ///
+    /// The runner module owns the shape of `TraceWriter` (`Arc<Mutex<File>>`).
+    /// Callers outside the runner — currently only `cmd::run::run_user_command`
+    /// — go through this constructor rather than building the type directly, so
+    /// a future change to the writer's shape requires only a single-site edit.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that:
+    /// - `fd` is open and writeable at the moment of the call;
+    /// - `fd` is owned exclusively by this process and is not closed or duplicated
+    ///   elsewhere for as long as the returned `TraceWriter` lives;
+    /// - the fd was acquired by the current process (typical: dup'd in via
+    ///   `pre_exec` before exec, then read out of `CREFT_TRACE_FD`).
+    ///
+    /// The returned `TraceWriter` takes ownership of `fd` via `File::from_raw_fd`.
+    /// The fd is closed when the last `Arc` clone is dropped at end-of-run.
+    #[cfg(unix)]
+    pub(crate) unsafe fn trace_writer_from_fd(fd: std::os::unix::io::RawFd) -> TraceWriter {
+        use std::os::unix::io::FromRawFd;
+        // SAFETY: precondition documented on this function; ownership of `fd`
+        // transfers to the returned `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Arc::new(std::sync::Mutex::new(file))
     }
 
     /// Borrow the shell preference, if one was detected.
@@ -595,6 +683,42 @@ fn format_llm_command(config: &LlmConfig) -> String {
     parts.join(" ")
 }
 
+/// Write one NDJSON `TraceRecord` to the trace writer if one is attached.
+///
+/// Silently swallows write errors: a broken read end (parent gave up) returns
+/// `EPIPE`, and a poisoned mutex means the process is already in trouble.
+/// Either way, trace emission is best-effort; block execution is unaffected.
+pub(super) fn emit_trace(ctx: &RunContext, record: &TraceRecord) {
+    let Some(writer) = ctx.trace_writer() else {
+        return;
+    };
+    if let Ok(mut file) = writer.lock() {
+        // serde_json::to_string is infallible for this well-typed struct.
+        let mut line = serde_json::to_string(record).unwrap_or_default();
+        line.push('\n');
+        // Ignore EPIPE and other write errors — trace emission is best-effort.
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Compute the trace exit code from a resolved exit code and the block's status.
+///
+/// Follows the Unix shell convention:
+/// - `creft_exit <code>`: use the side-channel code directly.
+/// - Normal exit: use the wait-status code.
+/// - Signal kill: use `128 + signal`.
+#[cfg(unix)]
+fn trace_exit_code(creft_exit_code: Option<i32>, status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = creft_exit_code {
+        return code;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(sig) = status.signal() {
+        return 128 + sig;
+    }
+    status.code().unwrap_or(1)
+}
+
 /// Execute a single code block, capturing and echoing stdout.
 ///
 /// Returns captured stdout as a `String`. Output is also printed to the
@@ -663,7 +787,7 @@ fn execute_block(
     // the child's stdin for data — interactive reading from the same
     // terminal is not possible.
     #[cfg(unix)]
-    let (reader_thread, prompt_thread, exit_signal) = {
+    let (reader_thread, prompt_thread, exit_signal, primitive_counter) = {
         let ctrl_reader = side_channel
             .take_control_reader()
             .expect("control reader taken exactly once per block");
@@ -680,11 +804,14 @@ fn execute_block(
         let interactive = stdin_data.is_none();
 
         let exit_signal: channel::ExitSignal = Arc::new(std::sync::Mutex::new(None));
+        let primitive_counter: channel::PrimitiveCounter =
+            Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         let search_ctx = Some(channel::PrimitiveContext {
             skill_name: ctx.skill_name.clone(),
             plugin: ctx.plugin.clone(),
             runtime_indexes: Arc::clone(&ctx.runtime_indexes),
             store_dir: ctx.store_dir.clone(),
+            counter: Arc::clone(&primitive_counter),
         });
 
         // Duplicate the response writer fd so both the reader thread (which
@@ -716,7 +843,7 @@ fn execute_block(
         );
         let prompter =
             channel::spawn_prompt_handler(prompt_rx, resp_writer_fd, writer, interactive);
-        (reader, prompter, exit_signal)
+        (reader, prompter, exit_signal, primitive_counter)
     };
 
     // When prev_output data must be written to the child's stdin, do it on a
@@ -785,6 +912,20 @@ fn execute_block(
             .expect("exit signal lock poisoned")
             .take();
         if let Some(code) = signal_code {
+            // Reader threads are joined — counter is final.
+            let primitives = primitive_counter
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            emit_trace(
+                ctx,
+                &TraceRecord {
+                    block: block_idx,
+                    lang: block.lang.clone(),
+                    exit: code,
+                    primitives,
+                },
+            );
             // Flush any stdout the block produced before creft_exit.
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             print!("{stdout}");
@@ -800,6 +941,16 @@ fn execute_block(
         }
     }
 
+    // Collect the primitive counter now — the reader is joined so the counter is final.
+    // On non-Unix, there is no side channel and the counter is always empty.
+    #[cfg(unix)]
+    let primitives_snapshot = primitive_counter
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    #[cfg(not(unix))]
+    let primitives_snapshot = std::collections::BTreeMap::new();
+
     if exit_code_of(&output.status) == Some(EARLY_EXIT) {
         eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
         // Print any output produced before the early exit so it is not lost.
@@ -809,6 +960,15 @@ fn execute_block(
             let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
             let _ = std::io::stderr().write_all(&output.stderr);
         }
+        emit_trace(
+            ctx,
+            &TraceRecord {
+                block: block_idx,
+                lang: block.lang.clone(),
+                exit: EARLY_EXIT,
+                primitives: primitives_snapshot,
+            },
+        );
         return Err(CreftError::EarlyExit);
     }
 
@@ -827,6 +987,19 @@ fn execute_block(
         if !suppress_stderr && !output.stderr.is_empty() {
             let _ = std::io::stderr().write_all(&output.stderr);
         }
+        #[cfg(unix)]
+        let exit_code = trace_exit_code(None, &output.status);
+        #[cfg(not(unix))]
+        let exit_code = output.status.code().unwrap_or(1);
+        emit_trace(
+            ctx,
+            &TraceRecord {
+                block: block_idx,
+                lang: block.lang.clone(),
+                exit: exit_code,
+                primitives: primitives_snapshot,
+            },
+        );
         return Err(make_execution_error(block_idx, &block.lang, &output.status));
     }
 
@@ -838,6 +1011,15 @@ fn execute_block(
         let _ = std::io::stderr().write_all(&output.stderr);
     }
 
+    emit_trace(
+        ctx,
+        &TraceRecord {
+            block: block_idx,
+            lang: block.lang.clone(),
+            exit: 0,
+            primitives: primitives_snapshot,
+        },
+    );
     Ok(stdout)
 }
 
@@ -876,20 +1058,13 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     // shell authors can write $FORMAT instead of only {{format}}.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
-    // Preserve skill_name, plugin, store_dir, and runtime_indexes from the original
-    // context so that creft_index / creft_search / creft_store_* work correctly
-    // in skills with multiple blocks.
+    // Rebuild with extended env; struct-update syntax carries all other fields
+    // (including trace_writer) without per-field maintenance. The Arc::clone
+    // for trace_writer is cheap — the underlying Mutex<File> is shared across
+    // every thread that emits a record.
     let ctx = RunContext {
-        cancel: ctx.cancel_arc(),
-        cwd: ctx.cwd().to_path_buf(),
         env: extended_env,
-        verbose: ctx.is_verbose(),
-        dry_run: ctx.is_dry_run(),
-        shell_preference: ctx.shell_preference().map(String::from),
-        store_dir: ctx.store_dir.clone(),
-        skill_name: ctx.skill_name.clone(),
-        plugin: ctx.plugin.clone(),
-        runtime_indexes: Arc::clone(&ctx.runtime_indexes),
+        ..ctx.clone()
     };
 
     if cmd.blocks.len() > 1 {
@@ -2455,6 +2630,398 @@ echo "get completed"
             result.is_ok(),
             "creft_store_get for a missing key in a pipe-chain block must exit cleanly: {:?}",
             result
+        );
+    }
+
+    // ── Stage 1: coverage trace emission ──────────────────────────────────────
+
+    /// Parse a small skill markdown string into a `ParsedCommand` using the
+    /// same two-call path that production code uses.
+    ///
+    /// Tests that verify trace emission MUST use this helper rather than
+    /// constructing `CodeBlock` literals directly. The preamble (`creft_print`,
+    /// `creft_status`, `creft_exit`, etc.) is injected by `preamble::for_language`
+    /// inside `execute_block`, which is reached only when the command has real
+    /// `CodeBlock` values from parsed markdown.
+    fn parse_skill(raw: &str) -> ParsedCommand {
+        let (def, body) = crate::frontmatter::parse(raw).expect("frontmatter parse failed");
+        let (docs, blocks) = crate::markdown::extract_blocks(&body);
+        ParsedCommand { def, docs, blocks }
+    }
+
+    /// Build a `RunContext` with an attached `TraceWriter` backed by a pipe,
+    /// returning `(ctx, read_end)`. After running a skill, close the write end
+    /// (by dropping `ctx`) and read from `read_end` to collect NDJSON records.
+    #[cfg(unix)]
+    fn make_traced_ctx(cwd: &std::path::Path) -> (RunContext, std::os::unix::io::OwnedFd) {
+        use std::os::unix::io::IntoRawFd;
+        let (read_fd, write_fd) = os_pipe().expect("os_pipe failed");
+        // SAFETY: write_fd is valid and exclusively owned by this call; ownership
+        // transfers to the TraceWriter via File::from_raw_fd inside trace_writer_from_fd.
+        let writer = unsafe { RunContext::trace_writer_from_fd(write_fd.into_raw_fd()) };
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            cwd.to_path_buf(),
+            vec![],
+            false,
+            false,
+        )
+        .with_trace_writer(Some(writer));
+        (ctx, read_fd)
+    }
+
+    /// Drain a read fd to EOF, parse each line as a `serde_json::Value`, and
+    /// return the records in the order they were written.
+    #[cfg(unix)]
+    fn drain_trace(read_fd: std::os::unix::io::OwnedFd) -> Vec<serde_json::Value> {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        // SAFETY: read_fd is valid and owned by this call; ownership transfers to
+        // the File which closes it on drop.
+        let file = unsafe { std::fs::File::from_raw_fd(read_fd.into_raw_fd()) };
+        let reader = BufReader::new(file);
+        reader
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(&l).expect("trace line must be valid JSON"))
+            .collect()
+    }
+
+    /// A single-block bash skill calling `creft_print` twice emits one trace
+    /// record with `"print": 2` in the primitives map.
+    #[cfg(unix)]
+    #[test]
+    fn trace_single_block_print_twice_counts_two() {
+        let raw = "---\nname: trace-print-test\ndescription: trace test\n---\n\n```bash\ncreft_print \"hello\"\ncreft_print \"world\"\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        run(&cmd, &[], &ctx).expect("skill must succeed");
+        drop(ctx); // closes the write end of the trace pipe
+
+        let records = drain_trace(read_fd);
+        assert_eq!(records.len(), 1, "exactly one record for one block");
+        let rec = &records[0];
+        assert_eq!(rec["block"], 0);
+        assert_eq!(rec["lang"], "bash");
+        assert_eq!(rec["exit"], 0);
+        assert_eq!(
+            rec["primitives"]["print"], 2,
+            "two creft_print calls must yield count 2"
+        );
+    }
+
+    /// A block that calls `creft_exit 7` emits a record with `"exit": 7`,
+    /// not the wait-status exit code (which is 0 when creft_exit fires).
+    #[cfg(unix)]
+    #[test]
+    fn trace_creft_exit_records_side_channel_code() {
+        let raw = "---\nname: trace-exit-test\ndescription: trace test\n---\n\n```bash\ncreft_exit 7\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        // creft_exit non-zero surfaces as ExecutionFailed; the trace still arrives.
+        let _ = run(&cmd, &[], &ctx);
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["exit"], 7,
+            "trace exit must be the creft_exit code, not the wait-status exit"
+        );
+    }
+
+    /// With `trace_writer = None`, no bytes are written to a separate sentinel pipe.
+    #[cfg(unix)]
+    #[test]
+    fn trace_no_writer_produces_no_output() {
+        let raw = "---\nname: trace-noop-test\ndescription: trace test\n---\n\n```bash\ncreft_print \"hi\"\n```\n";
+        let cmd = parse_skill(raw);
+        // Sentinel pipe: if anything is written here, the test fails.
+        let (read_fd, write_fd) = os_pipe().expect("os_pipe failed");
+        let cwd = tempfile::tempdir().unwrap();
+        let ctx = RunContext::new(
+            Arc::new(AtomicBool::new(false)),
+            cwd.path().to_path_buf(),
+            vec![],
+            false,
+            false,
+        );
+        // No trace writer attached.
+        run(&cmd, &[], &ctx).expect("skill must succeed");
+        // Close the write end so the read below sees EOF immediately.
+        drop(write_fd);
+        let records = drain_trace(read_fd);
+        assert!(
+            records.is_empty(),
+            "no trace records expected when trace_writer is None"
+        );
+    }
+
+    /// A three-block bash | python | node pipe where each block calls a different
+    /// primitive produces three records in execution order with the right per-block
+    /// counts. This proves the trace contract is language-agnostic: the runner counts
+    /// what it sees on fd 3 regardless of which language wrote it.
+    ///
+    /// The test is skipped when `python3` or `node` is absent from PATH.
+    #[cfg(unix)]
+    #[test]
+    fn trace_pipe_chain_bash_python_node_each_primitive() {
+        fn tool_on_path(name: &str) -> bool {
+            std::process::Command::new("which")
+                .arg(name)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        if !tool_on_path("python3") {
+            eprintln!("skipping trace_pipe_chain_bash_python_node: python3 not on PATH");
+            return;
+        }
+        if !tool_on_path("node") {
+            eprintln!("skipping trace_pipe_chain_bash_python_node: node not on PATH");
+            return;
+        }
+
+        // bash block 0: calls creft_print once, then echoes a line for block 1 to consume.
+        // python block 1: calls creft_status once, then passes stdin through to block 2.
+        // node block 2: calls creft_print once, then drains stdin.
+        let raw = concat!(
+            "---\nname: trace-lang-pipe\ndescription: multi-lang pipe trace test\n---\n\n",
+            "```bash\n",
+            "creft_print \"hello from bash\"\n",
+            "echo \"forward\"\n",
+            "```\n\n",
+            "```python\n",
+            "import sys\n",
+            "creft_status(\"step\")\n",
+            "for line in sys.stdin:\n",
+            "    print(line, end='')\n",
+            "```\n\n",
+            "```node\n",
+            "creft_print('done');\n",
+            "process.stdin.resume();\n",
+            "```\n",
+        );
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        run(&cmd, &[], &ctx).expect("three-language pipe must succeed");
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(records.len(), 3, "one record per block");
+        assert_eq!(records[0]["block"], 0, "block 0 first");
+        assert_eq!(records[1]["block"], 1, "block 1 second");
+        assert_eq!(records[2]["block"], 2, "block 2 third");
+        assert_eq!(records[0]["lang"], "bash");
+        assert_eq!(records[1]["lang"], "python");
+        assert_eq!(records[2]["lang"], "node");
+        assert_eq!(
+            records[0]["primitives"]["print"], 1,
+            "bash block called creft_print once"
+        );
+        assert_eq!(
+            records[1]["primitives"]["status"], 1,
+            "python block called creft_status once"
+        );
+        assert_eq!(
+            records[2]["primitives"]["print"], 1,
+            "node block called creft_print once"
+        );
+    }
+
+    /// A block that calls `creft_exit 0` emits `"exit": 0` in the trace record.
+    /// This is distinct from the `creft_exit 7` test: the code == 0 branch in
+    /// `execute_block` exits through a different arm, so a regression that forgot
+    /// to emit trace before returning `EarlyExit` for code 0 would not be caught
+    /// by the non-zero test alone.
+    #[cfg(unix)]
+    #[test]
+    fn trace_creft_exit_zero_emits_zero_exit_code() {
+        let raw = "---\nname: trace-exit-zero\ndescription: trace test\n---\n\n```bash\ncreft_exit 0\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        // creft_exit 0 is treated as success; the trace must still arrive.
+        let _ = run(&cmd, &[], &ctx);
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(records.len(), 1, "one record expected");
+        assert_eq!(
+            records[0]["exit"], 0,
+            "trace exit must be 0 when creft_exit 0 fires (side-channel truth, not wait status)"
+        );
+    }
+
+    /// A block that self-signals with SIGINT emits `"exit": 130` in the trace record.
+    /// This pins the signal-exit convention (`128 + signal`) end-to-end through the
+    /// `trace_exit_code` helper, not just through unit-level reasoning about the function.
+    #[cfg(unix)]
+    #[test]
+    fn trace_block_sigint_emits_exit_130() {
+        let raw =
+            "---\nname: trace-sigint\ndescription: trace test\n---\n\n```bash\nkill -INT $$\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        // SIGINT-killed block returns an error; the trace must still arrive.
+        let _ = run(&cmd, &[], &ctx);
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(
+            records.len(),
+            1,
+            "one record expected for signal-killed block"
+        );
+        assert_eq!(
+            records[0]["exit"], 130,
+            "SIGINT must produce exit 130 (128 + 2) in the trace record"
+        );
+    }
+
+    /// A block that exits with a non-zero wait-status code emits the correct code
+    /// in the trace record through the `output.status.success() == false` arm of
+    /// `execute_block`. This arm is distinct from the `creft_exit` side-channel path.
+    #[cfg(unix)]
+    #[test]
+    fn trace_nonzero_exit_status_propagates_to_record() {
+        let raw =
+            "---\nname: trace-exit-fail\ndescription: trace test\n---\n\n```bash\nexit 42\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        // Non-zero exit surfaces as ExecutionFailed; the trace must still arrive.
+        let _ = run(&cmd, &[], &ctx);
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(records.len(), 1, "one record expected for failed block");
+        assert_eq!(
+            records[0]["exit"], 42,
+            "wait-status exit code 42 must propagate to the trace record"
+        );
+    }
+
+    /// A block that triggers the EARLY_EXIT path (`exit 99`) emits a trace record
+    /// before the runner propagates the early-exit error. Without this record the
+    /// framework cannot account for the block in coverage.
+    #[cfg(unix)]
+    #[test]
+    fn trace_early_exit_99_emits_record() {
+        let raw =
+            "---\nname: trace-early-exit\ndescription: trace test\n---\n\n```bash\nexit 99\n```\n";
+        let cmd = parse_skill(raw);
+        let cwd = tempfile::tempdir().unwrap();
+        let (ctx, read_fd) = make_traced_ctx(cwd.path());
+
+        let _ = run(&cmd, &[], &ctx);
+        drop(ctx);
+
+        let records = drain_trace(read_fd);
+        assert_eq!(
+            records.len(),
+            1,
+            "trace record must arrive even for exit-99 early-exit"
+        );
+        // exit 99 is the EARLY_EXIT sentinel; the trace carries the raw wait-status.
+        assert_eq!(
+            records[0]["exit"], 99,
+            "EARLY_EXIT (exit 99) must propagate as exit code 99 in the trace record"
+        );
+    }
+
+    /// A child process spawned with `CREFT_TRACE_FD` set attaches the trace writer
+    /// via `cmd::run::run_user_command` and emits records exactly as a
+    /// directly-constructed `RunContext` would. This pins the env→writer plumbing
+    /// end-to-end so Stage 4 can spawn `creft <skill>` as a subprocess and rely on
+    /// the `CREFT_TRACE_FD` contract without additional wiring.
+    #[cfg(unix)]
+    #[test]
+    fn trace_env_fd_plumbing_subprocess_emits_same_shape() {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::process::CommandExt as _;
+
+        // Write the skill file directly into a temp CREFT_HOME directory.
+        // CREFT_HOME mode resolves skills at <home>/commands/<name>.md.
+        let home = tempfile::tempdir().unwrap();
+        let commands_dir = home.path().join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        let skill_raw = concat!(
+            "---\nname: trace-fd-skill\ndescription: end-to-end trace fd test\n---\n\n",
+            "```bash\n",
+            "creft_print \"hello\"\n",
+            "creft_print \"world\"\n",
+            "```\n",
+        );
+        std::fs::write(commands_dir.join("trace-fd-skill.md"), skill_raw).unwrap();
+
+        // Create the trace pipe. The write end is dup'd into the child at a
+        // fixed target fd (5) so it survives exec despite O_CLOEXEC on the pipe.
+        let (read_fd, write_fd) = os_pipe().expect("os_pipe failed");
+        let write_raw = write_fd.as_raw_fd();
+        const TRACE_TARGET_FD: libc::c_int = 5;
+
+        let creft_bin = assert_cmd::cargo::cargo_bin("creft");
+        let mut cmd = std::process::Command::new(&creft_bin);
+        cmd.env("CREFT_HOME", home.path())
+            .env_remove("CREFT_PROJECT_ROOT")
+            .env("CREFT_TRACE_FD", TRACE_TARGET_FD.to_string())
+            .arg("trace-fd-skill");
+
+        // SAFETY: dup2 and close are async-signal-safe. write_raw is a valid fd
+        // owned by this call until exec; after dup2 the duplicate at TRACE_TARGET_FD
+        // has O_CLOEXEC cleared (dup2 always clears it), so the child inherits it.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(write_raw, TRACE_TARGET_FD) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if write_raw != TRACE_TARGET_FD {
+                    libc::close(write_raw);
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = cmd.spawn().expect("failed to spawn creft child");
+
+        // Drop the parent's copy of the write end so the read below sees EOF
+        // once the child exits and its copy is closed.
+        drop(write_fd);
+
+        let status = child.wait().expect("failed to wait for creft child");
+        assert!(
+            status.success(),
+            "creft child must exit 0; got {:?}",
+            status
+        );
+
+        let records = drain_trace(read_fd);
+        assert_eq!(
+            records.len(),
+            1,
+            "one trace record expected from subprocess"
+        );
+        assert_eq!(records[0]["block"], 0);
+        assert_eq!(records[0]["lang"], "bash");
+        assert_eq!(records[0]["exit"], 0);
+        assert_eq!(
+            records[0]["primitives"]["print"], 2,
+            "two creft_print calls must yield count 2 in the subprocess trace"
         );
     }
 }

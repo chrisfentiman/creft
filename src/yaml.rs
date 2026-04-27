@@ -274,7 +274,7 @@ fn emit_string_list(out: &mut String, key: &str, values: &[String]) {
 }
 
 /// Write a double-quoted YAML scalar, escaping `\`, `"`, and newlines.
-fn emit_quoted(out: &mut String, s: &str) {
+pub(crate) fn emit_quoted(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -292,7 +292,7 @@ fn emit_quoted(out: &mut String, s: &str) {
 /// Quotes when the value is empty, starts with a YAML indicator character,
 /// contains `: ` or `#`, looks like a YAML number, or matches a YAML 1.1/1.2
 /// keyword (`true`, `null`, `yes`, `.inf`, etc.).
-fn needs_quoting(s: &str) -> bool {
+pub(crate) fn needs_quoting(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }

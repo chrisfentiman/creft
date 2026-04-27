@@ -19,6 +19,7 @@ mod search;
 mod settings;
 mod setup;
 mod shell;
+mod skill_test;
 mod store;
 mod store_kv;
 mod style;
@@ -114,6 +115,8 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             global,
         ),
 
+        cli::Command::AddTest { force } => cmd::skill::cmd_add_test(ctx, force),
+
         cli::Command::List {
             tag,
             all,
@@ -126,10 +129,9 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             cmd::skill::cmd_show(ctx, &name, blocks)
         }
 
-        cli::Command::Remove { name, global } => {
-            let name = name.join(" ");
-            cmd::skill::cmd_rm(ctx, &name, global)
-        }
+        cli::Command::Remove { skill, global } => cmd::skill::cmd_rm(ctx, &skill, global),
+
+        cli::Command::RemoveTest { skill, name } => cmd::skill::cmd_remove_test(ctx, &skill, &name),
 
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
             cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),
@@ -150,6 +152,16 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             cli::SettingsCommand::Set { key, value } => {
                 cmd::settings::cmd_settings_set(ctx, &key, &value)
             }
+        },
+
+        cli::Command::Skills(skills_cmd) => match skills_cmd {
+            cli::SkillsCommand::Test {
+                skill,
+                scenario,
+                keep,
+                detail,
+                where_,
+            } => cmd::skills::cmd_skills_test(ctx, skill, scenario, keep, detail, where_),
         },
 
         cli::Command::Up { system, local } => cmd::setup::cmd_up(ctx, system, local),

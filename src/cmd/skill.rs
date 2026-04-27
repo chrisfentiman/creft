@@ -1,11 +1,14 @@
 use std::io::{IsTerminal, Read};
+use std::path::Path;
 
+use yaml_rust2::YamlLoader;
 use yansi::Paint;
 
 use crate::error::CreftError;
 use crate::model::AppContext;
+use crate::skill_test::fixture;
 use crate::wrap::{MAX_WIDTH, wrap_description};
-use crate::{frontmatter, help, markdown, model, store, style, validate};
+use crate::{frontmatter, help, markdown, model, store, style, validate, yaml};
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_add(
@@ -589,6 +592,277 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
     Ok(())
 }
 
+/// Read a single test scenario from stdin and append (or replace) it in the
+/// skill's fixture file.
+///
+/// The stdin envelope is YAML frontmatter (`---` delimiters) followed by the
+/// scenario body. Required frontmatter fields:
+///
+/// - `skill`: the target skill's name (e.g. `setup`, `hooks guard bash`)
+/// - `name`: the new scenario's name (must be unique within the fixture
+///   unless `force` is true)
+///
+/// The body is the same YAML shape used by existing `*.test.yaml` entries:
+/// `given/before/when/then/after/notes` keys.
+///
+/// The fixture path is `<local-root>/commands/<skill-path>.test.yaml`. The
+/// skill must exist (its `.md` file must be resolvable in the local scope);
+/// otherwise the command errors before opening the fixture.
+///
+/// When `force` is true and no scenario with the supplied `name` exists, the
+/// function writes a stderr warning and proceeds to append. The success-message
+/// branch reports "added", not "replaced", so the actual outcome is visible.
+pub fn cmd_add_test(ctx: &AppContext, force: bool) -> Result<(), CreftError> {
+    // Require piped stdin — the scenario body is structured YAML and cannot
+    // be expressed as a command-line flag.
+    if std::io::stdin().is_terminal() {
+        return Err(CreftError::Setup(
+            "creft add test requires piped stdin (frontmatter + scenario YAML)".into(),
+        ));
+    }
+
+    cmd_add_test_with_reader(ctx, force, std::io::stdin())
+}
+
+/// Core logic for `cmd_add_test`, reading the stdin envelope from `reader`.
+///
+/// Separated from `cmd_add_test` so that tests can inject a `Read` impl
+/// directly rather than spawning a subprocess. `cmd_add_test` performs the
+/// `IsTerminal` check and then calls this function with `std::io::stdin()`.
+pub(crate) fn cmd_add_test_with_reader(
+    ctx: &AppContext,
+    force: bool,
+    mut reader: impl std::io::Read,
+) -> Result<(), CreftError> {
+    let mut input = String::new();
+    reader.read_to_string(&mut input)?;
+
+    // Split into frontmatter YAML and scenario body.
+    let (fm_yaml, body) = frontmatter::split(&input)?;
+
+    // Parse the frontmatter to extract `skill` and `name`.
+    let fm_docs =
+        YamlLoader::load_from_str(fm_yaml).map_err(|e| CreftError::Frontmatter(e.to_string()))?;
+    let fm = fm_docs
+        .first()
+        .and_then(|d| d.as_hash())
+        .ok_or_else(|| CreftError::Frontmatter("frontmatter must be a YAML mapping".into()))?;
+
+    let skill_name = fm
+        .get(&yaml_rust2::Yaml::String("skill".into()))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CreftError::Setup("missing required frontmatter field 'skill'".into()))?
+        .to_string();
+
+    let scenario_name = fm
+        .get(&yaml_rust2::Yaml::String("name".into()))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CreftError::Setup("missing required frontmatter field 'name'".into()))?
+        .to_string();
+
+    // Verify the skill exists in the local scope.
+    let skill_path = store::name_to_path_in(ctx, &skill_name, model::Scope::Local)?;
+    if !skill_path.exists() {
+        return Err(CreftError::CommandNotFound(skill_name.clone()));
+    }
+
+    // Compute the fixture file path.
+    let fixture_path = store::skill_test_fixture_path(ctx, &skill_name, model::Scope::Local)?;
+
+    // Assemble the candidate scenario YAML list entry for validation.
+    // Quote the name if needed so the assembled string always parses cleanly.
+    let quoted_name = if yaml::needs_quoting(&scenario_name) {
+        let mut s = String::new();
+        yaml::emit_quoted(&mut s, &scenario_name);
+        s
+    } else {
+        scenario_name.clone()
+    };
+
+    // Indent every non-empty body line by two spaces (continuation indent
+    // under the `- name: ...` list marker).
+    let indented_body: String = body
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let candidate = format!("- name: {quoted_name}\n{indented_body}\n");
+
+    // Defensive check: the body must not repeat a `name:` key at the top level
+    // because we supply it in the framing above.
+    check_body_no_name_key(body)?;
+
+    // Validate the candidate by parsing it through the typed fixture parser.
+    fixture::parse_scenarios_str(&candidate, Path::new("<stdin>"))
+        .map_err(|e| CreftError::Setup(format!("scenario validation failed: {e}")))?;
+
+    // Parse the new scenario as a raw YAML node for byte-fidelity rendering.
+    let new_nodes = fixture::parse_scenarios_yaml(&candidate, Path::new("<stdin>"))
+        .map_err(|e| CreftError::Setup(format!("scenario validation failed: {e}")))?;
+    let new_node = new_nodes.into_iter().next().ok_or_else(|| {
+        CreftError::Setup("candidate produced no YAML nodes after parsing".into())
+    })?;
+
+    // Read the existing fixture (empty string if the file does not yet exist).
+    let existing_content = if fixture_path.exists() {
+        std::fs::read_to_string(&fixture_path)?
+    } else {
+        String::new()
+    };
+
+    // Parse the existing scenarios for collision detection.
+    let existing_scenarios = fixture::parse_scenarios_str(&existing_content, &fixture_path)
+        .map_err(|e| CreftError::Setup(format!("existing fixture is malformed: {e}")))?;
+
+    let collision_idx = fixture::find_scenario_by_name(&existing_scenarios, &scenario_name);
+
+    let new_content = match (collision_idx, force) {
+        // Collision and --force → replace.
+        (Some(idx), true) => {
+            fixture::replace_scenario(&existing_content, idx, &new_node, &fixture_path)
+                .map_err(|e| CreftError::Setup(format!("replace failed: {e}")))?
+        }
+        // Collision and no --force → error.
+        (Some(_), false) => {
+            return Err(CreftError::CommandAlreadyExists(format!(
+                "test '{scenario_name}' already exists in {}.test.yaml; use --force to replace",
+                skill_name
+            )));
+        }
+        // No collision and --force → warn, then append.
+        (None, true) => {
+            eprintln!(
+                "warning: --force given but no scenario named '{scenario_name}' exists in {}; appending as a new scenario",
+                fixture_path.display()
+            );
+            let rendered = fixture::render_scenario_yaml(&new_node);
+            fixture::append_scenario(&existing_content, &rendered)
+        }
+        // No collision and no --force → append.
+        (None, false) => {
+            let rendered = fixture::render_scenario_yaml(&new_node);
+            fixture::append_scenario(&existing_content, &rendered)
+        }
+    };
+
+    // Write the result.
+    if let Some(parent) = fixture_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&fixture_path, &new_content)?;
+
+    // Emit the appropriate success message.
+    let fixture_display = fixture_path.display();
+    match (collision_idx, force) {
+        (Some(_), true) => {
+            eprintln!(
+                "replaced test: {skill_name} / {scenario_name} (in {fixture_display})\n\
+                 note: --force replaces a scenario by re-emitting the file; YAML comments may not be preserved"
+            );
+        }
+        (None, true) => {
+            eprintln!(
+                "added test: {skill_name} / {scenario_name} \
+                 (--force matched no existing scenario; appended as new) (in {fixture_display})"
+            );
+        }
+        _ if existing_content.is_empty() => {
+            eprintln!("created: {fixture_display}\nadded test: {skill_name} / {scenario_name}");
+        }
+        _ => {
+            eprintln!("added test: {skill_name} / {scenario_name} (in {fixture_display})");
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove a single scenario from a skill's `*.test.yaml` fixture.
+///
+/// Errors hard if the skill does not exist, the fixture file does not exist,
+/// or the named scenario is not present. The remaining scenarios and any
+/// comments outside the removed entry's byte range are preserved verbatim —
+/// the entry is excised by direct byte slice without re-emitting the file.
+pub fn cmd_remove_test(
+    ctx: &AppContext,
+    skill: &str,
+    scenario_name: &str,
+) -> Result<(), CreftError> {
+    // 1. Verify the skill exists in the local scope. Fixtures live next to
+    //    skills, so a missing skill is the same kind of error here.
+    let skill_path = store::name_to_path_in(ctx, skill, model::Scope::Local)?;
+    if !skill_path.exists() {
+        return Err(CreftError::CommandNotFound(skill.to_owned()));
+    }
+
+    // 2. Compute the fixture path and require its existence.
+    let fixture_path = store::skill_test_fixture_path(ctx, skill, model::Scope::Local)?;
+    if !fixture_path.exists() {
+        return Err(CreftError::Setup(format!(
+            "no test fixture for skill '{skill}': {} does not exist",
+            fixture_path.display()
+        )));
+    }
+
+    // 3. Read and parse for index lookup.
+    let existing_content = std::fs::read_to_string(&fixture_path)?;
+    let scenarios = fixture::parse_scenarios_str(&existing_content, &fixture_path)
+        .map_err(|e| CreftError::Setup(format!("existing fixture is malformed: {e}")))?;
+
+    let index = fixture::find_scenario_by_name(&scenarios, scenario_name).ok_or_else(|| {
+        CreftError::Setup(format!(
+            "no test scenario named '{scenario_name}' in {skill} (fixture: {})",
+            fixture_path.display()
+        ))
+    })?;
+
+    // 4. Surgical byte-range removal.
+    let new_content = fixture::remove_scenario_at(&existing_content, index, &fixture_path)
+        .map_err(|e| CreftError::Setup(format!("remove failed: {e}")))?;
+
+    // 5. Write the result.
+    std::fs::write(&fixture_path, &new_content)?;
+
+    eprintln!(
+        "removed test: {skill} / {scenario_name} (in {})",
+        fixture_path.display()
+    );
+    Ok(())
+}
+
+/// Return an error if the body YAML contains a top-level `name:` key.
+///
+/// The frontmatter supplies `name` as part of the list-entry framing; a
+/// duplicate key in the body would create ambiguous YAML and a misleading
+/// error from the scenario parser.
+///
+/// Bodies that fail YAML parsing fall through silently — `parse_scenarios_str`
+/// (called by the caller immediately after) will surface any parse error with
+/// a more precise diagnostic.
+fn check_body_no_name_key(body: &str) -> Result<(), CreftError> {
+    // Only check non-empty body — an empty body is a valid (minimal) scenario.
+    if body.trim().is_empty() {
+        return Ok(());
+    }
+    let docs = YamlLoader::load_from_str(body).unwrap_or_default();
+    if docs
+        .first()
+        .and_then(|d| d.as_hash())
+        .is_some_and(|hash| hash.contains_key(&yaml_rust2::Yaml::String("name".into())))
+    {
+        return Err(CreftError::Setup(
+            "frontmatter 'name' conflicts with body 'name' field; remove the 'name' key from the scenario body".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Format the description column for a skill entry.
 ///
 /// Returns the raw description string with optional package annotation.
@@ -602,6 +876,450 @@ pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -
         model::SkillSource::Owned(_) => def.description.clone(),
         model::SkillSource::Package(pkg, _) => format!("{}  (pkg: {pkg})", def.description),
         model::SkillSource::Plugin(name) => format!("{}  (plugin: {name})", def.description),
+    }
+}
+
+// ── cmd_rm tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cmd_rm_tests {
+    use crate::model::AppContext;
+
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    fn write_skill(project: &tempfile::TempDir, skill_name: &str) {
+        let parts: Vec<&str> = skill_name.split_whitespace().collect();
+        let mut path = project.path().join(".creft/commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        std::fs::create_dir_all(&path).expect("create skill namespace dirs");
+        let leaf = parts.last().unwrap();
+        std::fs::write(
+            path.join(format!("{leaf}.md")),
+            "---\nname: test\ndescription: test\n---\n```bash\necho hi\n```\n",
+        )
+        .expect("write skill md");
+    }
+
+    #[test]
+    fn cmd_rm_with_known_skill_removes_file() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "hello");
+        let skill_path = project.path().join(".creft/commands/hello.md");
+        assert!(skill_path.exists(), "skill file must exist before removal");
+
+        super::cmd_rm(&ctx, "hello", false).expect("cmd_rm must succeed");
+
+        assert!(!skill_path.exists(), "skill file must be gone after cmd_rm");
+    }
+
+    #[test]
+    fn cmd_rm_with_namespaced_skill_resolves_correctly() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "gh issue-body");
+        let skill_path = project.path().join(".creft/commands/gh/issue-body.md");
+        assert!(
+            skill_path.exists(),
+            "namespaced skill file must exist before removal"
+        );
+
+        super::cmd_rm(&ctx, "gh issue-body", false)
+            .expect("cmd_rm must succeed for namespaced skill");
+
+        assert!(
+            !skill_path.exists(),
+            "namespaced skill file must be gone after cmd_rm"
+        );
+    }
+
+    #[test]
+    fn cmd_rm_unknown_skill_returns_error() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        let result = super::cmd_rm(&ctx, "nonexistent", false);
+        assert!(
+            result.is_err(),
+            "cmd_rm for a missing skill must return an error; got: {result:?}"
+        );
+    }
+}
+
+// ── cmd_add_test tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod add_test_tests {
+    use pretty_assertions::assert_eq;
+
+    use crate::error::CreftError;
+    use crate::model::AppContext;
+    use crate::skill_test::fixture;
+
+    /// Build a project root with `.creft/commands/` and return `(home_tmp, project_tmp, ctx)`.
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    /// Write a skill `.md` file so the skill "exists" for the existence check.
+    fn write_skill(project: &tempfile::TempDir, skill_name: &str) {
+        let parts: Vec<&str> = skill_name.split_whitespace().collect();
+        let mut path = project.path().join(".creft/commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        std::fs::create_dir_all(&path).expect("create skill namespace dirs");
+        let leaf = parts.last().unwrap();
+        std::fs::write(
+            path.join(format!("{leaf}.md")),
+            "---\nname: test\ndescription: test\n---\n```bash\necho hi\n```\n",
+        )
+        .expect("write skill md");
+    }
+
+    /// Write a fixture YAML file for a skill.
+    fn write_fixture(project: &tempfile::TempDir, skill_name: &str, yaml: &str) {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::write(&path, yaml).expect("write fixture");
+    }
+
+    fn read_fixture(project: &tempfile::TempDir, skill_name: &str) -> String {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::read_to_string(&path).expect("read fixture")
+    }
+
+    /// A minimal valid scenario body (no `when.argv` key would fail validation,
+    /// so this includes the required fields).
+    const MINIMAL_BODY: &str = "when:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
+
+    /// Build a full stdin envelope for `cmd_add_test`.
+    fn envelope(skill: &str, name: &str, body: &str) -> String {
+        format!("---\nskill: {skill}\nname: {name}\n---\n{body}")
+    }
+
+    /// Run `cmd_add_test_with_reader` — the production handler — with the given
+    /// stdin content as a `Cursor`. Tests exercise the same code path that runs
+    /// in production; only the `IsTerminal` check (in `cmd_add_test`) is skipped.
+    fn run(ctx: &AppContext, force: bool, input: &str) -> Result<(), CreftError> {
+        super::cmd_add_test_with_reader(ctx, force, std::io::Cursor::new(input.to_owned()))
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_add_test_creates_fixture_when_absent() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+
+        let input = envelope("setup", "fresh install succeeds", MINIMAL_BODY);
+        run(&ctx, false, &input).expect("should succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert!(
+            content.contains("fresh install succeeds"),
+            "fixture must contain the scenario name; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_appends_to_existing_fixture() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(
+            &project,
+            "setup",
+            "- name: existing\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+        );
+
+        let input = envelope("setup", "new scenario", MINIMAL_BODY);
+        run(&ctx, false, &input).expect("should succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert!(
+            content.contains("existing"),
+            "existing scenario must survive the append; got:\n{content}"
+        );
+        assert!(
+            content.contains("new scenario"),
+            "new scenario must be present after append; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_preserves_comments_on_append() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(
+            &project,
+            "setup",
+            "# leading comment\n- name: existing\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+        );
+
+        let input = envelope("setup", "second", MINIMAL_BODY);
+        run(&ctx, false, &input).expect("should succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert!(
+            content.contains("# leading comment"),
+            "leading comment must survive append; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_collision_without_force_errors() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        let fixture_content =
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n";
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", fixture_content);
+
+        let input = envelope("setup", "foo", MINIMAL_BODY);
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::CommandAlreadyExists(ref msg)) if msg.contains("foo")),
+            "collision without --force must return CommandAlreadyExists; got: {result:?}",
+        );
+
+        // Validate before write: the fixture must be byte-for-byte unchanged.
+        let after = read_fixture(&project, "setup");
+        assert_eq!(
+            fixture_content, after,
+            "fixture must be unchanged when collision is rejected"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_collision_with_force_replaces() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(
+            &project,
+            "setup",
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 1]\n  then:\n    exit_code: 1\n\
+             - name: other\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+        );
+
+        let replacement_body = "when:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
+        let input = envelope("setup", "foo", replacement_body);
+        run(&ctx, true, &input).expect("should succeed with --force");
+
+        let content = read_fixture(&project, "setup");
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture must parse after replace");
+
+        assert_eq!(
+            scenarios.len(),
+            2,
+            "both scenarios must be present after replace"
+        );
+
+        let foo = scenarios
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo scenario must still exist");
+        assert_eq!(
+            foo.then.exit_code, 0,
+            "replaced 'foo' scenario must have exit_code 0 (replacement value), not 1 (original)"
+        );
+
+        let other = scenarios.iter().find(|s| s.name == "other");
+        assert!(
+            other.is_some(),
+            "non-colliding 'other' scenario must survive the replace"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_force_without_collision_warns_and_appends() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(
+            &project,
+            "setup",
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+        );
+
+        let input = envelope("setup", "bar", MINIMAL_BODY);
+        run(&ctx, true, &input).expect("should succeed with --force and no collision");
+
+        let content = read_fixture(&project, "setup");
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture must parse after --force append");
+
+        assert_eq!(
+            scenarios.len(),
+            2,
+            "--force without collision must append as new, resulting in two scenarios"
+        );
+        assert!(
+            scenarios.iter().any(|s| s.name == "foo"),
+            "original scenario 'foo' must survive; got names: {:?}",
+            scenarios.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            scenarios.iter().any(|s| s.name == "bar"),
+            "new scenario 'bar' must be appended; got names: {:?}",
+            scenarios.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_force_without_collision_emits_added_message() {
+        // Scenario appended (not replaced) when --force finds no collision.
+        // The fixture must have both the original and the new scenario as valid entries.
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(
+            &project,
+            "setup",
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+        );
+
+        let input = envelope("setup", "bar", MINIMAL_BODY);
+        run(&ctx, true, &input).expect("force without collision must succeed");
+
+        let content = read_fixture(&project, "setup");
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture after --force append must parse as valid");
+        assert_eq!(
+            scenarios.len(),
+            2,
+            "fixture must have exactly two scenarios after --force append; got {}",
+            scenarios.len()
+        );
+        // The new scenario must be structurally valid (not just a string in the file).
+        assert!(
+            scenarios.iter().any(|s| s.name == "bar"),
+            "appended scenario 'bar' must be present and parseable"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_malformed_body_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+
+        // Body is missing `when.argv` — required by the fixture schema.
+        let bad_body = "then:\n  exit_code: 0\n";
+        let input = envelope("setup", "broken", bad_body);
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("scenario validation failed")),
+            "malformed body must return Setup error; got: {result:?}",
+        );
+
+        // The fixture must not have been created.
+        let path = project.path().join(".creft/commands/setup.test.yaml");
+        assert!(
+            !path.exists(),
+            "fixture must not be created when body is invalid"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_missing_skill_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        // No skill file written — skill does not exist.
+        let input = envelope("nonexistent", "scenario", MINIMAL_BODY);
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::CommandNotFound(_))),
+            "missing skill must return CommandNotFound; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_missing_skill_field_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        // Frontmatter without `skill:`.
+        let input = "---\nname: myscenario\n---\n".to_string() + MINIMAL_BODY;
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("'skill'")),
+            "missing skill field must return Setup error naming 'skill'; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_missing_name_field_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        // Frontmatter without `name:`.
+        let input = "---\nskill: setup\n---\n".to_string() + MINIMAL_BODY;
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("'name'")),
+            "missing name field must return Setup error naming 'name'; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_namespaced_skill_resolves_correct_path() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "hooks guard bash");
+
+        let input = envelope("hooks guard bash", "guards against empty", MINIMAL_BODY);
+        run(&ctx, false, &input).expect("should succeed for namespaced skill");
+
+        let path = project
+            .path()
+            .join(".creft/commands/hooks/guard/bash.test.yaml");
+        assert!(
+            path.exists(),
+            "namespaced skill fixture must be written to the correct nested path"
+        );
+        let content = std::fs::read_to_string(&path).expect("read fixture");
+        assert!(
+            content.contains("guards against empty"),
+            "fixture must contain the scenario name; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_add_test_missing_frontmatter_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        // No `---` delimiters at all.
+        let result = run(&ctx, false, "just body text, no frontmatter\n");
+        assert!(
+            matches!(result, Err(CreftError::MissingFrontmatterDelimiter)),
+            "missing frontmatter must return MissingFrontmatterDelimiter; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn check_body_no_name_key_rejects_body_with_name_field() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        // Body contains a top-level `name:` key — this conflicts with the frontmatter name.
+        let bad_body =
+            "name: should-not-be-here\nwhen:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
+        let input = envelope("setup", "collider", bad_body);
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("conflicts")),
+            "body with top-level 'name' key must return a Setup error about conflict; got: {result:?}",
+        );
     }
 }
 
@@ -843,6 +1561,222 @@ mod tests {
         assert!(
             !output.contains("artifacts deploy"),
             "fully-qualified skill name must not appear in namespace listing;\ngot:\n{output}",
+        );
+    }
+}
+
+// ── cmd_remove_test tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cmd_remove_test_tests {
+    use pretty_assertions::{assert_eq, assert_str_eq};
+
+    use crate::error::CreftError;
+    use crate::model::AppContext;
+
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    fn write_skill(project: &tempfile::TempDir, skill_name: &str) {
+        let parts: Vec<&str> = skill_name.split_whitespace().collect();
+        let mut path = project.path().join(".creft/commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        std::fs::create_dir_all(&path).expect("create skill namespace dirs");
+        let leaf = parts.last().unwrap();
+        std::fs::write(
+            path.join(format!("{leaf}.md")),
+            "---\nname: test\ndescription: test\n---\n```bash\necho hi\n```\n",
+        )
+        .expect("write skill md");
+    }
+
+    fn write_fixture(project: &tempfile::TempDir, skill_name: &str, yaml: &str) {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create fixture parent dirs");
+        }
+        std::fs::write(&path, yaml).expect("write fixture");
+    }
+
+    fn read_fixture(project: &tempfile::TempDir, skill_name: &str) -> String {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::read_to_string(&path).expect("read fixture")
+    }
+
+    const TWO_SCENARIO_FIXTURE: &str = "\
+- name: first scenario
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: second scenario
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+    #[test]
+    fn cmd_remove_test_removes_named_scenario() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", TWO_SCENARIO_FIXTURE);
+
+        super::cmd_remove_test(&ctx, "setup", "first scenario")
+            .expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert!(
+            !content.contains("first scenario"),
+            "removed scenario must not appear in fixture; got:\n{content}"
+        );
+        assert!(
+            content.contains("second scenario"),
+            "remaining scenario must survive; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_preserves_comments_byte_for_byte() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        let fixture_with_comments = "\
+# header comment — survives every removal
+- name: alpha
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: beta
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+        write_fixture(&project, "setup", fixture_with_comments);
+
+        super::cmd_remove_test(&ctx, "setup", "alpha").expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert_str_eq!(
+            "# header comment — survives every removal\n- name: beta\n  when:\n    argv: [creft, b]\n  then:\n    exit_code: 0\n",
+            content
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_skill_rejected() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+
+        let result = super::cmd_remove_test(&ctx, "nonexistent", "some scenario");
+        assert!(
+            matches!(result, Err(CreftError::CommandNotFound(_))),
+            "missing skill must return CommandNotFound; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_fixture_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        // No fixture written — setup.test.yaml does not exist.
+
+        let result = super::cmd_remove_test(&ctx, "setup", "some scenario");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("does not exist")),
+            "missing fixture must return Setup with 'does not exist'; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_missing_scenario_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", TWO_SCENARIO_FIXTURE);
+
+        let result = super::cmd_remove_test(&ctx, "setup", "no such scenario");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("no such scenario")),
+            "missing scenario must return Setup containing the scenario name; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_malformed_fixture_rejected() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        write_fixture(&project, "setup", "this: is: not: valid: yaml: [\n");
+
+        let result = super::cmd_remove_test(&ctx, "setup", "any");
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("malformed")),
+            "malformed fixture must return Setup containing 'malformed'; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_namespaced_skill_resolves_correct_path() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "gh issue-body");
+
+        // Write the fixture at the namespaced path.
+        let ns_fixture_path = project
+            .path()
+            .join(".creft/commands/gh/issue-body.test.yaml");
+        std::fs::create_dir_all(ns_fixture_path.parent().unwrap()).expect("create namespace dir");
+        std::fs::write(&ns_fixture_path, TWO_SCENARIO_FIXTURE).expect("write fixture");
+
+        super::cmd_remove_test(&ctx, "gh issue-body", "first scenario")
+            .expect("cmd_remove_test must succeed for namespaced skill");
+
+        let content = std::fs::read_to_string(&ns_fixture_path).expect("read fixture");
+        assert!(
+            !content.contains("first scenario"),
+            "removed scenario must be gone from namespaced fixture; got:\n{content}"
+        );
+        assert!(
+            content.contains("second scenario"),
+            "remaining scenario must survive in namespaced fixture; got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn cmd_remove_test_last_scenario_leaves_empty_or_header() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        let single_entry = "\
+- name: only scenario
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        write_fixture(&project, "setup", single_entry);
+
+        super::cmd_remove_test(&ctx, "setup", "only scenario")
+            .expect("cmd_remove_test must succeed");
+
+        let content = read_fixture(&project, "setup");
+        assert_eq!(
+            "", content,
+            "fixture after removing last scenario must be empty; got:\n{content}"
         );
     }
 }

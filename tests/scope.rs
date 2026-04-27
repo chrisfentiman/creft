@@ -457,7 +457,7 @@ fn test_scope_full_lifecycle_add_run_rm() {
 
     // Step 5: rm "ping" (removes the local copy).
     creft_two_scope(&env)
-        .args(["remove", "ping"])
+        .args(["remove", "--skill", "ping"])
         .assert()
         .success();
 
