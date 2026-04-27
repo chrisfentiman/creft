@@ -970,30 +970,16 @@ mod tests {
 
     // ── creft skills ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn skills_bare_returns_help() {
-        let result = parse_args(&["skills"]).unwrap().unwrap();
+    #[rstest]
+    #[case::bare(&["skills"] as &[&str])]
+    #[case::long_flag(&["skills", "--help"])]
+    #[case::short_flag(&["skills", "-h"])]
+    fn skills_invocation_returns_skills_help(#[case] args: &[&str]) {
+        let result = parse_args(args).unwrap().unwrap();
         assert!(
             matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
-            "bare `creft skills` must return Parsed::Help(Skills); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn skills_help_flag_returns_help() {
-        let result = parse_args(&["skills", "--help"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
-            "`creft skills --help` must return Parsed::Help(Skills); got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn skills_h_flag_returns_help() {
-        let result = parse_args(&["skills", "-h"]).unwrap().unwrap();
-        assert!(
-            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
-            "`creft skills -h` must return Parsed::Help(Skills); got: {result:?}",
+            "`creft {:?}` must return Parsed::Help(Skills); got: {result:?}",
+            args,
         );
     }
 

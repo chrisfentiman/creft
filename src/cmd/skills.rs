@@ -3,8 +3,8 @@
 //! This module owns:
 //! - Fixture discovery and scenario dispatch.
 //! - Console output formatting (per-scenario lines, final summary).
-//! - `FixtureError` rendering to stderr and exit-code policy (2 for parse
-//!   errors; 1 for test failures).
+//! - `FixtureError` rendering to stderr; both parse errors and test failures
+//!   exit with code 1 via [`CreftError::Setup`].
 //!
 //! Structured `ScenarioOutcome`s come back from [`scenario::run`]; this module
 //! decides how to render them. Output formatting does not live in
@@ -106,17 +106,19 @@ fn cmd_skills_test_unix(
 
     // --where: list discovered fixtures and scenarios, then exit.
     if where_ {
-        print_where_listing(
-            &fixture_paths,
-            &all_scenarios,
-            skill.as_deref(),
-            scenario_filter.as_deref(),
-        );
+        print_where_listing(&fixture_paths, &all_scenarios);
         return Ok(());
     }
 
     if all_scenarios.is_empty() {
-        println!("0 scenarios: no fixtures found");
+        if fixture_paths.is_empty() {
+            println!("0 scenarios: no fixtures found");
+        } else {
+            println!(
+                "0 scenarios: filter matched no scenarios in {} fixture(s)",
+                fixture_paths.len()
+            );
+        }
         return Ok(());
     }
 
@@ -150,12 +152,7 @@ fn cmd_skills_test_unix(
 // ── Output helpers ────────────────────────────────────────────────────────────
 
 /// Print the `--where` listing: one line per scenario, then a footer.
-fn print_where_listing(
-    fixture_paths: &[std::path::PathBuf],
-    scenarios: &[Scenario],
-    _skill_filter: Option<&str>,
-    _scenario_filter: Option<&str>,
-) {
+fn print_where_listing(fixture_paths: &[std::path::PathBuf], scenarios: &[Scenario]) {
     // Group scenarios by source file for the listing.
     let mut by_file: std::collections::BTreeMap<&std::path::Path, Vec<&Scenario>> =
         std::collections::BTreeMap::new();
@@ -241,6 +238,9 @@ fn print_scenario_line(scenario: &Scenario, outcome: &ScenarioOutcome, detail: b
                 "{PREFIX_SETUP}  {skill_label} / {}       ({})",
                 scenario.name, msg
             );
+            if detail {
+                print_detail_section(scenario, outcome);
+            }
         }
     }
 }
@@ -301,16 +301,45 @@ fn print_summary(outcomes: &[(Scenario, ScenarioOutcome)]) {
     println!("\n{total} scenario(s): {}", parts.join(", "));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::error::CreftError;
     use crate::model::AppContext;
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Build a project root with `.creft/commands/` and a separate home dir.
+    ///
+    /// Returns `(home_tmp, project_tmp, ctx)`. The home dir is separate from the
+    /// project dir so `find_local_root()` does not mistake it for `~/.creft/`.
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    /// Write a fixture file with one or more scenarios to a project's commands dir.
+    fn write_fixture(project: &tempfile::TempDir, skill_name: &str, yaml: &str) {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::write(&path, yaml).expect("write fixture");
+    }
+
+    // ── No-local-root tests ───────────────────────────────────────────────────
+
     #[test]
     fn cmd_skills_test_no_local_root_returns_setup_error() {
-        // A temporary directory with no .creft/ ancestor should return Setup.
         let tmp = tempfile::TempDir::new().unwrap();
+        // home == cwd, so find_local_root() sees global root and returns None.
         let ctx = AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
         let result = cmd_skills_test(&ctx, None, None, false, false, false);
         assert!(
@@ -323,11 +352,177 @@ mod tests {
     fn cmd_skills_test_no_local_root_with_where_returns_setup_error() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx = AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        // --where must also hit the no-local-root check before listing.
         let result = cmd_skills_test(&ctx, None, None, false, false, true);
         assert!(
             matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("no .creft/ directory found")),
             "--where without local root must return Setup error; got: {result:?}",
+        );
+    }
+
+    // ── Happy-path tests ──────────────────────────────────────────────────────
+
+    /// A fixture with two passing scenarios using `sh -c` (no creft binary needed).
+    const TWO_PASS_SCENARIOS: &str = r#"
+- name: first-pass
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+- name: second-pass
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#;
+
+    #[test]
+    fn cmd_skills_test_returns_ok_when_all_scenarios_pass() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(&project, "setup", TWO_PASS_SCENARIOS);
+
+        let result = cmd_skills_test(&ctx, None, None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "two passing scenarios must return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_skill_filter_restricts_to_matching_fixture() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(&project, "setup", TWO_PASS_SCENARIOS);
+        // Write a second fixture that would fail if run.
+        write_fixture(
+            &project,
+            "other",
+            r#"
+- name: would-fail
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // Filtering to "setup" loads exactly TWO_PASS_SCENARIOS and skips "other".
+        let result = cmd_skills_test(&ctx, Some("setup".to_owned()), None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "skill filter 'setup' must run only setup.test.yaml and return Ok(()); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_scenario_filter_restricts_to_named_scenario() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: first-pass
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+- name: would-fail
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // Filtering to scenario "first-pass" must skip "would-fail".
+        let result = cmd_skills_test(
+            &ctx,
+            Some("setup".to_owned()),
+            Some("first-pass".to_owned()),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "scenario filter 'first-pass' must run at most one scenario; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_with_where_returns_ok_without_running_scenarios() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        // Write a fixture that would fail if actually executed.
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: would-fail
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // --where must exit 0 even though the scenario would fail if run.
+        let result = cmd_skills_test(&ctx, None, None, false, false, true);
+        assert!(
+            result.is_ok(),
+            "--where must return Ok(()) without executing scenarios; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_where_with_skill_filter_restricts_listing() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(&project, "setup", TWO_PASS_SCENARIOS);
+        write_fixture(
+            &project,
+            "other",
+            r#"
+- name: other-scenario
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then: {}
+"#,
+        );
+
+        // --where with SKILL filter must return Ok(()) for a fixture that exists.
+        let result = cmd_skills_test(&ctx, Some("setup".to_owned()), None, false, false, true);
+        assert!(
+            result.is_ok(),
+            "--where with skill filter must return Ok(()); got: {result:?}",
+        );
+    }
+
+    // ── Filter-empties diagnostic test ────────────────────────────────────────
+
+    #[test]
+    fn cmd_skills_test_filter_that_empties_scenarios_returns_ok_not_error() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: alpha
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then: {}
+"#,
+        );
+
+        // Filter to a nonexistent scenario name — setup.test.yaml exists but
+        // no scenario is named "nonexistent".
+        let result = cmd_skills_test(
+            &ctx,
+            Some("setup".to_owned()),
+            Some("nonexistent".to_owned()),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "filter that empties scenarios must return Ok(()); got: {result:?}",
         );
     }
 }

@@ -931,6 +931,7 @@ mod tests {
         assert!(is_reserved("remove"));
         assert!(is_reserved("plugin"));
         assert!(is_reserved("settings"));
+        assert!(is_reserved("skills"));
         assert!(is_reserved("up"));
         assert!(is_reserved("init"));
         assert!(is_reserved("doctor"));
@@ -962,6 +963,10 @@ mod tests {
         assert!(matches!(
             validate_name("plugin"),
             Err(CreftError::ReservedName(_))
+        ));
+        assert!(matches!(
+            validate_name("skills"),
+            Err(CreftError::ReservedName(ref n)) if n == "skills"
         ));
     }
 
