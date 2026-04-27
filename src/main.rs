@@ -129,10 +129,7 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             cmd::skill::cmd_show(ctx, &name, blocks)
         }
 
-        cli::Command::Remove { name, global } => {
-            let name = name.join(" ");
-            cmd::skill::cmd_rm(ctx, &name, global)
-        }
+        cli::Command::Remove { skill, global } => cmd::skill::cmd_rm(ctx, &skill, global),
 
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
             cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),

@@ -826,6 +826,81 @@ pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -
     }
 }
 
+// ── cmd_rm tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cmd_rm_tests {
+    use crate::model::AppContext;
+
+    fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        std::fs::create_dir_all(project_tmp.path().join(".creft/commands"))
+            .expect("create commands dir");
+        let ctx = AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            project_tmp.path().to_path_buf(),
+        );
+        (home_tmp, project_tmp, ctx)
+    }
+
+    fn write_skill(project: &tempfile::TempDir, skill_name: &str) {
+        let parts: Vec<&str> = skill_name.split_whitespace().collect();
+        let mut path = project.path().join(".creft/commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        std::fs::create_dir_all(&path).expect("create skill namespace dirs");
+        let leaf = parts.last().unwrap();
+        std::fs::write(
+            path.join(format!("{leaf}.md")),
+            "---\nname: test\ndescription: test\n---\n```bash\necho hi\n```\n",
+        )
+        .expect("write skill md");
+    }
+
+    #[test]
+    fn cmd_rm_with_known_skill_removes_file() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "hello");
+        let skill_path = project.path().join(".creft/commands/hello.md");
+        assert!(skill_path.exists(), "skill file must exist before removal");
+
+        super::cmd_rm(&ctx, "hello", false).expect("cmd_rm must succeed");
+
+        assert!(!skill_path.exists(), "skill file must be gone after cmd_rm");
+    }
+
+    #[test]
+    fn cmd_rm_with_namespaced_skill_resolves_correctly() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "gh issue-body");
+        let skill_path = project.path().join(".creft/commands/gh/issue-body.md");
+        assert!(
+            skill_path.exists(),
+            "namespaced skill file must exist before removal"
+        );
+
+        super::cmd_rm(&ctx, "gh issue-body", false)
+            .expect("cmd_rm must succeed for namespaced skill");
+
+        assert!(
+            !skill_path.exists(),
+            "namespaced skill file must be gone after cmd_rm"
+        );
+    }
+
+    #[test]
+    fn cmd_rm_unknown_skill_returns_error() {
+        let (_home, _project, ctx) = project_with_commands_dir();
+        let result = super::cmd_rm(&ctx, "nonexistent", false);
+        assert!(
+            result.is_err(),
+            "cmd_rm for a missing skill must return an error; got: {result:?}"
+        );
+    }
+}
+
 // ── cmd_add_test tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]

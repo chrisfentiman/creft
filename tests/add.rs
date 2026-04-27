@@ -351,7 +351,7 @@ fn test_rm_command() {
         .success();
 
     creft_with(&dir)
-        .args(["remove", "hello"])
+        .args(["remove", "--skill", "hello"])
         .assert()
         .success();
 
@@ -365,12 +365,12 @@ fn test_rm_command() {
         .stderr(predicate::str::is_empty());
 }
 
-/// `creft remove nonexistent` exits with code 2 (CommandNotFound).
+/// `creft remove --skill nonexistent` exits with code 2 (CommandNotFound).
 #[test]
 fn test_rm_not_found() {
     let dir = creft_env();
     creft_with(&dir)
-        .args(["remove", "nonexistent"])
+        .args(["remove", "--skill", "nonexistent"])
         .assert()
         .failure()
         .code(2);

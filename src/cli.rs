@@ -58,8 +58,13 @@ pub(crate) enum Command {
         name: Vec<String>,
         blocks: bool,
     },
+    /// `creft remove --skill <name> [--global]`
+    ///
+    /// Deletes a user skill from the local (default) or global scope. The
+    /// `--skill` flag is required; bare-positional names are rejected at
+    /// parse time.
     Remove {
-        name: Vec<String>,
+        skill: String,
         global: bool,
     },
     Plugin(PluginCommand),
@@ -373,23 +378,96 @@ fn parse_show(parser: &mut lexopt::Parser, initial_blocks: bool) -> Result<Parse
     Ok(Parsed::Command(Command::Show { name, blocks }))
 }
 
+/// Diagnostic emitted whenever a positional skill name appears anywhere on
+/// the `creft remove` command line. The message names the new flag and
+/// includes a quoting hint so namespaced skills (e.g. `gh issue-body`) get
+/// a one-step fix instead of a two-error round-trip.
+const BARE_SKILL_NAME_USAGE: &str = "creft remove no longer accepts bare skill names; use --skill <name> \
+     (quote multi-word names: --skill \"gh issue-body\")";
+
+/// Read a string-valued flag and reject the empty string at the parser layer.
+///
+/// Empty values (e.g. `--skill ""` from a shell-quoting mistake) would
+/// otherwise surface as a generic error deep inside path resolution; rejecting
+/// them here keeps shape errors in the parser layer where the rest of the
+/// diagnostics already live.
+fn read_required_string(
+    parser: &mut lexopt::Parser,
+    flag: &'static str,
+) -> Result<String, CliError> {
+    use lexopt::ValueExt as _;
+    let s = parser.value()?.string()?;
+    if s.is_empty() {
+        return Err(CliError::Usage(format!("{flag} cannot be empty")));
+    }
+    Ok(s)
+}
+
 fn parse_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
-    let mut name = Vec::new();
+    // Mirror parse_add: consume the first token to decide between subcommand
+    // dispatch and flag-folding for the bare command.
+    let mut skill: Option<String> = None;
     let mut global = false;
+
+    match parser.next()? {
+        None => {
+            return Err(CliError::Usage(
+                "creft remove requires --skill <name> or a subcommand (test)".to_owned(),
+            ));
+        }
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Remove)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Remove),
+        Some(Value(v)) => {
+            let s = v.string()?;
+            if s == "test" {
+                return parse_remove_test(parser);
+            }
+            return Err(CliError::Usage(BARE_SKILL_NAME_USAGE.to_owned()));
+        }
+        Some(Long("skill")) => skill = Some(read_required_string(parser, "--skill")?),
+        Some(Short('g') | Long("global")) => global = true,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    }
 
     while let Some(arg) = parser.next()? {
         match arg {
+            Long("skill") => skill = Some(read_required_string(parser, "--skill")?),
             Short('g') | Long("global") => global = true,
             Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Remove)),
             Long("docs") => return docs_or_search(parser, BuiltinHelp::Remove),
-            Value(v) => name.push(v.string()?),
+            Value(_) => {
+                // `creft remove --global hello` reaches here. The user's
+                // intent — "remove the hello skill" — is the same as the
+                // bare-positional case; emit the same diagnostic so the fix
+                // is the same one-line transition.
+                return Err(CliError::Usage(BARE_SKILL_NAME_USAGE.to_owned()));
+            }
             _ => return Err(CliError::Usage(arg.unexpected().to_string())),
         }
     }
 
-    Ok(Parsed::Command(Command::Remove { name, global }))
+    let skill =
+        skill.ok_or_else(|| CliError::Usage("creft remove requires --skill <name>".to_owned()))?;
+
+    Ok(Parsed::Command(Command::Remove { skill, global }))
+}
+
+/// Stage-1 stub for `creft remove test`. The bare invocation returns the help
+/// page; unknown flags and positional tokens are rejected immediately to fail
+/// loud rather than silently rendering help for inputs that won't be valid
+/// once the real parser arrives.
+fn parse_remove_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    match parser.next()? {
+        None => Ok(Parsed::Help(BuiltinHelp::RemoveTest)),
+        Some(Long("help") | Short('h')) => Ok(Parsed::Help(BuiltinHelp::RemoveTest)),
+        Some(Long("docs")) => docs_or_search(parser, BuiltinHelp::RemoveTest),
+        // Mirror parse_add_test's shape: unknown tokens are a hard usage error.
+        Some(arg) => Err(CliError::Usage(arg.unexpected().to_string())),
+    }
 }
 
 fn parse_plugin(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
@@ -1324,6 +1402,138 @@ mod tests {
         assert!(
             matches!(result, Err(CliError::Usage(_))),
             "`creft add bogus` must return Usage error (unknown positional); got: {result:?}",
+        );
+    }
+
+    // ── `creft remove` parser tests ───────────────────────────────────────────
+
+    #[test]
+    fn remove_skill_flag_parses_to_remove_command() {
+        let result = parse_args(&["remove", "--skill", "hello"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Remove { skill, global }) = result else {
+            panic!("expected Command::Remove; got: {result:?}");
+        };
+        assert_eq!(skill, "hello");
+        assert!(!global, "global must default to false");
+    }
+
+    #[test]
+    fn remove_skill_flag_with_short_global_parses_global_true() {
+        let result = parse_args(&["remove", "--skill", "hello", "-g"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Remove { global, .. }) = result else {
+            panic!("expected Command::Remove; got: {result:?}");
+        };
+        assert!(global, "-g must set global=true");
+    }
+
+    #[test]
+    fn remove_skill_flag_with_long_global_parses_global_true() {
+        let result = parse_args(&["remove", "--skill", "hello", "--global"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Remove { global, .. }) = result else {
+            panic!("expected Command::Remove; got: {result:?}");
+        };
+        assert!(global, "--global must set global=true");
+    }
+
+    #[test]
+    fn remove_skill_flag_with_namespaced_skill_parses_correctly() {
+        let result = parse_args(&["remove", "--skill", "gh issue-body"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Remove { skill, .. }) = result else {
+            panic!("expected Command::Remove; got: {result:?}");
+        };
+        assert_eq!(skill, "gh issue-body");
+    }
+
+    /// Every path through the parser that receives a bare positional must emit
+    /// BARE_SKILL_NAME_USAGE — the first-token branch and the trailing-loop
+    /// branch share one constant, so users see one consistent message.
+    #[rstest]
+    #[case::single_bare(&["remove", "hello"] as &[&str])]
+    #[case::two_bare_first_triggers(&["remove", "gh", "issue-body"])]
+    #[case::global_before_bare(&["remove", "--global", "hello"])]
+    #[case::short_global_before_bare(&["remove", "-g", "hello"])]
+    #[case::skill_flag_then_extra_positional(&["remove", "--skill", "hello", "extra"])]
+    fn remove_bare_positional_returns_bare_skill_name_error(#[case] args: &[&str]) {
+        let result = parse_args(args);
+        assert!(
+            matches!(result, Err(CliError::Usage(ref msg)) if msg == BARE_SKILL_NAME_USAGE),
+            "`creft {:?}` must return BARE_SKILL_NAME_USAGE; got: {result:?}",
+            args,
+        );
+    }
+
+    #[test]
+    fn remove_no_args_returns_usage_containing_skill_and_subcommand() {
+        let result = parse_args(&["remove"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("--skill") || msg.contains("subcommand")),
+            "`creft remove` must return Usage mentioning --skill or subcommand; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn remove_skill_flag_without_value_returns_usage_error() {
+        let result = parse_args(&["remove", "--skill"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "`creft remove --skill` (no value) must return Usage error; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn remove_skill_flag_with_empty_value_returns_usage_error() {
+        let result = parse_args(&["remove", "--skill", ""]);
+        assert!(
+            matches!(result, Err(CliError::Usage(ref msg)) if msg == "--skill cannot be empty"),
+            "`creft remove --skill \"\"` must return \"--skill cannot be empty\"; got: {result:?}",
+        );
+    }
+
+    #[rstest]
+    #[case::bare(&["remove", "test"] as &[&str])]
+    #[case::help_long(&["remove", "test", "--help"])]
+    #[case::help_short(&["remove", "test", "-h"])]
+    fn remove_test_bare_and_help_returns_remove_test_help(#[case] args: &[&str]) {
+        let result = parse_args(args).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::RemoveTest)),
+            "`creft {:?}` must return Parsed::Help(RemoveTest); got: {result:?}",
+            args,
+        );
+    }
+
+    #[test]
+    fn remove_test_docs_returns_docs_variant() {
+        let result = parse_args(&["remove", "test", "--docs"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::RemoveTest)),
+            "`creft remove test --docs` must return Parsed::Docs(RemoveTest); got: {result:?}",
+        );
+    }
+
+    /// Any unknown token in the stub must fail loud — it must not silently
+    /// render help, which would teach users that these tokens are accepted.
+    ///
+    /// lexopt produces "invalid option '--flag'" for unknown long flags and
+    /// "unexpected argument" for unknown positional values — both are
+    /// `CliError::Usage`.
+    #[rstest]
+    #[case::bogus_flag(&["remove", "test", "--bogus"] as &[&str])]
+    #[case::positional_token(&["remove", "test", "foo"])]
+    fn remove_test_unknown_token_returns_usage_error(#[case] args: &[&str]) {
+        let result = parse_args(args);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "`creft {:?}` must return CliError::Usage; got: {result:?}",
+            args,
         );
     }
 

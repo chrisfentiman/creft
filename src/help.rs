@@ -172,8 +172,9 @@ Removes the skill file. Empty namespace directories are cleaned up
 automatically.
 
 Examples:
-  creft remove hello
-  creft remove gh issue-body";
+  creft remove --skill hello
+  creft remove --skill \"gh issue-body\"
+  creft remove --skill hello -g";
 
 /// Extended description shown by `creft up --docs`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
@@ -422,10 +423,34 @@ Run 'creft show --docs' for the full reference.";
 const REMOVE_SHORT_ABOUT: &str = "\
 Removes the skill file. Empty namespace directories are cleaned up.
 
-Example:
-  creft remove gh issue-body
+Examples:
+  creft remove --skill hello
+  creft remove --skill \"gh issue-body\"
 
 Run 'creft remove --docs' for the full reference.";
+
+const REMOVE_TEST_LONG_ABOUT: &str = "\
+Deletes a single named scenario from a skill's test fixture
+
+Removes the scenario entry from the fixture file by direct byte slice so
+surrounding comments and formatting are preserved verbatim. Errors hard if
+the skill, the fixture file, or the named scenario does not exist.
+
+Required flags:
+  --skill <name>   The skill whose fixture to modify (e.g. setup, gh issue-body)
+  --name  <name>   The exact scenario name to delete
+
+Examples:
+  creft remove test --skill setup --name \"fresh install succeeds\"
+  creft remove test --skill \"gh issue-body\" --name \"creates issue body\"";
+
+const REMOVE_TEST_SHORT_ABOUT: &str = "\
+Deletes a single named scenario from a skill's test fixture.
+
+Example:
+  creft remove test --skill setup --name \"fresh install succeeds\"
+
+Run 'creft remove test --docs' for the full reference.";
 
 const UP_SHORT_ABOUT: &str = "\
 Installs creft into your coding AI tools. Hook-based for Claude Code and
@@ -804,6 +829,7 @@ pub(crate) enum BuiltinHelp {
     List,
     Show,
     Remove,
+    RemoveTest,
     Plugin,
     PluginInstall,
     PluginUpdate,
@@ -836,6 +862,7 @@ impl BuiltinHelp {
             Self::List => "list",
             Self::Show => "show",
             Self::Remove => "remove",
+            Self::RemoveTest => "remove test",
             Self::Plugin => "plugin",
             Self::PluginInstall => "plugin install",
             Self::PluginUpdate => "plugin update",
@@ -877,6 +904,7 @@ impl BuiltinHelp {
             Self::List,
             Self::Show,
             Self::Remove,
+            Self::RemoveTest,
             Self::Plugin,
             Self::PluginInstall,
             Self::PluginUpdate,
@@ -911,6 +939,7 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
         BuiltinHelp::List => renderer::render_list_short(),
         BuiltinHelp::Show => renderer::render_show_short(),
         BuiltinHelp::Remove => renderer::render_remove_short(),
+        BuiltinHelp::RemoveTest => renderer::render_remove_test_short(),
         BuiltinHelp::Plugin => renderer::render_plugin_short(),
         BuiltinHelp::PluginInstall => renderer::render_plugin_install_short(),
         BuiltinHelp::PluginUpdate => renderer::render_plugin_update_short(),
@@ -942,6 +971,7 @@ pub(crate) fn render_docs(which: BuiltinHelp) -> String {
         BuiltinHelp::List => renderer::render_list(),
         BuiltinHelp::Show => renderer::render_show(),
         BuiltinHelp::Remove => renderer::render_remove(),
+        BuiltinHelp::RemoveTest => renderer::render_remove_test(),
         BuiltinHelp::Plugin => renderer::render_plugin(),
         BuiltinHelp::PluginInstall => renderer::render_plugin_install(),
         BuiltinHelp::PluginUpdate => renderer::render_plugin_update(),
@@ -987,10 +1017,11 @@ mod renderer {
         PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT, PLUGIN_LONG_ABOUT,
         PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
         PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
-        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, SETTINGS_LONG_ABOUT,
-        SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT,
-        SHOW_SHORT_ABOUT, SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT,
-        SKILLS_TEST_SHORT_ABOUT, UP_LONG_ABOUT, UP_SHORT_ABOUT,
+        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, REMOVE_TEST_LONG_ABOUT,
+        REMOVE_TEST_SHORT_ABOUT, SETTINGS_LONG_ABOUT, SETTINGS_SET_SHORT_ABOUT,
+        SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT, SHOW_SHORT_ABOUT,
+        SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT, SKILLS_TEST_SHORT_ABOUT,
+        UP_LONG_ABOUT, UP_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -1084,9 +1115,21 @@ mod renderer {
     pub fn render_remove() -> String {
         page_with_options(
             "Delete a skill",
-            "creft remove <skill> [OPTIONS]",
+            "creft remove --skill <name> [OPTIONS]",
             REMOVE_LONG_ABOUT,
             &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_remove_test() -> String {
+        page_with_options(
+            "Delete a named test scenario from a skill's fixture",
+            "creft remove test --skill <name> --name <scenario>",
+            REMOVE_TEST_LONG_ABOUT,
+            &[
+                ("--skill <name>", "The skill whose fixture to modify"),
+                ("--name <scenario>", "The exact scenario name to delete"),
+            ],
         )
     }
 
@@ -1321,9 +1364,21 @@ mod renderer {
     pub fn render_remove_short() -> String {
         page_with_options(
             "Delete a skill",
-            "creft remove <skill> [OPTIONS]",
+            "creft remove --skill <name> [OPTIONS]",
             REMOVE_SHORT_ABOUT,
             &[("--global, -g", "Remove from global ~/.creft/ storage")],
+        )
+    }
+
+    pub fn render_remove_test_short() -> String {
+        page_with_options(
+            "Delete a named test scenario from a skill's fixture",
+            "creft remove test --skill <name> --name <scenario>",
+            REMOVE_TEST_SHORT_ABOUT,
+            &[
+                ("--skill <name>", "The skill whose fixture to modify"),
+                ("--name <scenario>", "The exact scenario name to delete"),
+            ],
         )
     }
 
