@@ -5,3 +5,5 @@
 //! exposed to `cmd::skills`.
 
 pub(crate) mod fixture;
+pub(crate) mod placeholder;
+pub(crate) mod sandbox;
