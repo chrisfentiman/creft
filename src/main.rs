@@ -19,6 +19,10 @@ mod search;
 mod settings;
 mod setup;
 mod shell;
+// Skill test framework internals. Not yet wired into CLI entry points (Stage 5);
+// the public surface is exercised by module tests.
+#[allow(dead_code)]
+mod skill_test;
 mod store;
 mod store_kv;
 mod style;
