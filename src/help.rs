@@ -550,6 +550,74 @@ Examples:
 
 Run 'creft settings set --docs' for the full reference.";
 
+const SKILLS_LONG_ABOUT: &str = "\
+Manages authored skills
+
+Subcommands:
+  test  Run table-driven tests for skills
+
+Options:
+  -h, --help   Show this help.
+  --docs       Show full documentation.
+
+See 'creft skills <command> --help' for details.";
+
+const SKILLS_SHORT_ABOUT: &str = "\
+Subcommands: test
+
+Example:
+  creft skills test
+
+Run 'creft skills --docs' for the full reference.";
+
+const SKILLS_TEST_LONG_ABOUT: &str = "\
+Skill tests are co-located with the skill they test. A skill at
+`.creft/commands/foo.md` is tested by `.creft/commands/foo.test.yaml`,
+which contains a YAML list of scenarios.
+
+Each scenario describes:
+  - given:    initial filesystem state in a hermetic sandbox
+  - before:   optional shell mutation between given and when
+  - when:     the `creft` invocation under test (argv, stdin, env)
+  - then:     expected exit code, stdout, stderr, files, JSON shape,
+              and coverage of the skill's blocks
+  - after:    optional shell teardown that always runs
+
+Placeholders `{sandbox}`, `{source}`, and `{home}` expand to paths
+inside the sandbox.
+
+Coverage assertions are evaluated against a trace the runner emits per
+scenario. The trace records which blocks executed and which
+side-channel primitives (creft_print, creft_search, creft_store_*) each
+block invoked. The framework compares the trace against the scenario's
+`then.coverage` block.
+
+Example fixture:
+
+  - name: setup populates target dir
+    given:
+      files:
+        \"{source}/.claude/rules/x.md\": \"# rule\"
+    when:
+      argv: [creft, setup, --claude-dir, \"{home}/.claude\"]
+    then:
+      exit_code: 0
+      files:
+        \"{home}/.claude/rules/x.md\":
+          contains: \"rule\"
+      coverage:
+        blocks: [0]";
+
+const SKILLS_TEST_SHORT_ABOUT: &str = "\
+Tests are YAML fixtures co-located with the skill they test.
+
+Examples:
+  creft skills test            Run all fixture tests
+  creft skills test setup      Run tests for the 'setup' skill
+  creft skills test --where    List discovered fixtures
+
+Run 'creft skills test --docs' for the full reference.";
+
 const COMPLETIONS_SHORT_ABOUT: &str = "\
 Supported shells: bash, zsh, fish
 
@@ -607,6 +675,10 @@ const BUILTIN_ENTRIES: &[BuiltinEntry] = &[
         description: "Show a skill's full definition",
     },
     BuiltinEntry {
+        name: "skills",
+        description: "Manage authored skills",
+    },
+    BuiltinEntry {
         name: "up",
         description: "Install creft for your coding AI",
     },
@@ -643,6 +715,8 @@ pub(crate) enum BuiltinHelp {
     Settings,
     SettingsShow,
     SettingsSet,
+    Skills,
+    SkillsTest,
     Up,
     Init,
     Doctor,
@@ -672,6 +746,8 @@ impl BuiltinHelp {
             Self::Settings => "settings",
             Self::SettingsShow => "settings show",
             Self::SettingsSet => "settings set",
+            Self::Skills => "skills",
+            Self::SkillsTest => "skills test",
             Self::Up => "up",
             Self::Init => "init",
             Self::Doctor => "doctor",
@@ -710,6 +786,8 @@ impl BuiltinHelp {
             Self::Settings,
             Self::SettingsShow,
             Self::SettingsSet,
+            Self::Skills,
+            Self::SkillsTest,
             Self::Up,
             Self::Init,
             Self::Doctor,
@@ -741,6 +819,8 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
         BuiltinHelp::Settings => renderer::render_settings_short(),
         BuiltinHelp::SettingsShow => renderer::render_settings_show_short(),
         BuiltinHelp::SettingsSet => renderer::render_settings_set_short(),
+        BuiltinHelp::Skills => renderer::render_skills_short(),
+        BuiltinHelp::SkillsTest => renderer::render_skills_test_short(),
         BuiltinHelp::Up => renderer::render_up_short(),
         BuiltinHelp::Init => renderer::render_init_short(),
         BuiltinHelp::Doctor => renderer::render_doctor_short(),
@@ -769,6 +849,8 @@ pub(crate) fn render_docs(which: BuiltinHelp) -> String {
         BuiltinHelp::Settings => renderer::render_settings(),
         BuiltinHelp::SettingsShow => renderer::render_settings_show(),
         BuiltinHelp::SettingsSet => renderer::render_settings_set(),
+        BuiltinHelp::Skills => renderer::render_skills(),
+        BuiltinHelp::SkillsTest => renderer::render_skills_test(),
         BuiltinHelp::Up => renderer::render_up(),
         BuiltinHelp::Init => renderer::render_init(),
         BuiltinHelp::Doctor => renderer::render_doctor(),
@@ -802,7 +884,8 @@ mod renderer {
         PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
         PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, SETTINGS_LONG_ABOUT,
         SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT,
-        SHOW_SHORT_ABOUT, UP_LONG_ABOUT, UP_SHORT_ABOUT,
+        SHOW_SHORT_ABOUT, SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT,
+        SKILLS_TEST_SHORT_ABOUT, UP_LONG_ABOUT, UP_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -980,6 +1063,46 @@ mod renderer {
         )
     }
 
+    pub fn render_skills() -> String {
+        page(
+            "Manage authored skills",
+            "creft skills <command> [OPTIONS]",
+            SKILLS_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_skills_test() -> String {
+        page_with_options(
+            "Run table-driven tests for skills",
+            "creft skills test [SKILL] [SCENARIO] [OPTIONS]",
+            SKILLS_TEST_LONG_ABOUT,
+            &[
+                (
+                    "SKILL",
+                    "Limit to scenarios defined for this skill (file basename \
+                     matching `*.test.yaml`). Omit to run every skill in the local root.",
+                ),
+                (
+                    "SCENARIO",
+                    "Limit to one scenario by its `name`. Requires SKILL.",
+                ),
+                (
+                    "--keep",
+                    "Preserve sandbox directories for failed scenarios; their \
+                     paths are printed on stderr.",
+                ),
+                (
+                    "--detail",
+                    "Show stdout/stderr for every scenario, not just failures.",
+                ),
+                (
+                    "--where",
+                    "List discovered fixtures and scenarios, then exit.",
+                ),
+            ],
+        )
+    }
+
     pub fn render_up() -> String {
         page_with_options(
             "Install creft for your coding AI",
@@ -1154,6 +1277,33 @@ mod renderer {
         )
     }
 
+    pub fn render_skills_short() -> String {
+        page(
+            "Manage authored skills",
+            "creft skills <command> [OPTIONS]",
+            SKILLS_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_skills_test_short() -> String {
+        page_with_options(
+            "Run table-driven tests for skills",
+            "creft skills test [SKILL] [SCENARIO] [OPTIONS]",
+            SKILLS_TEST_SHORT_ABOUT,
+            &[
+                (
+                    "--keep",
+                    "Preserve sandbox directories for failed scenarios",
+                ),
+                ("--detail", "Show stdout/stderr for every scenario"),
+                (
+                    "--where",
+                    "List discovered fixtures and scenarios, then exit",
+                ),
+            ],
+        )
+    }
+
     pub fn render_up_short() -> String {
         page_with_options(
             "Install creft for your coding AI",
@@ -1199,8 +1349,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_returns_ten_entries() {
-        assert_eq!(builtins().len(), 10);
+    fn builtins_returns_eleven_entries() {
+        assert_eq!(builtins().len(), 11);
     }
 
     #[test]
@@ -1251,6 +1401,7 @@ mod tests {
             "remove",
             "settings",
             "show",
+            "skills",
             "up",
         ];
         for cmd in &expected {

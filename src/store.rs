@@ -16,6 +16,7 @@ const RESERVED: &[&str] = &[
     "remove",
     "plugin",
     "settings",
+    "skills",
     "up",
     "help",
     "version",

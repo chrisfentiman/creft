@@ -19,9 +19,6 @@ mod search;
 mod settings;
 mod setup;
 mod shell;
-// Skill test framework internals. Not yet wired into CLI entry points (Stage 5);
-// the public surface is exercised by module tests.
-#[allow(dead_code)]
 mod skill_test;
 mod store;
 mod store_kv;
@@ -154,6 +151,16 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             cli::SettingsCommand::Set { key, value } => {
                 cmd::settings::cmd_settings_set(ctx, &key, &value)
             }
+        },
+
+        cli::Command::Skills(skills_cmd) => match skills_cmd {
+            cli::SkillsCommand::Test {
+                skill,
+                scenario,
+                keep,
+                detail,
+                where_,
+            } => cmd::skills::cmd_skills_test(ctx, skill, scenario, keep, detail, where_),
         },
 
         cli::Command::Up { system, local } => cmd::setup::cmd_up(ctx, system, local),

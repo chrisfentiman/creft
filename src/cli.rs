@@ -53,6 +53,7 @@ pub(crate) enum Command {
     },
     Plugin(PluginCommand),
     Settings(SettingsCommand),
+    Skills(SkillsCommand),
     Up {
         system: Option<String>,
         local: bool,
@@ -83,6 +84,21 @@ pub(crate) enum PluginCommand {
 pub(crate) enum SettingsCommand {
     Show,
     Set { key: String, value: String },
+}
+
+/// Subcommands for the `creft skills` namespace.
+///
+/// New subcommands (e.g. `Lint`, `Inspect`) are added as new variants without
+/// affecting existing dispatch.
+#[derive(Debug)]
+pub(crate) enum SkillsCommand {
+    Test {
+        skill: Option<String>,
+        scenario: Option<String>,
+        keep: bool,
+        detail: bool,
+        where_: bool,
+    },
 }
 
 /// Errors produced during argument parsing.
@@ -152,6 +168,7 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
         "remove" => parse_remove(parser),
         "plugin" => parse_plugin(parser),
         "settings" => parse_settings(parser),
+        "skills" => parse_skills(parser),
         "up" => parse_up(parser),
         "init" => parse_init(parser),
         "doctor" => parse_doctor(parser),
@@ -577,6 +594,61 @@ fn parse_settings_set(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     })))
 }
 
+fn parse_skills(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let sub = match parser.next()? {
+        // Bare `creft skills` → namespace help.
+        None => return Ok(Parsed::Help(BuiltinHelp::Skills)),
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Skills)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Skills),
+        Some(Value(v)) => v.string()?,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    };
+
+    match sub.as_str() {
+        "test" => parse_skills_test(parser),
+        other => Err(CliError::UnknownCommand(format!("skills {other}"))),
+    }
+}
+
+fn parse_skills_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut skill = None;
+    let mut scenario = None;
+    let mut keep = false;
+    let mut detail = false;
+    let mut where_ = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("keep") => keep = true,
+            Long("detail") => detail = true,
+            Long("where") => where_ = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::SkillsTest)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::SkillsTest),
+            Value(v) if skill.is_none() => skill = Some(v.string()?),
+            Value(v) if scenario.is_none() => scenario = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Skills(SkillsCommand::Test {
+        skill,
+        scenario,
+        keep,
+        detail,
+        where_,
+    })))
+}
+
 fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
@@ -732,6 +804,7 @@ mod tests {
     #[case::doctor("doctor", crate::help::BuiltinHelp::Doctor)]
     #[case::plugin("plugin", crate::help::BuiltinHelp::Plugin)]
     #[case::settings("settings", crate::help::BuiltinHelp::Settings)]
+    #[case::skills("skills", crate::help::BuiltinHelp::Skills)]
     #[case::up("up", crate::help::BuiltinHelp::Up)]
     #[case::init("init", crate::help::BuiltinHelp::Init)]
     fn docs_flag_returns_docs_variant(
@@ -892,6 +965,138 @@ mod tests {
         assert!(
             matches!(result, Parsed::DocsSearch(ref v, ref q) if *v == expected && q == "query"),
             "{cmd} --docs query must return DocsSearch({expected:?}, \"query\"); got: {result:?}",
+        );
+    }
+
+    // ── creft skills ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn skills_bare_returns_help() {
+        let result = parse_args(&["skills"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
+            "bare `creft skills` must return Parsed::Help(Skills); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_help_flag_returns_help() {
+        let result = parse_args(&["skills", "--help"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
+            "`creft skills --help` must return Parsed::Help(Skills); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_h_flag_returns_help() {
+        let result = parse_args(&["skills", "-h"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::Skills)),
+            "`creft skills -h` must return Parsed::Help(Skills); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_bogus_subcommand_returns_unknown_command() {
+        let result = parse_args(&["skills", "bogus"]);
+        assert!(
+            matches!(result, Err(CliError::UnknownCommand(ref s)) if s == "skills bogus"),
+            "`creft skills bogus` must return UnknownCommand(\"skills bogus\"); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_test_bare_parses_all_defaults() {
+        let result = parse_args(&["skills", "test"]).unwrap().unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill,
+            scenario,
+            keep,
+            detail,
+            where_,
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test); got: {result:?}");
+        };
+        assert!(skill.is_none(), "skill must default to None");
+        assert!(scenario.is_none(), "scenario must default to None");
+        assert!(!keep, "keep must default to false");
+        assert!(!detail, "detail must default to false");
+        assert!(!where_, "where_ must default to false");
+    }
+
+    #[test]
+    fn skills_test_with_skill_positional() {
+        let result = parse_args(&["skills", "test", "setup"]).unwrap().unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill, scenario, ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert_eq!(skill.as_deref(), Some("setup"));
+        assert!(scenario.is_none());
+    }
+
+    #[test]
+    fn skills_test_with_skill_and_scenario_positionals() {
+        let result = parse_args(&["skills", "test", "setup", "fresh-install"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            skill, scenario, ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert_eq!(skill.as_deref(), Some("setup"));
+        assert_eq!(scenario.as_deref(), Some("fresh-install"));
+    }
+
+    #[test]
+    fn skills_test_flags_parsed_correctly() {
+        let result = parse_args(&["skills", "test", "--keep", "--detail", "--where"])
+            .unwrap()
+            .unwrap();
+        let Parsed::Command(Command::Skills(SkillsCommand::Test {
+            keep,
+            detail,
+            where_,
+            ..
+        })) = result
+        else {
+            panic!("expected Command::Skills(Test)");
+        };
+        assert!(keep, "--keep must set keep=true");
+        assert!(detail, "--detail must set detail=true");
+        assert!(where_, "--where must set where_=true");
+    }
+
+    #[test]
+    fn skills_test_help_flag_returns_help() {
+        let result = parse_args(&["skills", "test", "--help"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::SkillsTest)),
+            "`creft skills test --help` must return Parsed::Help(SkillsTest); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_test_docs_flag_returns_docs() {
+        let result = parse_args(&["skills", "test", "--docs"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::SkillsTest)),
+            "`creft skills test --docs` must return Parsed::Docs(SkillsTest); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn skills_test_third_positional_returns_usage_error() {
+        let result = parse_args(&["skills", "test", "skill", "scenario", "extra"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "third positional must return Usage error; got: {result:?}",
         );
     }
 }

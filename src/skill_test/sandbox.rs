@@ -128,6 +128,8 @@ impl Sandbox {
     /// Skills that gate on git state (worktree detection, branch checks) see a
     /// realistic environment. Failure is non-fatal — git is not a hard
     /// dependency of the test framework.
+    // Called from tests; not yet called from the production binary path.
+    #[allow(dead_code)]
     pub(crate) fn git_init_source(&self) {
         let _ = std::process::Command::new("git")
             .args(["-C", &self.source.to_string_lossy(), "init", "--quiet"])
@@ -246,6 +248,8 @@ impl Sandbox {
     }
 
     /// `{sandbox}/home` — `HOME` for the child process.
+    // Called from tests; not yet called from the production binary path.
+    #[allow(dead_code)]
     pub(crate) fn home(&self) -> &Path {
         &self.home
     }

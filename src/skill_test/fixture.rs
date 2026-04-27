@@ -62,6 +62,8 @@ pub(crate) struct Scenario {
     /// The file this scenario came from.
     pub source_file: PathBuf,
     /// Zero-based position of this scenario in the YAML list.
+    // Used by tests to verify parse ordering; not read by the binary path.
+    #[allow(dead_code)]
     pub source_index: usize,
     /// Human-readable context rendered under `--detail`. Never asserted on.
     pub notes: Option<String>,
