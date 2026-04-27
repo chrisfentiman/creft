@@ -621,8 +621,21 @@ pub fn cmd_add_test(ctx: &AppContext, force: bool) -> Result<(), CreftError> {
         ));
     }
 
+    cmd_add_test_with_reader(ctx, force, std::io::stdin())
+}
+
+/// Core logic for `cmd_add_test`, reading the stdin envelope from `reader`.
+///
+/// Separated from `cmd_add_test` so that tests can inject a `Read` impl
+/// directly rather than spawning a subprocess. `cmd_add_test` performs the
+/// `IsTerminal` check and then calls this function with `std::io::stdin()`.
+pub(crate) fn cmd_add_test_with_reader(
+    ctx: &AppContext,
+    force: bool,
+    mut reader: impl std::io::Read,
+) -> Result<(), CreftError> {
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    reader.read_to_string(&mut input)?;
 
     // Split into frontmatter YAML and scenario body.
     let (fm_yaml, body) = frontmatter::split(&input)?;
@@ -775,6 +788,10 @@ pub fn cmd_add_test(ctx: &AppContext, force: bool) -> Result<(), CreftError> {
 /// The frontmatter supplies `name` as part of the list-entry framing; a
 /// duplicate key in the body would create ambiguous YAML and a misleading
 /// error from the scenario parser.
+///
+/// Bodies that fail YAML parsing fall through silently — `parse_scenarios_str`
+/// (called by the caller immediately after) will surface any parse error with
+/// a more precise diagnostic.
 fn check_body_no_name_key(body: &str) -> Result<(), CreftError> {
     // Only check non-empty body — an empty body is a valid (minimal) scenario.
     if body.trim().is_empty() {
@@ -817,6 +834,7 @@ mod add_test_tests {
 
     use crate::error::CreftError;
     use crate::model::AppContext;
+    use crate::skill_test::fixture;
 
     /// Build a project root with `.creft/commands/` and return `(home_tmp, project_tmp, ctx)`.
     fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
@@ -856,6 +874,14 @@ mod add_test_tests {
         std::fs::write(&path, yaml).expect("write fixture");
     }
 
+    fn read_fixture(project: &tempfile::TempDir, skill_name: &str) -> String {
+        let path = project
+            .path()
+            .join(".creft/commands")
+            .join(format!("{skill_name}.test.yaml"));
+        std::fs::read_to_string(&path).expect("read fixture")
+    }
+
     /// A minimal valid scenario body (no `when.argv` key would fail validation,
     /// so this includes the required fields).
     const MINIMAL_BODY: &str = "when:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
@@ -865,151 +891,11 @@ mod add_test_tests {
         format!("---\nskill: {skill}\nname: {name}\n---\n{body}")
     }
 
-    /// Run `cmd_add_test` with the given stdin content supplied via a pipe.
-    fn run_with_stdin(ctx: &AppContext, force: bool, input: &str) -> Result<(), CreftError> {
-        // cmd_add_test reads from actual stdin; we redirect by writing to a temp
-        // file and re-opening it as stdin for the process. Since we cannot swap
-        // process-level stdin in unit tests without unsafe tricks, we drive the
-        // function through an internal helper that accepts a `Read` instead.
-        //
-        // For now we use a temporary pipe via os_pipe/tempfile.
-        use std::io::Write;
-        let mut tmp = tempfile::NamedTempFile::new().expect("tmp");
-        tmp.write_all(input.as_bytes()).expect("write stdin");
-        tmp.flush().expect("flush");
-        let f = std::fs::File::open(tmp.path()).expect("open");
-        run_with_reader(ctx, force, f)
-    }
-
-    /// Drive `cmd_add_test` using any `Read` impl as stdin.
-    fn run_with_reader(
-        ctx: &AppContext,
-        force: bool,
-        reader: impl std::io::Read,
-    ) -> Result<(), CreftError> {
-        // We can't replace process stdin. Instead we inline the logic of
-        // cmd_add_test but skip the IsTerminal check and pass the reader directly.
-        // This keeps the tests self-contained without spawning subprocesses.
-        use crate::model;
-        use crate::skill_test::fixture;
-        use crate::store;
-        use crate::yaml;
-        use std::path::Path;
-        use yaml_rust2::YamlLoader;
-
-        let mut input = String::new();
-        let mut r = reader;
-        r.read_to_string(&mut input).map_err(CreftError::Io)?;
-
-        let (fm_yaml, body) = crate::frontmatter::split(&input)?;
-
-        let fm_docs = YamlLoader::load_from_str(fm_yaml)
-            .map_err(|e| CreftError::Frontmatter(e.to_string()))?;
-        let fm = fm_docs
-            .first()
-            .and_then(|d| d.as_hash())
-            .ok_or_else(|| CreftError::Frontmatter("frontmatter must be a YAML mapping".into()))?;
-
-        let skill_name = fm
-            .get(&yaml_rust2::Yaml::String("skill".into()))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CreftError::Setup("missing required frontmatter field 'skill'".into()))?
-            .to_string();
-
-        let scenario_name = fm
-            .get(&yaml_rust2::Yaml::String("name".into()))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CreftError::Setup("missing required frontmatter field 'name'".into()))?
-            .to_string();
-
-        let skill_path = store::name_to_path_in(ctx, &skill_name, model::Scope::Local)?;
-        if !skill_path.exists() {
-            return Err(CreftError::CommandNotFound(skill_name.clone()));
-        }
-
-        let fixture_path = store::skill_test_fixture_path(ctx, &skill_name, model::Scope::Local)?;
-
-        let quoted_name = if yaml::needs_quoting(&scenario_name) {
-            let mut s = String::new();
-            yaml::emit_quoted(&mut s, &scenario_name);
-            s
-        } else {
-            scenario_name.clone()
-        };
-
-        let indented_body: String = body
-            .lines()
-            .map(|line| {
-                if line.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {line}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let candidate = format!("- name: {quoted_name}\n{indented_body}\n");
-
-        super::check_body_no_name_key(body)?;
-
-        fixture::parse_scenarios_str(&candidate, Path::new("<stdin>"))
-            .map_err(|e| CreftError::Setup(format!("scenario validation failed: {e}")))?;
-
-        let new_nodes = fixture::parse_scenarios_yaml(&candidate, Path::new("<stdin>"))
-            .map_err(|e| CreftError::Setup(format!("scenario validation failed: {e}")))?;
-        let new_node = new_nodes.into_iter().next().ok_or_else(|| {
-            CreftError::Setup("candidate produced no YAML nodes after parsing".into())
-        })?;
-
-        let existing_content = if fixture_path.exists() {
-            std::fs::read_to_string(&fixture_path)?
-        } else {
-            String::new()
-        };
-
-        let existing_scenarios = fixture::parse_scenarios_str(&existing_content, &fixture_path)
-            .map_err(|e| CreftError::Setup(format!("existing fixture is malformed: {e}")))?;
-
-        let collision_idx = fixture::find_scenario_by_name(&existing_scenarios, &scenario_name);
-
-        let new_content = match (collision_idx, force) {
-            (Some(idx), true) => {
-                fixture::replace_scenario(&existing_content, idx, &new_node, &fixture_path)
-                    .map_err(|e| CreftError::Setup(format!("replace failed: {e}")))?
-            }
-            (Some(_), false) => {
-                return Err(CreftError::CommandAlreadyExists(format!(
-                    "test '{scenario_name}' already exists in {}.test.yaml; use --force to replace",
-                    skill_name
-                )));
-            }
-            (None, true) => {
-                eprintln!(
-                    "warning: --force given but no scenario named '{scenario_name}' exists in {}; appending as a new scenario",
-                    fixture_path.display()
-                );
-                let rendered = fixture::render_scenario_yaml(&new_node);
-                fixture::append_scenario(&existing_content, &rendered)
-            }
-            (None, false) => {
-                let rendered = fixture::render_scenario_yaml(&new_node);
-                fixture::append_scenario(&existing_content, &rendered)
-            }
-        };
-
-        if let Some(parent) = fixture_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&fixture_path, &new_content)?;
-        Ok(())
-    }
-
-    fn read_fixture(project: &tempfile::TempDir, skill_name: &str) -> String {
-        let path = project
-            .path()
-            .join(".creft/commands")
-            .join(format!("{skill_name}.test.yaml"));
-        std::fs::read_to_string(&path).expect("read fixture")
+    /// Run `cmd_add_test_with_reader` — the production handler — with the given
+    /// stdin content as a `Cursor`. Tests exercise the same code path that runs
+    /// in production; only the `IsTerminal` check (in `cmd_add_test`) is skipped.
+    fn run(ctx: &AppContext, force: bool, input: &str) -> Result<(), CreftError> {
+        super::cmd_add_test_with_reader(ctx, force, std::io::Cursor::new(input.to_owned()))
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
@@ -1020,7 +906,7 @@ mod add_test_tests {
         write_skill(&project, "setup");
 
         let input = envelope("setup", "fresh install succeeds", MINIMAL_BODY);
-        run_with_stdin(&ctx, false, &input).expect("should succeed");
+        run(&ctx, false, &input).expect("should succeed");
 
         let content = read_fixture(&project, "setup");
         assert!(
@@ -1040,7 +926,7 @@ mod add_test_tests {
         );
 
         let input = envelope("setup", "new scenario", MINIMAL_BODY);
-        run_with_stdin(&ctx, false, &input).expect("should succeed");
+        run(&ctx, false, &input).expect("should succeed");
 
         let content = read_fixture(&project, "setup");
         assert!(
@@ -1064,7 +950,7 @@ mod add_test_tests {
         );
 
         let input = envelope("setup", "second", MINIMAL_BODY);
-        run_with_stdin(&ctx, false, &input).expect("should succeed");
+        run(&ctx, false, &input).expect("should succeed");
 
         let content = read_fixture(&project, "setup");
         assert!(
@@ -1076,18 +962,23 @@ mod add_test_tests {
     #[test]
     fn cmd_add_test_collision_without_force_errors() {
         let (_home, project, ctx) = project_with_commands_dir();
+        let fixture_content =
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n";
         write_skill(&project, "setup");
-        write_fixture(
-            &project,
-            "setup",
-            "- name: foo\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
-        );
+        write_fixture(&project, "setup", fixture_content);
 
         let input = envelope("setup", "foo", MINIMAL_BODY);
-        let result = run_with_stdin(&ctx, false, &input);
+        let result = run(&ctx, false, &input);
         assert!(
             matches!(result, Err(CreftError::CommandAlreadyExists(ref msg)) if msg.contains("foo")),
             "collision without --force must return CommandAlreadyExists; got: {result:?}",
+        );
+
+        // Validate before write: the fixture must be byte-for-byte unchanged.
+        let after = read_fixture(&project, "setup");
+        assert_eq!(
+            fixture_content, after,
+            "fixture must be unchanged when collision is rejected"
         );
     }
 
@@ -1098,24 +989,37 @@ mod add_test_tests {
         write_fixture(
             &project,
             "setup",
-            "- name: foo\n  when:\n    argv: [sh, -c, exit 1]\n  then:\n    exit_code: 1\n- name: other\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
+            "- name: foo\n  when:\n    argv: [sh, -c, exit 1]\n  then:\n    exit_code: 1\n\
+             - name: other\n  when:\n    argv: [sh, -c, exit 0]\n  then:\n    exit_code: 0\n",
         );
 
         let replacement_body = "when:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
         let input = envelope("setup", "foo", replacement_body);
-        run_with_stdin(&ctx, true, &input).expect("should succeed with --force");
+        run(&ctx, true, &input).expect("should succeed with --force");
 
         let content = read_fixture(&project, "setup");
-        // The replaced scenario should now expect exit_code: 0.
-        // The `other` scenario should still be present.
-        assert!(
-            content.contains("other"),
-            "non-colliding scenario must survive the replace; got:\n{content}"
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture must parse after replace");
+
+        assert_eq!(
+            scenarios.len(),
+            2,
+            "both scenarios must be present after replace"
         );
-        // Both scenarios' names should be present.
+
+        let foo = scenarios
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("foo scenario must still exist");
+        assert_eq!(
+            foo.then.exit_code, 0,
+            "replaced 'foo' scenario must have exit_code 0 (replacement value), not 1 (original)"
+        );
+
+        let other = scenarios.iter().find(|s| s.name == "other");
         assert!(
-            content.contains("foo"),
-            "replaced scenario name must still appear in fixture; got:\n{content}"
+            other.is_some(),
+            "non-colliding 'other' scenario must survive the replace"
         );
     }
 
@@ -1130,24 +1034,33 @@ mod add_test_tests {
         );
 
         let input = envelope("setup", "bar", MINIMAL_BODY);
-        run_with_stdin(&ctx, true, &input).expect("should succeed with --force and no collision");
+        run(&ctx, true, &input).expect("should succeed with --force and no collision");
 
         let content = read_fixture(&project, "setup");
-        assert!(
-            content.contains("foo"),
-            "original scenario must survive; got:\n{content}"
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture must parse after --force append");
+
+        assert_eq!(
+            scenarios.len(),
+            2,
+            "--force without collision must append as new, resulting in two scenarios"
         );
         assert!(
-            content.contains("bar"),
-            "new scenario must be appended; got:\n{content}"
+            scenarios.iter().any(|s| s.name == "foo"),
+            "original scenario 'foo' must survive; got names: {:?}",
+            scenarios.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            scenarios.iter().any(|s| s.name == "bar"),
+            "new scenario 'bar' must be appended; got names: {:?}",
+            scenarios.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn cmd_add_test_force_without_collision_emits_added_message() {
-        // Verify that when --force finds no collision, the fixture gets
-        // the new scenario (this mirrors cmd_add_test_force_without_collision_warns_and_appends
-        // but focuses on the outcome content rather than the warning stream).
+        // Scenario appended (not replaced) when --force finds no collision.
+        // The fixture must have both the original and the new scenario as valid entries.
         let (_home, project, ctx) = project_with_commands_dir();
         write_skill(&project, "setup");
         write_fixture(
@@ -1157,29 +1070,21 @@ mod add_test_tests {
         );
 
         let input = envelope("setup", "bar", MINIMAL_BODY);
-        run_with_stdin(&ctx, true, &input).expect("force without collision must succeed");
+        run(&ctx, true, &input).expect("force without collision must succeed");
 
-        // The fixture content has both scenarios — "bar" was appended, not replacing "foo".
         let content = read_fixture(&project, "setup");
-        assert!(
-            content.contains("bar"),
-            "new scenario 'bar' must appear in fixture after --force append; got:\n{content}"
-        );
-        assert!(
-            content.contains("foo"),
-            "original scenario 'foo' must survive --force append; got:\n{content}"
-        );
-        // Parse the fixture to confirm both scenarios are structurally valid.
-        let scenarios = crate::skill_test::fixture::parse_scenarios_str(
-            &content,
-            std::path::Path::new("<test>"),
-        )
-        .expect("fixture after --force append must parse as valid");
+        let scenarios = fixture::parse_scenarios_str(&content, std::path::Path::new("<test>"))
+            .expect("fixture after --force append must parse as valid");
         assert_eq!(
             scenarios.len(),
             2,
             "fixture must have exactly two scenarios after --force append; got {}",
             scenarios.len()
+        );
+        // The new scenario must be structurally valid (not just a string in the file).
+        assert!(
+            scenarios.iter().any(|s| s.name == "bar"),
+            "appended scenario 'bar' must be present and parseable"
         );
     }
 
@@ -1191,7 +1096,7 @@ mod add_test_tests {
         // Body is missing `when.argv` — required by the fixture schema.
         let bad_body = "then:\n  exit_code: 0\n";
         let input = envelope("setup", "broken", bad_body);
-        let result = run_with_stdin(&ctx, false, &input);
+        let result = run(&ctx, false, &input);
         assert!(
             matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("scenario validation failed")),
             "malformed body must return Setup error; got: {result:?}",
@@ -1210,7 +1115,7 @@ mod add_test_tests {
         let (_home, _project, ctx) = project_with_commands_dir();
         // No skill file written — skill does not exist.
         let input = envelope("nonexistent", "scenario", MINIMAL_BODY);
-        let result = run_with_stdin(&ctx, false, &input);
+        let result = run(&ctx, false, &input);
         assert!(
             matches!(result, Err(CreftError::CommandNotFound(_))),
             "missing skill must return CommandNotFound; got: {result:?}",
@@ -1222,7 +1127,7 @@ mod add_test_tests {
         let (_home, _project, ctx) = project_with_commands_dir();
         // Frontmatter without `skill:`.
         let input = "---\nname: myscenario\n---\n".to_string() + MINIMAL_BODY;
-        let result = run_with_stdin(&ctx, false, &input);
+        let result = run(&ctx, false, &input);
         assert!(
             matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("'skill'")),
             "missing skill field must return Setup error naming 'skill'; got: {result:?}",
@@ -1234,7 +1139,7 @@ mod add_test_tests {
         let (_home, _project, ctx) = project_with_commands_dir();
         // Frontmatter without `name:`.
         let input = "---\nskill: setup\n---\n".to_string() + MINIMAL_BODY;
-        let result = run_with_stdin(&ctx, false, &input);
+        let result = run(&ctx, false, &input);
         assert!(
             matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("'name'")),
             "missing name field must return Setup error naming 'name'; got: {result:?}",
@@ -1247,7 +1152,7 @@ mod add_test_tests {
         write_skill(&project, "hooks guard bash");
 
         let input = envelope("hooks guard bash", "guards against empty", MINIMAL_BODY);
-        run_with_stdin(&ctx, false, &input).expect("should succeed for namespaced skill");
+        run(&ctx, false, &input).expect("should succeed for namespaced skill");
 
         let path = project
             .path()
@@ -1267,10 +1172,25 @@ mod add_test_tests {
     fn cmd_add_test_missing_frontmatter_rejected() {
         let (_home, _project, ctx) = project_with_commands_dir();
         // No `---` delimiters at all.
-        let result = run_with_stdin(&ctx, false, "just body text, no frontmatter\n");
+        let result = run(&ctx, false, "just body text, no frontmatter\n");
         assert!(
             matches!(result, Err(CreftError::MissingFrontmatterDelimiter)),
             "missing frontmatter must return MissingFrontmatterDelimiter; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn check_body_no_name_key_rejects_body_with_name_field() {
+        let (_home, project, ctx) = project_with_commands_dir();
+        write_skill(&project, "setup");
+        // Body contains a top-level `name:` key — this conflicts with the frontmatter name.
+        let bad_body =
+            "name: should-not-be-here\nwhen:\n  argv: [sh, -c, exit 0]\nthen:\n  exit_code: 0\n";
+        let input = envelope("setup", "collider", bad_body);
+        let result = run(&ctx, false, &input);
+        assert!(
+            matches!(result, Err(CreftError::Setup(ref msg)) if msg.contains("conflicts")),
+            "body with top-level 'name' key must return a Setup error about conflict; got: {result:?}",
         );
     }
 }

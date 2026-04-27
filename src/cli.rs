@@ -220,36 +220,77 @@ fn docs_or_search(parser: &mut lexopt::Parser, which: BuiltinHelp) -> Result<Par
     }
 }
 
+/// Mutable accumulator for `creft add`'s flag-driven fields. Lives in
+/// `parse_add`'s stack frame; exists only to pass through `apply_add_flag`
+/// without listing seven mutable references in the helper's signature.
+#[derive(Default)]
+struct AddState {
+    name: Option<String>,
+    description: Option<String>,
+    args: Vec<String>,
+    tags: Vec<String>,
+    force: bool,
+    no_validate: bool,
+    global: bool,
+}
+
+impl AddState {
+    fn into_add_command(self) -> Command {
+        Command::Add {
+            name: self.name,
+            description: self.description,
+            args: self.args,
+            tags: self.tags,
+            force: self.force,
+            no_validate: self.no_validate,
+            global: self.global,
+        }
+    }
+}
+
+/// Expand `creft add`'s flag set in-place.
+///
+/// This macro is the single source of truth for all flags accepted by `creft
+/// add`. Both the dispatcher arm (first token) and the trailing loop use it;
+/// adding a future flag is a one-line edit here.
+///
+/// `$arg` is the `lexopt::Arg<'_>` token (consumed by the match).
+/// `$parser` is `&mut lexopt::Parser` for flags that take a value.
+/// `$state` is `&mut AddState`.
+/// `$early` is a label used to return early from the enclosing function via
+/// `return Ok(...)` — the macro expresses early-return arms directly.
+macro_rules! apply_add_flag {
+    ($arg:expr, $parser:expr, $state:expr) => {{
+        use lexopt::prelude::*;
+        match $arg {
+            Long("name") => $state.name = Some($parser.value()?.string()?),
+            Long("description") => $state.description = Some($parser.value()?.string()?),
+            Long("arg") => $state.args.push($parser.value()?.string()?),
+            Long("tag") => $state.tags.push($parser.value()?.string()?),
+            Long("force") => $state.force = true,
+            Long("no-validate") => $state.no_validate = true,
+            Short('g') | Long("global") => $state.global = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Add)),
+            Long("docs") => return docs_or_search($parser, BuiltinHelp::Add),
+            arg => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }};
+}
+
 fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     use lexopt::prelude::*;
 
-    let mut name = None;
-    let mut description = None;
-    let mut args = Vec::new();
-    let mut tags = Vec::new();
-    let mut force = false;
-    let mut no_validate = false;
-    let mut global = false;
+    let mut state = AddState::default();
 
-    // Peek at the first token. If it is the `test` sub-command keyword, route
-    // to parse_add_test and leave the rest of argv in the parser. Otherwise
-    // treat it as a flag (or an error for any other positional).
+    // Consume the first token. If it is the `test` sub-command keyword, route
+    // to parse_add_test. Otherwise feed it to the shared flag handler and
+    // continue the loop.
     //
     // `parse_plugin` and `parse_settings` use the same consume-and-dispatch
     // shape: consume the first token, branch on its value, delegate to a child
     // parser with the remaining argv.
     match parser.next()? {
-        None => {
-            return Ok(Parsed::Command(Command::Add {
-                name,
-                description,
-                args,
-                tags,
-                force,
-                no_validate,
-                global,
-            }));
-        }
+        None => return Ok(Parsed::Command(state.into_add_command())),
         Some(Value(v)) => {
             let s = v.string()?;
             if s == "test" {
@@ -257,42 +298,14 @@ fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
             }
             return Err(CliError::Usage(format!("unexpected argument: {s}")));
         }
-        Some(Long("name")) => name = Some(parser.value()?.string()?),
-        Some(Long("description")) => description = Some(parser.value()?.string()?),
-        Some(Long("arg")) => args.push(parser.value()?.string()?),
-        Some(Long("tag")) => tags.push(parser.value()?.string()?),
-        Some(Long("force")) => force = true,
-        Some(Long("no-validate")) => no_validate = true,
-        Some(Short('g') | Long("global")) => global = true,
-        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Add)),
-        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Add),
-        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+        Some(arg) => apply_add_flag!(arg, parser, state),
     }
 
     while let Some(arg) = parser.next()? {
-        match arg {
-            Long("name") => name = Some(parser.value()?.string()?),
-            Long("description") => description = Some(parser.value()?.string()?),
-            Long("arg") => args.push(parser.value()?.string()?),
-            Long("tag") => tags.push(parser.value()?.string()?),
-            Long("force") => force = true,
-            Long("no-validate") => no_validate = true,
-            Short('g') | Long("global") => global = true,
-            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Add)),
-            Long("docs") => return docs_or_search(parser, BuiltinHelp::Add),
-            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
-        }
+        apply_add_flag!(arg, parser, state);
     }
 
-    Ok(Parsed::Command(Command::Add {
-        name,
-        description,
-        args,
-        tags,
-        force,
-        no_validate,
-        global,
-    }))
+    Ok(Parsed::Command(state.into_add_command()))
 }
 
 fn parse_add_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
