@@ -13,7 +13,7 @@ use crate::search::index::SearchIndex;
 /// One record is emitted per block on completion. The framework reads these from
 /// the child process to build per-skill coverage reports without parsing block
 /// source code.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TraceRecord {
     /// Zero-based block index in the parsed command's `blocks` vector.
     pub block: usize,

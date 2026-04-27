@@ -4,6 +4,9 @@
 //! orchestration, and coverage aggregation. The public surface here is
 //! exposed to `cmd::skills`.
 
+pub(crate) mod assertion;
+pub(crate) mod coverage;
 pub(crate) mod fixture;
 pub(crate) mod placeholder;
 pub(crate) mod sandbox;
+pub(crate) mod scenario;
