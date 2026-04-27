@@ -1187,17 +1187,11 @@ pub(super) fn run_pipe_chain(
         // Close parent's copies of the child's pipe ends immediately after
         // spawn. If kept open, the reader thread will never see EOF.
         //
-        // Bridge values from the reader-setup block below into the reaper spawn
-        // block further below.  Both are always Some(...) after the reader-setup
-        // block executes; the None initialiser is intentional scaffolding.
+        // Spawn the reader thread and clone its exit signal for the reaper. The
+        // block expression returns the pair so the compiler can prove both
+        // bindings are always initialised before the reaper-spawn block uses them.
         #[cfg(unix)]
-        #[allow(unused_assignments)]
-        let mut reader_handle_opt: Option<std::thread::JoinHandle<()>> = None;
-        #[cfg(unix)]
-        #[allow(unused_assignments)]
-        let mut exit_signal_for_reaper: Option<ExitSignal> = None;
-        #[cfg(unix)]
-        {
+        let (reader_handle, exit_signal_for_reaper) = {
             use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
             block_channel.close_child_ends();
             let ctrl_reader = block_channel
@@ -1225,14 +1219,13 @@ pub(super) fn run_pipe_chain(
                 primitive_ctx,
             );
             // A clone of signal is kept in exit_signals for the post-loop trace
-            // and early-exit verdict logic.  The original handle and a second
-            // signal clone are moved into this block's reaper closure so the
-            // reaper can join the reader and read the slot after child.wait().
+            // and early-exit verdict logic. The original signal is moved into
+            // this block's reaper closure so the reaper can read the slot after
+            // joining the reader.
             exit_signals.push(std::sync::Arc::clone(&signal));
             primitive_counters.push((i, counter));
-            reader_handle_opt = Some(reader_handle);
-            exit_signal_for_reaper = Some(signal);
-        }
+            (reader_handle, signal)
+        };
         node_deps_dirs.push(node_deps_dir);
 
         // After spawning the first non-sponge block, record its PID as the
@@ -1331,12 +1324,7 @@ pub(super) fn run_pipe_chain(
             // Move the reader handle and its associated exit signal into the
             // reaper so the reaper can join the reader after child.wait() and
             // read the signal slot before deciding the cancel verdict.
-            let reader_handle = reader_handle_opt
-                .take()
-                .expect("reader_handle always set by the reader-setup block above");
-            let exit_signal = exit_signal_for_reaper
-                .take()
-                .expect("exit_signal always set by the reader-setup block above");
+            let exit_signal = exit_signal_for_reaper;
             std::thread::Builder::new()
                 .name(format!("creft-reaper-{i}"))
                 .spawn(move || {
@@ -1374,7 +1362,7 @@ pub(super) fn run_pipe_chain(
                         .is_some();
                     // Cancel the downstream sponge when either short-circuit
                     // signal fired: exit 99 (legacy) or creft_exit (side channel).
-                    let should_cancel = exit_99 || creft_exit_observed;
+                    let should_cancel = cancel_verdict(exit_99, creft_exit_observed);
                     // Kill the process group on either cancel cause so orphaned
                     // grandchildren that still hold pipe write ends are cleaned up.
                     // Already-exited PIDs are silently ignored by kill_group.
@@ -1648,6 +1636,16 @@ fn find_root_cause(results: &[PipeResult]) -> Option<&PipeResult> {
         .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
 }
 
+/// Returns `true` when the downstream sponge should cancel.
+///
+/// Either the upstream block exited with the legacy early-exit code (99) or it
+/// sent a `creft_exit` message on the side channel before exiting. Both signals
+/// mean "stop — do not proceed with the sponge stage".
+#[cfg(unix)]
+fn cancel_verdict(exit_99: bool, creft_exit_observed: bool) -> bool {
+    exit_99 || creft_exit_observed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1683,15 +1681,12 @@ mod tests {
         assert_eq!(buf, b"hello from pipe");
     }
 
-    /// Verify the cancel-verdict logic the reaper uses after joining its reader.
+    /// Verify `cancel_verdict` — the function the reaper calls after joining its
+    /// reader to decide whether the downstream sponge should cancel.
     ///
-    /// The reaper computes `should_cancel = exit_99 || creft_exit_observed` and
-    /// sends it on the cancel channel.  These tests exercise the three relevant
-    /// cases: creft_exit alone, exit-99 alone, and clean exit with no signal.
-    ///
-    /// End-to-end coverage (real process spawning + sponge thread) is provided
-    /// by the stage-3 skill-test fixture; no unit-level harness for the full
-    /// pipe topology exists in this module.
+    /// The three cases cover: creft_exit alone, exit-99 alone, and clean exit
+    /// with no signal. End-to-end coverage (real process spawning + sponge
+    /// thread) is provided by the stage-3 skill-test fixture.
     #[cfg(unix)]
     mod cancel_verdict {
         use super::super::*;
@@ -1707,20 +1702,17 @@ mod tests {
             let signal = make_exit_signal(Some(0));
             let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<bool>();
 
-            // Simulate the reaper: join the reader (modelled as a no-op thread),
-            // read the signal slot, compute the verdict, and send it.
+            // Simulate the reaper: join the reader (modelled as a no-op thread
+            // whose write is already reflected in the pre-populated slot), read
+            // the signal slot, and send the verdict produced by cancel_verdict.
             let signal_clone = std::sync::Arc::clone(&signal);
             let handle = std::thread::spawn(move || {
                 // "Reader" writes nothing — slot was pre-populated above.
+                drop(signal_clone);
             });
             handle.join().expect("reader thread must not panic");
-            let creft_exit_observed = signal_clone
-                .lock()
-                .expect("exit signal lock poisoned")
-                .is_some();
-            let exit_99 = false; // process exited 0
-            let should_cancel = exit_99 || creft_exit_observed;
-            let _ = cancel_tx.send(should_cancel);
+            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
+            let _ = cancel_tx.send(cancel_verdict(false, creft_exit_observed));
 
             let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
             assert_eq!(
@@ -1738,15 +1730,11 @@ mod tests {
             let signal_clone = std::sync::Arc::clone(&signal);
             let handle = std::thread::spawn(move || {
                 // "Reader" writes nothing — fd 3 carried no Exit message.
+                drop(signal_clone);
             });
             handle.join().expect("reader thread must not panic");
-            let creft_exit_observed = signal_clone
-                .lock()
-                .expect("exit signal lock poisoned")
-                .is_some();
-            let exit_99 = true; // process exited 99
-            let should_cancel = exit_99 || creft_exit_observed;
-            let _ = cancel_tx.send(should_cancel);
+            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
+            let _ = cancel_tx.send(cancel_verdict(true, creft_exit_observed));
 
             let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
             assert_eq!(verdict, true, "exit 99 must cancel the downstream sponge");
@@ -1761,15 +1749,11 @@ mod tests {
             let signal_clone = std::sync::Arc::clone(&signal);
             let handle = std::thread::spawn(move || {
                 // "Reader" writes nothing — fd 3 carried no Exit message.
+                drop(signal_clone);
             });
             handle.join().expect("reader thread must not panic");
-            let creft_exit_observed = signal_clone
-                .lock()
-                .expect("exit signal lock poisoned")
-                .is_some();
-            let exit_99 = false; // process exited 0
-            let should_cancel = exit_99 || creft_exit_observed;
-            let _ = cancel_tx.send(should_cancel);
+            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
+            let _ = cancel_tx.send(cancel_verdict(false, creft_exit_observed));
 
             let verdict = cancel_rx.recv().expect("cancel verdict must be sent");
             assert_eq!(
