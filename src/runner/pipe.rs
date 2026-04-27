@@ -622,6 +622,11 @@ struct WaitArgs {
     last_block_idx: usize,
     exit99_drains: std::collections::HashMap<usize, DupedPipeReader>,
     sponge_handles: Vec<std::thread::JoinHandle<Option<Vec<u8>>>>,
+    /// Side-channel exit signals indexed by absolute block index.
+    /// `None` for sponge blocks (no side channel). After all reapers have sent
+    /// their `ReaperResult`, every `Some(_)` slot is final because each reaper
+    /// joins its reader before sending.
+    exit_signals: Vec<Option<ExitSignal>>,
 }
 
 /// Wait for all children in a Unix pipe chain using a buffered stdout relay.
@@ -658,6 +663,7 @@ fn wait_pipe_children_unix(
         last_block_idx,
         mut exit99_drains,
         sponge_handles,
+        exit_signals,
     } = args;
     let cancel_relay = std::sync::Arc::clone(&cancel);
     // Never writes to the terminal — the main thread decides flush vs. discard.
@@ -791,18 +797,38 @@ fn wait_pipe_children_unix(
     // unwrap_or_default: relay panic yields empty buffer (no output printed, no crash).
     let relay_buffer = relay_handle.join().unwrap_or_default();
 
+    // Every reaper has finished (the result loop drained `rx`), so every signal
+    // slot written by a reader thread is now final. Check whether any non-sponge
+    // block sent a creft_exit signal and set early_exit accordingly.
+    let creft_exit_block: Option<usize> =
+        exit_signals.iter().enumerate().find_map(|(idx, slot)| {
+            slot.as_ref()
+                .and_then(|s| s.lock().ok().and_then(|g| g.map(|_| idx)))
+        });
+
+    if creft_exit_block.is_some() && !early_exit {
+        early_exit = true;
+        // Kill any lingering grandchildren that still hold pipe write ends open.
+        // No-op for already-exited PIDs (ESRCH is silently ignored by kill_group).
+        kill_pipe_group_by_pids(child_pgid, &child_pids);
+    }
+
     if early_exit {
-        // Find which block exited 99. If none found (shouldn't happen), output nothing.
-        let exit99_idx = results
+        // Prefer the exit-99 block (preserves existing behaviour); fall back to the
+        // creft_exit block when no block used the legacy early-exit code.
+        let early_exit_idx: Option<usize> = results
             .iter()
             .find(|r| exit_code_of(&r.status) == Some(EARLY_EXIT))
-            .map(|r| r.block);
+            .map(|r| r.block)
+            .or(creft_exit_block);
 
         // Select output source by priority:
-        // 1. Exit-99 block is last → relay buffer has its output.
+        // 1. Early-exit block is last → relay buffer has its output.
         // 2. Dup'd fd drain → kernel pipe buffer residue (downstream didn't consume it).
         // 3. Sponge captured data → buffered upstream bytes returned via JoinHandle.
-        let output: &[u8] = match exit99_idx {
+        //    This branch handles the creft_exit → sponge topology: block 0 calls
+        //    creft_exit, the sponge cancels and returns its buffered upstream bytes.
+        let output: &[u8] = match early_exit_idx {
             Some(idx) if idx == last_block_idx => &relay_buffer,
             Some(_) => {
                 // Middle or first block. Use dup'd fd drain if non-empty, then fall
@@ -1017,6 +1043,13 @@ pub(super) fn run_pipe_chain(
     #[cfg(unix)]
     let mut primitive_counters: Vec<(usize, super::channel::PrimitiveCounter)> = Vec::new();
 
+    // Exit signals indexed by absolute block index, used by wait_pipe_children_unix
+    // to detect creft_exit as an early-exit reason for output selection.
+    // None for sponge blocks (no side channel); Some for non-sponge blocks.
+    // Length equals cmd.blocks.len() so indexing matches the block-index space.
+    #[cfg(unix)]
+    let mut block_exit_signals: Vec<Option<ExitSignal>> = Vec::with_capacity(n);
+
     for (i, block) in cmd.blocks.iter().enumerate() {
         let is_last = i == n - 1;
 
@@ -1113,6 +1146,8 @@ pub(super) fn run_pipe_chain(
             } else {
                 last_child_stdout = Some(PipeStdout::Pipe(pipe_reader));
             }
+            // Sponge blocks have no side channel and no creft_exit signal.
+            block_exit_signals.push(None);
             continue;
         }
 
@@ -1224,6 +1259,9 @@ pub(super) fn run_pipe_chain(
             // joining the reader.
             exit_signals.push(std::sync::Arc::clone(&signal));
             primitive_counters.push((i, counter));
+            // A second clone goes into block_exit_signals (indexed by absolute block
+            // index) so wait_pipe_children_unix can detect creft_exit for output selection.
+            block_exit_signals.push(Some(std::sync::Arc::clone(&signal)));
             (reader_handle, signal)
         };
         node_deps_dirs.push(node_deps_dir);
@@ -1438,6 +1476,7 @@ pub(super) fn run_pipe_chain(
                 last_block_idx: n - 1,
                 exit99_drains,
                 sponge_handles,
+                exit_signals: block_exit_signals,
             },
             ctx.cancel_arc(),
         )?
