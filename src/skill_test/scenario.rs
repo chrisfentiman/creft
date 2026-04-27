@@ -773,6 +773,19 @@ mod tests {
         assert_eq!(outcome.status, ScenarioStatus::Pass);
     }
 
+    #[test]
+    fn stdin_json_reaches_child_as_serialised_bytes() {
+        use crate::skill_test::fixture::StdinPayload;
+        let (_tmp, app) = bare_app();
+        let mut scenario = minimal_scenario(vec!["cat".to_owned()]);
+        scenario.when.stdin = Some(StdinPayload::Json(serde_json::json!({"k": "v"})));
+        // serde_json::to_vec produces compact JSON without trailing newline.
+        // cat echoes the bytes unchanged, so stdout must contain the serialised value.
+        scenario.then.stdout_contains = vec![r#"{"k":"v"}"#.to_owned()];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(outcome.status, ScenarioStatus::Pass);
+    }
+
     // ── Coverage trace ────────────────────────────────────────────────────────
 
     /// Write a minimal one-block bash skill into a temp CREFT_HOME and return
@@ -796,10 +809,11 @@ mod tests {
         (home, skill_name.to_owned())
     }
 
-    /// The full Stage-4 seam: `scenario::run` spawns `creft <skill>`, the child
-    /// writes NDJSON to fd 5, `parse_trace` deserialises each line into
-    /// `TraceRecord`, and `check_coverage` matches the expectation. A passing
-    /// `then.coverage` expectation on both `blocks` and `primitives` must yield
+    /// End-to-end seam from `scenario::run` through `parse_trace` to
+    /// `check_coverage`: spawns `creft <skill>`, the child writes NDJSON to the
+    /// trace fd, `parse_trace` deserialises each line into `TraceRecord`, and
+    /// `check_coverage` matches the expectation. A passing `then.coverage`
+    /// expectation on both `blocks` and `primitives` must yield
     /// `ScenarioStatus::Pass` and a non-empty trace.
     #[test]
     fn coverage_trace_end_to_end_passes_for_matching_expectation() {
@@ -908,6 +922,39 @@ mod tests {
             "expected SetupError, got {:?}",
             outcome.status
         );
+    }
+
+    #[test]
+    fn after_shell_runs_even_when_scenario_fails() {
+        use crate::skill_test::fixture::ShellHook;
+        let (_tmp, app) = bare_app();
+        // Force a failure: the command exits 0 but we expect exit code 1.
+        let mut scenario =
+            minimal_scenario(vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()]);
+        scenario.then.exit_code = 1;
+        scenario.after = Some(ShellHook {
+            shell: "touch {sandbox}/after-ran".to_owned(),
+        });
+        // Keep the sandbox so we can inspect the marker file after run returns.
+        let opts = RunOpts {
+            creft_binary: Some(creft_bin()),
+            default_timeout: Duration::from_secs(10),
+            keep_on_failure: true,
+        };
+        let outcome = run(&scenario, &app, &opts);
+        assert!(
+            matches!(outcome.status, ScenarioStatus::Fail(_)),
+            "expected Fail, got {:?}",
+            outcome.status
+        );
+        let kept = outcome
+            .kept_path
+            .expect("kept_path must be set for a failing scenario with keep_on_failure");
+        assert!(
+            kept.join("after-ran").exists(),
+            "after.shell must run and create the marker file even when the scenario fails"
+        );
+        std::fs::remove_dir_all(&kept).ok();
     }
 
     // ── Keep on failure ───────────────────────────────────────────────────────
