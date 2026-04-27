@@ -1137,12 +1137,12 @@ mod renderer {
 
     pub fn render_remove_test() -> String {
         page_with_options(
-            "Delete a named test scenario from a skill's fixture",
+            "Delete one scenario from a skill's *.test.yaml fixture",
             "creft remove test --skill <name> --name <scenario>",
             REMOVE_TEST_LONG_ABOUT,
             &[
-                ("--skill <name>", "The skill whose fixture to modify"),
-                ("--name <scenario>", "The exact scenario name to delete"),
+                ("--skill <name>", "Target skill"),
+                ("--name <name>", "Exact value of the scenario's name field"),
             ],
         )
     }
@@ -1386,12 +1386,12 @@ mod renderer {
 
     pub fn render_remove_test_short() -> String {
         page_with_options(
-            "Delete a named test scenario from a skill's fixture",
+            "Delete one scenario from a skill's *.test.yaml fixture",
             "creft remove test --skill <name> --name <scenario>",
             REMOVE_TEST_SHORT_ABOUT,
             &[
-                ("--skill <name>", "The skill whose fixture to modify"),
-                ("--name <scenario>", "The exact scenario name to delete"),
+                ("--skill <name>", "Target skill"),
+                ("--name <name>", "Exact value of the scenario's name field"),
             ],
         )
     }
