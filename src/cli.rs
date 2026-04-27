@@ -37,6 +37,17 @@ pub(crate) enum Command {
         no_validate: bool,
         global: bool,
     },
+    /// `creft add test [--force]`
+    ///
+    /// Reads a test scenario from stdin (frontmatter + YAML body) and appends
+    /// it to the skill's fixture file. `force` allows replacing an existing
+    /// scenario with the same name; without it, a name collision is an error.
+    AddTest {
+        /// Replace an existing scenario with the same `name` instead of erroring.
+        /// When `force` is set but no scenario with the supplied `name` exists,
+        /// `cmd_add_test` writes a stderr warning and proceeds to append.
+        force: bool,
+    },
     List {
         tag: Option<String>,
         all: bool,
@@ -220,6 +231,44 @@ fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     let mut no_validate = false;
     let mut global = false;
 
+    // Peek at the first token. If it is the `test` sub-command keyword, route
+    // to parse_add_test and leave the rest of argv in the parser. Otherwise
+    // treat it as a flag (or an error for any other positional).
+    //
+    // `parse_plugin` and `parse_settings` use the same consume-and-dispatch
+    // shape: consume the first token, branch on its value, delegate to a child
+    // parser with the remaining argv.
+    match parser.next()? {
+        None => {
+            return Ok(Parsed::Command(Command::Add {
+                name,
+                description,
+                args,
+                tags,
+                force,
+                no_validate,
+                global,
+            }));
+        }
+        Some(Value(v)) => {
+            let s = v.string()?;
+            if s == "test" {
+                return parse_add_test(parser);
+            }
+            return Err(CliError::Usage(format!("unexpected argument: {s}")));
+        }
+        Some(Long("name")) => name = Some(parser.value()?.string()?),
+        Some(Long("description")) => description = Some(parser.value()?.string()?),
+        Some(Long("arg")) => args.push(parser.value()?.string()?),
+        Some(Long("tag")) => tags.push(parser.value()?.string()?),
+        Some(Long("force")) => force = true,
+        Some(Long("no-validate")) => no_validate = true,
+        Some(Short('g') | Long("global")) => global = true,
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Add)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Add),
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    }
+
     while let Some(arg) = parser.next()? {
         match arg {
             Long("name") => name = Some(parser.value()?.string()?),
@@ -244,6 +293,23 @@ fn parse_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
         no_validate,
         global,
     }))
+}
+
+fn parse_add_test(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut force = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("force") => force = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::AddTest)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::AddTest),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::AddTest { force }))
 }
 
 fn parse_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
@@ -1084,5 +1150,106 @@ mod tests {
             matches!(result, Err(CliError::Usage(_))),
             "third positional must return Usage error; got: {result:?}",
         );
+    }
+
+    // ── `creft add test` parser tests ────────────────────────────────────────
+
+    #[test]
+    fn add_test_routes_to_add_test_variant() {
+        let result = parse_args(&["add", "test"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Command(Command::AddTest { force: false })),
+            "`creft add test` must return Command::AddTest {{ force: false }}; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_test_force_flag_sets_force_true() {
+        let result = parse_args(&["add", "test", "--force"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Command(Command::AddTest { force: true })),
+            "`creft add test --force` must return Command::AddTest {{ force: true }}; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_test_help_returns_help_variant() {
+        let result = parse_args(&["add", "test", "--help"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Help(crate::help::BuiltinHelp::AddTest)),
+            "`creft add test --help` must return Parsed::Help(AddTest); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_test_docs_returns_docs_variant() {
+        let result = parse_args(&["add", "test", "--docs"]).unwrap().unwrap();
+        assert!(
+            matches!(result, Parsed::Docs(crate::help::BuiltinHelp::AddTest)),
+            "`creft add test --docs` must return Parsed::Docs(AddTest); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_test_unknown_flag_returns_usage_error() {
+        let result = parse_args(&["add", "test", "--bogus"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "`creft add test --bogus` must return Usage error; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_with_no_test_keyword_keeps_existing_behavior() {
+        let result = parse_args(&["add", "--name", "foo"]).unwrap().unwrap();
+        let Parsed::Command(Command::Add { name, .. }) = result else {
+            panic!("expected Command::Add; got: {result:?}");
+        };
+        assert_eq!(name.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn add_with_unknown_positional_returns_usage_error() {
+        let result = parse_args(&["add", "bogus"]);
+        assert!(
+            matches!(result, Err(CliError::Usage(_))),
+            "`creft add bogus` must return Usage error (unknown positional); got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn add_flag_handler_is_one_source_of_truth() {
+        // Both orderings of flags must produce the same Command::Add value,
+        // proving the leading-dispatcher branch and the trailing loop both
+        // go through the same apply_add_flag handler.
+        let result_a = parse_args(&["add", "--name", "foo", "--tag", "x", "-g"])
+            .unwrap()
+            .unwrap();
+        let result_b = parse_args(&["add", "-g", "--name", "foo", "--tag", "x"])
+            .unwrap()
+            .unwrap();
+
+        let Parsed::Command(Command::Add {
+            name: name_a,
+            tags: tags_a,
+            global: global_a,
+            ..
+        }) = result_a
+        else {
+            panic!("expected Command::Add from first invocation");
+        };
+        let Parsed::Command(Command::Add {
+            name: name_b,
+            tags: tags_b,
+            global: global_b,
+            ..
+        }) = result_b
+        else {
+            panic!("expected Command::Add from second invocation");
+        };
+
+        assert_eq!(name_a, name_b);
+        assert_eq!(tags_a, tags_b);
+        assert_eq!(global_a, global_b);
     }
 }

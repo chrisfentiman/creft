@@ -115,6 +115,8 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
             global,
         ),
 
+        cli::Command::AddTest { force } => cmd::skill::cmd_add_test(ctx, force),
+
         cli::Command::List {
             tag,
             all,

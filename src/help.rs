@@ -627,6 +627,83 @@ Examples:
 
 Run 'creft completions --docs' for the full reference.";
 
+const ADD_TEST_LONG_ABOUT: &str = "\
+Author a new scenario from stdin, mirroring `creft add` for skills.
+
+The stdin envelope uses YAML frontmatter (`---` delimiters) to supply the
+target skill and scenario name, followed by the scenario YAML body:
+
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup]
+  then:
+    exit_code: 0
+
+Required frontmatter fields:
+  skill   The target skill name (e.g. `setup`, `hooks guard bash`).
+          The skill must exist in the local root.
+  name    The new scenario's name. Must be unique within the fixture
+          unless --force is supplied.
+
+The scenario body uses the same shape as hand-authored `*.test.yaml` entries:
+`given`, `before`, `when`, `then`, `after`, and `notes` keys.
+
+The fixture file is `<local-root>/commands/<skill-path>.test.yaml`.
+If the file does not exist it is created. The existing file is otherwise
+preserved verbatim -- comments, blank lines, and hand-formatted YAML survive.
+
+When --force is supplied and a scenario with the same name exists, the entire
+file is re-emitted through the YAML emitter to perform the replacement. YAML
+comments are not preserved by the emitter; the success message names this
+trade-off so it is visible to the caller.
+
+When --force is supplied but no matching scenario exists, the command writes a
+warning to stderr and proceeds to append the new scenario:
+  warning: --force given but no scenario named '<name>' exists in <path>; appending as a new scenario
+
+Examples:
+  creft add test <<'EOF'
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup, --claude-dir, /tmp/target]
+  then:
+    exit_code: 0
+  EOF
+
+  creft add test --force <<'EOF'
+  ---
+  skill: setup
+  name: fresh install succeeds
+  ---
+  when:
+    argv: [creft, setup, --claude-dir, /tmp/target]
+  then:
+    exit_code: 1
+  EOF
+
+Errors:
+  Missing piped stdin             creft add test requires piped stdin
+  Missing skill: field            missing required frontmatter field 'skill'
+  Missing name: field             missing required frontmatter field 'name'
+  Skill not found                 command not found: <skill>
+  Malformed scenario body         scenario validation failed: ...
+  Name collision (no --force)     command already exists: test '<name>' ...";
+
+const ADD_TEST_SHORT_ABOUT: &str = "\
+Pipe a scenario envelope (frontmatter + YAML body) to stdin.
+
+Examples:
+  creft add test <<'EOF'          Append a new scenario
+  creft add test --force <<'EOF'  Replace an existing scenario by name
+
+Run 'creft add test --docs' for the full reference.";
+
 // ── Builtin entry list ──────────────────────────────────────────────────────
 
 /// A built-in command's listing metadata, used by the root listing.
@@ -701,6 +778,7 @@ pub(crate) fn builtins() -> &'static [BuiltinEntry] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinHelp {
     Add,
+    AddTest,
     List,
     Show,
     Remove,
@@ -732,6 +810,7 @@ impl BuiltinHelp {
     pub(crate) fn cli_name(self) -> &'static str {
         match self {
             Self::Add => "add",
+            Self::AddTest => "add test",
             Self::List => "list",
             Self::Show => "show",
             Self::Remove => "remove",
@@ -772,6 +851,7 @@ impl BuiltinHelp {
     pub(crate) fn all_variants() -> &'static [BuiltinHelp] {
         &[
             Self::Add,
+            Self::AddTest,
             Self::List,
             Self::Show,
             Self::Remove,
@@ -805,6 +885,7 @@ impl BuiltinHelp {
 pub(crate) fn render_short(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add_short(),
+        BuiltinHelp::AddTest => renderer::render_add_test_short(),
         BuiltinHelp::List => renderer::render_list_short(),
         BuiltinHelp::Show => renderer::render_show_short(),
         BuiltinHelp::Remove => renderer::render_remove_short(),
@@ -835,6 +916,7 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
 pub(crate) fn render_docs(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add(),
+        BuiltinHelp::AddTest => renderer::render_add_test(),
         BuiltinHelp::List => renderer::render_list(),
         BuiltinHelp::Show => renderer::render_show(),
         BuiltinHelp::Remove => renderer::render_remove(),
@@ -875,12 +957,13 @@ mod renderer {
     use crate::wrap::{MAX_WIDTH, wrap_description, wrap_text};
 
     use super::{
-        ADD_LONG_ABOUT, ADD_SHORT_ABOUT, COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT,
-        DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT, INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT,
-        LIST_SHORT_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT,
-        PLUGIN_DEACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT,
-        PLUGIN_INSTALL_SHORT_ABOUT, PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT,
-        PLUGIN_LONG_ABOUT, PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
+        ADD_LONG_ABOUT, ADD_SHORT_ABOUT, ADD_TEST_LONG_ABOUT, ADD_TEST_SHORT_ABOUT,
+        COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT, DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT,
+        INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT, LIST_SHORT_ABOUT,
+        PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT,
+        PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_INSTALL_SHORT_ABOUT,
+        PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT, PLUGIN_LONG_ABOUT,
+        PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
         PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
         PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, SETTINGS_LONG_ABOUT,
         SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT,
@@ -937,6 +1020,21 @@ mod renderer {
                 ("--no-validate", "Skip validation checks"),
                 ("--global, -g", "Save to global ~/.creft/ storage"),
             ],
+        )
+    }
+
+    pub fn render_add_test() -> String {
+        page_with_options(
+            "Append or replace a test scenario from stdin",
+            "creft add test [OPTIONS]",
+            ADD_TEST_LONG_ABOUT,
+            &[(
+                "--force",
+                "Replace an existing scenario with the same name. Without a \
+                 collision, --force is a no-op (the scenario is appended) and \
+                 a warning is printed. Note: replacement re-emits the file via \
+                 the YAML emitter; comments may be lost.",
+            )],
         )
     }
 
@@ -1151,6 +1249,18 @@ mod renderer {
                 ("--no-validate", "Skip validation checks"),
                 ("--global, -g", "Save to global ~/.creft/ storage"),
             ],
+        )
+    }
+
+    pub fn render_add_test_short() -> String {
+        page_with_options(
+            "Append or replace a test scenario from stdin",
+            "creft add test [OPTIONS]",
+            ADD_TEST_SHORT_ABOUT,
+            &[(
+                "--force",
+                "Replace an existing scenario by name (warns if no collision)",
+            )],
         )
     }
 
