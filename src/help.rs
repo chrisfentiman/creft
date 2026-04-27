@@ -171,10 +171,14 @@ Deletes a skill from the registry
 Removes the skill file. Empty namespace directories are cleaned up
 automatically.
 
+The skill name is supplied via --skill; bare positional names are not
+accepted. Quote multi-word names so the shell passes them as a single
+argument: --skill \"gh issue-body\".
+
 Examples:
   creft remove --skill hello
   creft remove --skill \"gh issue-body\"
-  creft remove --skill hello -g";
+  creft remove --skill hello --global";
 
 /// Extended description shown by `creft up --docs`, listing supported AI coding systems and install locations.
 pub const UP_LONG_ABOUT: &str = "\
