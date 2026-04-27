@@ -9,9 +9,9 @@
 //! ```
 //!
 //! On [`Drop`], the temp dir is removed unless [`Sandbox::set_keep`] was
-//! called with `true`. The keep decision belongs to the caller — Stage 4's
-//! scenario runner evaluates the outcome and flips the flag when `--keep`
-//! is active and the scenario failed.
+//! called with `true`. The keep decision belongs to the caller — the scenario
+//! runner evaluates the outcome and flips the flag when `--keep` is active
+//! and the scenario failed.
 
 use std::path::{Path, PathBuf};
 
@@ -53,7 +53,8 @@ pub(crate) enum SandboxError {
 ///   home/          HOME for the child
 /// ```
 ///
-/// On `Drop`, removes the temp dir unless `keep_on_drop` is `true`.
+/// On [`Drop`], removes the temp dir unless [`set_keep`][Self::set_keep] has
+/// been called with `true`.
 pub(crate) struct Sandbox {
     tempdir: TempDir,
     source: PathBuf,
@@ -64,8 +65,8 @@ impl Sandbox {
     /// Allocate a fresh sandbox under `std::env::temp_dir()`.
     ///
     /// Creates `source/` and `home/` subdirectories immediately.
-    /// `keep_on_drop` defaults to `false`; call [`set_keep`][Self::set_keep]
-    /// to preserve the directory across `Drop`.
+    /// Cleanup-on-drop is enabled by default; call [`set_keep(true)`][Self::set_keep]
+    /// to preserve the directory across [`Drop`].
     pub(crate) fn new() -> Result<Self, SandboxError> {
         let tempdir = TempDir::new_in(std::env::temp_dir()).map_err(SandboxError::Create)?;
 
@@ -89,7 +90,7 @@ impl Sandbox {
     /// construction), `TempDir`'s own `Drop` removes the directory.
     ///
     /// This method implements the mechanism. The policy — when to call it —
-    /// belongs to the caller (Stage 4's scenario runner).
+    /// belongs to the caller (the scenario runner).
     pub(crate) fn set_keep(&mut self, keep: bool) {
         self.tempdir.disable_cleanup(keep);
     }
