@@ -1542,32 +1542,19 @@ mod tests {
         assert_eq!(name, "bar");
     }
 
-    #[test]
-    fn remove_test_bare_returns_usage_mentioning_skill() {
-        // Stage 2 changes this: bare `creft remove test` is no longer a
-        // help-page fall-through; both --skill and --name are required.
-        let result = parse_args(&["remove", "test"]);
+    #[rstest]
+    #[case::bare(&["remove", "test"] as &[&str], "--skill")]
+    #[case::missing_name(&["remove", "test", "--skill", "foo"], "--name")]
+    #[case::missing_skill(&["remove", "test", "--name", "bar"], "--skill")]
+    fn remove_test_missing_required_flag_returns_usage(
+        #[case] args: &[&str],
+        #[case] expected_substr: &str,
+    ) {
+        let result = parse_args(args);
         assert!(
-            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("--skill")),
-            "`creft remove test` must return Usage mentioning --skill; got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn remove_test_missing_name_returns_usage_mentioning_name() {
-        let result = parse_args(&["remove", "test", "--skill", "foo"]);
-        assert!(
-            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("--name")),
-            "`creft remove test --skill foo` must return Usage mentioning --name; got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn remove_test_missing_skill_returns_usage_mentioning_skill() {
-        let result = parse_args(&["remove", "test", "--name", "bar"]);
-        assert!(
-            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains("--skill")),
-            "`creft remove test --name bar` must return Usage mentioning --skill; got: {result:?}",
+            matches!(result, Err(CliError::Usage(ref msg)) if msg.contains(expected_substr)),
+            "`creft {:?}` must return Usage mentioning '{expected_substr}'; got: {result:?}",
+            args,
         );
     }
 
@@ -1580,21 +1567,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_test_empty_skill_returns_usage_cannot_be_empty() {
-        let result = parse_args(&["remove", "test", "--skill", "", "--name", "bar"]);
+    #[rstest]
+    #[case::empty_skill(&["remove", "test", "--skill", "", "--name", "bar"] as &[&str], "--skill cannot be empty")]
+    #[case::empty_name(&["remove", "test", "--skill", "foo", "--name", ""], "--name cannot be empty")]
+    fn remove_test_empty_required_flag_returns_cannot_be_empty(
+        #[case] args: &[&str],
+        #[case] expected_msg: &str,
+    ) {
+        let result = parse_args(args);
         assert!(
-            matches!(result, Err(CliError::Usage(ref msg)) if msg == "--skill cannot be empty"),
-            "`creft remove test --skill \"\" --name bar` must return \"--skill cannot be empty\"; got: {result:?}",
-        );
-    }
-
-    #[test]
-    fn remove_test_empty_name_returns_usage_cannot_be_empty() {
-        let result = parse_args(&["remove", "test", "--skill", "foo", "--name", ""]);
-        assert!(
-            matches!(result, Err(CliError::Usage(ref msg)) if msg == "--name cannot be empty"),
-            "`creft remove test --skill foo --name \"\"` must return \"--name cannot be empty\"; got: {result:?}",
+            matches!(result, Err(CliError::Usage(ref msg)) if msg == expected_msg),
+            "`creft {:?}` must return Usage(\"{expected_msg}\"); got: {result:?}",
+            args,
         );
     }
 

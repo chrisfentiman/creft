@@ -411,18 +411,24 @@ pub(crate) fn remove_scenario_at(
                     first_significant_seen = true;
                 }
 
-                // Check for YAML document-start marker `---` on any significant
-                // line. Trim trailing whitespace before comparing.
-                let trimmed = line[pos..]
-                    .iter()
-                    .rposition(|&b| !b.is_ascii_whitespace())
-                    .map(|end| &line[pos..=pos + end])
-                    .unwrap_or(&line[pos..]);
-                if trimmed == b"---" {
-                    return Err(FixtureError::Parse {
-                        path: path_label.to_owned(),
-                        message: "remove_scenario_at: YAML document-start marker '---' is not supported in test fixtures".to_owned(),
-                    });
+                // Check for YAML document-start marker `---`. The YAML 1.2
+                // grammar places the document-start marker at column 0 (zero
+                // leading whitespace). Lines with `---` content inside block
+                // scalars always appear at deeper indent than the parent key,
+                // so they have `pos > 0` and are not document-start markers.
+                // Only check lines that begin at column 0 (`pos == 0`).
+                if pos == 0 {
+                    let trimmed = line[pos..]
+                        .iter()
+                        .rposition(|&b| !b.is_ascii_whitespace())
+                        .map(|end| &line[pos..=pos + end])
+                        .unwrap_or(&line[pos..]);
+                    if trimmed == b"---" {
+                        return Err(FixtureError::Parse {
+                            path: path_label.to_owned(),
+                            message: "remove_scenario_at: YAML document-start marker '---' is not supported in test fixtures".to_owned(),
+                        });
+                    }
                 }
             }
         }
@@ -3076,6 +3082,12 @@ mod tests {
     #[case::marker_after_comment(
         "# header\n---\n- name: alpha\n  when:\n    argv: [creft, a]\n  then:\n    exit_code: 0\n"
     )]
+    #[case::marker_crlf_line_ending(
+        "---\r\n- name: alpha\n  when:\n    argv: [creft, a]\n  then:\n    exit_code: 0\n"
+    )]
+    #[case::marker_trailing_space(
+        "--- \n- name: alpha\n  when:\n    argv: [creft, a]\n  then:\n    exit_code: 0\n"
+    )]
     fn remove_scenario_at_rejects_document_start_marker(#[case] input: &str) {
         let err = remove_scenario_at(input, 0, label()).unwrap_err();
         assert!(
@@ -3090,12 +3102,92 @@ mod tests {
     }
 
     #[test]
+    fn remove_scenario_at_handles_dash_dash_dash_in_block_scalar() {
+        use pretty_assertions::assert_str_eq;
+
+        // A fixture with `---` appearing inside a `|` block scalar (markdown
+        // frontmatter is the canonical real-world case). Step 0 must not reject
+        // this — `---` at indented positions is plain text, not a document-start
+        // marker. The document-start marker check is column-zero only.
+        let fixture = "\
+- name: with frontmatter
+  given:
+    files:
+      \"doc.md\": |
+        ---
+        title: my doc
+        ---
+        Body
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+- name: other scenario
+  when:
+    argv: [creft, b]
+  then:
+    exit_code: 0
+";
+
+        // Removing entry 1 must succeed and leave entry 0 byte-for-byte intact,
+        // including the `---` lines inside the block scalar.
+        let result =
+            remove_scenario_at(fixture, 1, label()).expect("block-scalar --- must not be rejected");
+        let expected = "\
+- name: with frontmatter
+  given:
+    files:
+      \"doc.md\": |
+        ---
+        title: my doc
+        ---
+        Body
+  when:
+    argv: [creft, a]
+  then:
+    exit_code: 0
+";
+        assert_str_eq!(expected, result);
+    }
+
+    #[test]
     fn step1_entry_count_matches_schema_validator_on_real_fixtures() {
         // Corpus drift protection: the byte-scan matcher and the typed schema
-        // validator must agree on the entry count for every fixture the codebase
-        // produces. If the corpus is empty, use an in-memory fixture to at least
-        // verify the invariant holds on a well-formed input.
-        let inline_corpus = [
+        // validator must agree on the entry count for every real fixture in the
+        // repo's commands/ tree. The inline corpus is always checked as a
+        // baseline; real fixtures are added when the commands/ tree is non-empty.
+
+        // Walk the repo's commands/ tree for *.test.yaml files. CARGO_MANIFEST_DIR
+        // points to the crate root (the repo root for this single-crate project).
+        let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("commands");
+
+        /// Recursively collect all *.test.yaml paths under `dir`. Returns an
+        /// empty Vec when the directory does not exist.
+        fn collect_test_yaml_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            let mut found = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    found.extend(collect_test_yaml_files(&path));
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".test.yaml"))
+                    .unwrap_or(false)
+                {
+                    found.push(path);
+                }
+            }
+            found
+        }
+
+        let real_fixtures = collect_test_yaml_files(&commands_dir);
+
+        // Inline baseline — always asserted regardless of whether real fixtures exist.
+        let inline_corpus: &[(&str, &str)] = &[
             (
                 "<two-entries>",
                 "\
@@ -3136,11 +3228,33 @@ mod tests {
         for (label, content) in inline_corpus {
             let byte_scan_count = collect_top_level_entry_offsets(content).len();
             let schema_count = parse_scenarios_str(content, Path::new(label))
-                .expect("fixture must parse")
+                .expect("inline fixture must parse")
                 .len();
             assert_eq!(
                 byte_scan_count, schema_count,
-                "byte-scan entry count ({byte_scan_count}) must match schema validator count ({schema_count}) for fixture '{label}'"
+                "byte-scan entry count ({byte_scan_count}) must match schema validator count \
+                 ({schema_count}) for fixture '{label}'"
+            );
+        }
+
+        // Assert parity for every real fixture discovered in commands/.
+        for fixture_path in &real_fixtures {
+            let content = std::fs::read_to_string(fixture_path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", fixture_path.display()));
+            let label = fixture_path.display().to_string();
+            let byte_scan_count = collect_top_level_entry_offsets(&content).len();
+            let schema_count = parse_scenarios_str(&content, fixture_path)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "real fixture {} must parse cleanly: {e}",
+                        fixture_path.display()
+                    )
+                })
+                .len();
+            assert_eq!(
+                byte_scan_count, schema_count,
+                "byte-scan entry count ({byte_scan_count}) must match schema validator count \
+                 ({schema_count}) for real fixture '{label}'"
             );
         }
     }
