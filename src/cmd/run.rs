@@ -218,11 +218,15 @@ pub fn run_user_command(ctx: &AppContext, args: &[String]) -> Result<(), CreftEr
     let trace_writer = std::env::var("CREFT_TRACE_FD")
         .ok()
         .and_then(|s| s.parse::<std::os::unix::io::RawFd>().ok())
+        // Reject stdin/stdout/stderr: taking ownership of fd 0/1/2 would close
+        // those streams for the process when the TraceWriter is dropped.
+        .filter(|&fd| fd > 2)
         .map(|fd| {
             // SAFETY: CREFT_TRACE_FD names an fd the framework dup'd into this
             // process via pre_exec before exec; ownership transferred to this
             // process at exec time. We are the unique owner of the fd from this
             // point until the returned TraceWriter is dropped at end-of-run.
+            // The fd > 2 guard above ensures stdin/stdout/stderr are never claimed.
             unsafe { runner::RunContext::trace_writer_from_fd(fd) }
         });
     #[cfg(not(unix))]
