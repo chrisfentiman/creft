@@ -645,10 +645,13 @@ Example fixture:
         blocks: [0]
 
 Filtering by name:
-  SKILL and SCENARIO are patterns. A pattern with no `*` or `?` is a
-  substring — any name containing it matches. A pattern with `*` or `?`
-  is an fnmatch glob anchored at both ends: `*` matches a run of
-  characters, `?` matches one character.
+  SKILL patterns match skill basenames (the filename before `.test.yaml`).
+  Plain text matches a basename exactly. Patterns containing `*` or `?`
+  are anchored fnmatch globs.
+
+  SCENARIO and --filter patterns match scenario names. A pattern with no
+  `*` or `?` is a substring — any name containing it matches. A pattern
+  with `*` or `?` is an anchored fnmatch glob.
 
   --filter <pattern> matches scenario names across every discovered
   fixture. SKILL is optional with --filter; when supplied, it narrows
@@ -658,7 +661,9 @@ Filtering by name:
   pattern is rejected.
 
 Examples:
-  creft skills test merge*                  # all skills starting with \"merge\"
+  creft skills test setup                   # the 'setup' skill (exact basename match)
+  creft skills test \"setup*\"                # all skills whose basename starts with \"setup\"
+  creft skills test merge*                  # all skills whose basename starts with \"merge\"
   creft skills test setup fresh-install     # one scenario in the setup skill
   creft skills test --filter \"merge*\"       # every scenario starting with \"merge\" (any skill)
   creft skills test setup --filter \"fresh\"  # setup scenarios containing \"fresh\"";
@@ -668,7 +673,8 @@ Tests are YAML fixtures co-located with the skill they test.
 
 Examples:
   creft skills test                       Run all fixture tests
-  creft skills test setup                 Run tests for the 'setup' skill
+  creft skills test setup                 Run tests for the 'setup' skill (exact basename)
+  creft skills test \"setup*\"              Run tests for all skills starting with 'setup'
   creft skills test \"merge*\"              Run tests for skills starting with \"merge\"
   creft skills test --filter \"merge*\"     Run every scenario starting with \"merge\", across all skills
   creft skills test setup --filter fresh  Run setup scenarios whose name contains \"fresh\"

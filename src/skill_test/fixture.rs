@@ -1586,7 +1586,7 @@ fn yaml_to_json_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skill_test::match_pattern;
+    use crate::skill_test::match_pattern::{self, MatchKind};
     use pretty_assertions::assert_eq;
     use rstest::rstest;
     use std::io::Write;
@@ -1976,9 +1976,9 @@ mod tests {
         assert_eq!(names, vec!["bar/baz.test.yaml", "foo.test.yaml"]);
     }
 
-    /// Compile a pattern into a `Matcher`, panicking on any error (test helper).
+    /// Compile a SKILL pattern into a `Matcher`, panicking on any error (test helper).
     fn mk(pattern: &str) -> Matcher {
-        match_pattern::compile(pattern).expect("test pattern must compile")
+        match_pattern::compile(pattern, MatchKind::Exact).expect("test pattern must compile")
     }
 
     #[rstest]
@@ -2787,15 +2787,19 @@ mod tests {
     }
 
     #[test]
-    fn is_fixture_match_with_substring_matches_anywhere() {
+    fn is_fixture_match_with_exact_plain_text_matches_whole_basename() {
         let matcher = mk("clean");
         assert!(
-            is_fixture_match(Path::new("merge-clean.test.yaml"), Some(&matcher)),
-            "merge-clean contains 'clean'"
+            is_fixture_match(Path::new("clean.test.yaml"), Some(&matcher)),
+            "clean matches exact basename 'clean'"
+        );
+        assert!(
+            !is_fixture_match(Path::new("merge-clean.test.yaml"), Some(&matcher)),
+            "merge-clean must not match exact pattern 'clean'"
         );
         assert!(
             !is_fixture_match(Path::new("setup.test.yaml"), Some(&matcher)),
-            "setup does not contain 'clean'"
+            "setup does not match 'clean'"
         );
     }
 
