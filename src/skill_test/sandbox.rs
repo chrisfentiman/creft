@@ -253,6 +253,38 @@ impl Sandbox {
             home: &self.home,
         }
     }
+
+    /// Run `sh -c <command>` against this sandbox.
+    ///
+    /// The child process sees the sandbox env (`HOME = {sandbox}/home`,
+    /// `CREFT_PROJECT_ROOT = {sandbox}/source`, plus the parent allowlist from
+    /// [`env_for_child`]) and a working directory of [`source`]. All other
+    /// parent env vars are stripped — secrets, user-specific state, agent
+    /// identity.
+    ///
+    /// `command` must already be placeholder-expanded. `expand_scenario` walks
+    /// `before.shell` and `after.shell` strings before any spawn happens.
+    ///
+    /// Returns the child's [`ExitStatus`] for the caller to interpret. The
+    /// caller decides whether a non-zero status is a setup error or
+    /// fire-and-forget cleanup.
+    ///
+    /// [`env_for_child`]: Self::env_for_child
+    /// [`source`]: Self::source
+    /// [`ExitStatus`]: std::process::ExitStatus
+    pub(crate) fn spawn_shell(
+        &self,
+        command: &str,
+        parent_env: &[(String, String)],
+    ) -> std::io::Result<std::process::ExitStatus> {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.source)
+            .env_clear()
+            .envs(self.env_for_child(parent_env, &[]))
+            .status()
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -481,6 +513,116 @@ mod tests {
         assert!(!keys.contains(&"OPENAI_API_KEY"));
         assert!(!keys.contains(&"AWS_PROFILE"));
         assert!(keys.contains(&"PATH"));
+    }
+
+    // ── spawn_shell ───────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn parent_env_with_path() -> Vec<(String, String)> {
+        // Provide PATH so child processes can find executables like `sh`,
+        // `printf`, `command`, etc. Other parent vars are stripped by the
+        // allowlist inside env_for_child.
+        vec![(
+            "PATH".to_owned(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned()),
+        )]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_runs_with_sandbox_home() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        // Write $HOME to a file; then read it back and compare to sandbox home.
+        sb.spawn_shell(r#"printf '%s' "$HOME" > home.out"#, &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("home.out")).expect("home.out");
+        assert_eq!(content, sb.home().to_string_lossy().as_ref());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_runs_in_source_directory() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        sb.spawn_shell("pwd > pwd.out", &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("pwd.out"))
+            .expect("pwd.out")
+            .trim()
+            .to_owned();
+        let expected = sb
+            .source()
+            .canonicalize()
+            .unwrap_or_else(|_| sb.source().to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(content, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_strips_unknown_parent_vars() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let mut parent_env = parent_env_with_path();
+        parent_env.push(("OPERATOR_SECRET".to_owned(), "value".to_owned()));
+
+        // ${OPERATOR_SECRET-MISSING} expands to MISSING when the var is unset.
+        sb.spawn_shell(
+            r#"printf '%s' "${OPERATOR_SECRET-MISSING}" > secret.out"#,
+            &parent_env,
+        )
+        .expect("spawn_shell")
+        .success()
+        .then_some(())
+        .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("secret.out")).expect("secret.out");
+        assert_eq!(content, "MISSING");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_propagates_exit_status() {
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        let status = sb.spawn_shell("exit 7", &parent_env).expect("spawn_shell");
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_propagates_path_from_parent() {
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        // `command -v sh` exits 0 when `sh` is found on PATH; exits non-zero
+        // when PATH is unset or empty. Use `command -v` (POSIX) over `which`.
+        sb.spawn_shell("command -v sh > path.out", &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command -v sh must succeed when PATH is forwarded");
+
+        let content = std::fs::read_to_string(sb.source().join("path.out")).expect("path.out");
+        assert!(!content.trim().is_empty(), "path.out must be non-empty");
     }
 
     // ── mirror_project_skills ─────────────────────────────────────────────────

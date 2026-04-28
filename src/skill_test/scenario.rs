@@ -97,8 +97,9 @@ const TRACE_FD: i32 = 5;
 /// Run one scenario end-to-end and return its outcome.
 ///
 /// `app` supplies the host project root (for skill mirroring) and `opts`
-/// carries framework knobs. The parent environment is collected once inside
-/// this function via `std::env::vars()`.
+/// carries framework knobs. The parent environment is collected once per
+/// scenario run and shared across the before hook, the main invocation, and
+/// the after hook, so every spawn in one scenario sees the same env snapshot.
 pub(crate) fn run(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOutcome {
     #[cfg(unix)]
     return run_unix(scenario, app, opts);
@@ -167,6 +168,11 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
         };
     }
 
+    // Collect the parent environment once. Shared by the before hook, the main
+    // invocation, and the after hook so every spawn in one scenario sees the
+    // same snapshot of the parent process's env.
+    let parent_env: Vec<(String, String)> = std::env::vars().collect();
+
     // Expand all placeholders in the scenario once, before any further use.
     // After this point every field in `scenario` contains resolved paths.
     let scenario = expand::expand_scenario(scenario, &sandbox.paths());
@@ -183,20 +189,16 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
     }
 
     // Run before.shell hook if present. Failure aborts the scenario.
+    // spawn_shell applies env_clear + env_for_child so the hook sees the
+    // sandbox HOME and CREFT_PROJECT_ROOT, not the parent process's HOME.
     if let Some(before) = &scenario.before {
-        // `before.shell` is already expanded by expand_scenario above.
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&before.shell)
-            .current_dir(sandbox.source())
-            .status();
-        match status {
+        match sandbox.spawn_shell(&before.shell, &parent_env) {
             Ok(s) if s.success() => {}
             Ok(s) => {
                 return ScenarioOutcome {
                     status: ScenarioStatus::SetupError(format!(
                         "before.shell exited with code {}",
-                        s.code().unwrap_or(1)
+                        s.code().unwrap_or(1),
                     )),
                     stdout: String::new(),
                     stderr: String::new(),
@@ -217,16 +219,14 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
     }
 
     // Execute the scenario and collect the outcome.
-    let (status, stdout, stderr, trace) = execute_scenario(&scenario, &sandbox, &creft_bin, opts);
+    let (status, stdout, stderr, trace) =
+        execute_scenario(&scenario, &sandbox, &creft_bin, &parent_env, opts);
 
-    // Run after.shell hook if present. Runs regardless of outcome.
-    // `after.shell` is already expanded by expand_scenario above.
+    // Run after.shell hook if present. Runs regardless of outcome. Exit status
+    // is intentionally ignored — after.shell is fire-and-forget cleanup.
+    // spawn_shell applies the same env discipline as the before hook.
     if let Some(after) = &scenario.after {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&after.shell)
-            .current_dir(sandbox.source())
-            .status();
+        let _ = sandbox.spawn_shell(&after.shell, &parent_env);
     }
 
     // Decide whether to keep the sandbox directory.
@@ -260,12 +260,19 @@ fn resolve_creft_binary(opts: &RunOpts) -> Result<PathBuf, String> {
 
 /// Spawn the child, drain streams concurrently, then run assertions.
 ///
+/// `parent_env` is the parent process's environment, collected once in
+/// `run_unix` and shared across all spawn sites in one scenario run. The
+/// child sees only the allowlisted vars from `parent_env` plus the sandbox-
+/// specific overrides from `scenario.when.env` — all other parent vars are
+/// stripped by `env_clear` before `envs` is called.
+///
 /// Returns `(status, stdout, stderr, trace)`.
 #[cfg(unix)]
 fn execute_scenario(
     scenario: &Scenario,
     sandbox: &Sandbox,
     creft_bin: &std::path::Path,
+    parent_env: &[(String, String)],
     opts: &RunOpts,
 ) -> (ScenarioStatus, String, String, Vec<TraceRecord>) {
     use std::os::unix::io::{AsRawFd as _, IntoRawFd as _};
@@ -298,13 +305,12 @@ fn execute_scenario(
         }
     };
 
-    // Build the child environment.
-    let parent_env: Vec<(String, String)> = std::env::vars().collect();
+    // Build the child environment from the shared parent snapshot.
     // scenario.when.env values are already expanded; keys are identifiers.
     let expanded_scenario_env: Vec<(String, String)> = scenario.when.env.clone();
 
     let trace_fd_raw = trace_write_fd.as_raw_fd();
-    let mut child_env = sandbox.env_for_child(&parent_env, &expanded_scenario_env);
+    let mut child_env = sandbox.env_for_child(parent_env, &expanded_scenario_env);
     child_env.push(("CREFT_TRACE_FD".to_owned(), TRACE_FD.to_string()));
 
     // Determine the effective timeout for this scenario.
@@ -314,10 +320,13 @@ fn execute_scenario(
         .map(Duration::from_secs)
         .unwrap_or(opts.default_timeout);
 
-    // Build the child command.
+    // Build the child command. env_clear strips all inherited parent vars so
+    // only the allowlisted entries from env_for_child reach the child —
+    // matching the same env discipline applied by Sandbox::spawn_shell.
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&args)
         .current_dir(sandbox.source())
+        .env_clear()
         .envs(child_env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1082,6 +1091,222 @@ mod tests {
             "json_subset placeholder in assertion value must be resolved; stdout={:?} stderr={:?}",
             outcome.stdout,
             outcome.stderr,
+        );
+    }
+
+    // ── Stage 3: sandbox-scoped shell hooks ───────────────────────────────────
+
+    /// before.shell must see the sandbox HOME, not the operator's real HOME.
+    ///
+    /// The hook writes $HOME to a file in CREFT_PROJECT_ROOT. The file
+    /// assertion uses the {home} placeholder; after Stage 1 expansion both
+    /// the written content and the assertion value resolve to the same
+    /// sandbox path.
+    #[test]
+    fn before_shell_resolves_home_to_sandbox() {
+        use crate::skill_test::fixture::{FileAssertion, ShellHook};
+        let (_tmp, app) = bare_app();
+        let mut scenario =
+            minimal_scenario(vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()]);
+        scenario.before = Some(ShellHook {
+            shell: r#"printf '%s' "$HOME" > "$CREFT_PROJECT_ROOT/home.out""#.to_owned(),
+        });
+        scenario.then.files = vec![(
+            "{source}/home.out".to_owned(),
+            // {home} expands to the sandbox home path; the file written by the
+            // hook must contain the same resolved path.
+            FileAssertion::Equals("{home}".to_owned()),
+        )];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "before.shell must resolve HOME to sandbox; stdout={:?} stderr={:?}",
+            outcome.stdout,
+            outcome.stderr,
+        );
+    }
+
+    /// Regression guard for BL-3: before.shell must write state under the
+    /// sandbox HOME, not the operator's real HOME.
+    ///
+    /// The hook writes a marker under $HOME/.fake-state/ AND also copies it to
+    /// $CREFT_PROJECT_ROOT so the scenario assertion can verify it. After the run:
+    /// - the file at {source}/home-marker must contain the sandbox home path;
+    /// - the file at the operator's real $HOME/.fake-state/marker must NOT exist.
+    ///
+    /// `.fake-state` is a name no real tool uses, so this test is safe to run on
+    /// any developer machine.
+    #[test]
+    fn before_shell_writes_to_sandbox_home_not_operator_home() {
+        use crate::skill_test::fixture::{FileAssertion, ShellHook};
+
+        // Capture the operator's real HOME before allocating any sandbox.
+        let operator_home = std::env::var("HOME").expect("HOME must be set");
+
+        let (_tmp, app) = bare_app();
+        let mut scenario =
+            minimal_scenario(vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()]);
+        // The hook writes the resolved $HOME to a file in the project root so
+        // the scenario assertion can compare it against {home}.
+        scenario.before = Some(ShellHook {
+            shell: concat!(
+                r#"mkdir -p "$HOME/.fake-state" "#,
+                r#"&& printf '%s' "$HOME" > "$CREFT_PROJECT_ROOT/home-marker""#,
+            )
+            .to_owned(),
+        });
+        scenario.then.files = vec![(
+            "{source}/home-marker".to_owned(),
+            // The hook must write the sandbox home path, not the operator's real home.
+            FileAssertion::Equals("{home}".to_owned()),
+        )];
+        let outcome = run(&scenario, &app, &test_opts());
+
+        // The scenario assertion confirms the hook saw the sandbox HOME.
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "before.shell must resolve HOME to the sandbox; stdout={:?} stderr={:?}",
+            outcome.stdout,
+            outcome.stderr,
+        );
+
+        // The operator's real home must be untouched.
+        let real_marker = std::path::Path::new(&operator_home)
+            .join(".fake-state")
+            .join("marker");
+        assert!(
+            !real_marker.exists(),
+            "before.shell must not write to the operator's real HOME; found {:?}",
+            real_marker,
+        );
+    }
+
+    /// after.shell must resolve HOME to the sandbox, not the operator's real HOME.
+    ///
+    /// The after hook runs after assertions, so the file it writes cannot be
+    /// verified via scenario assertions. Instead, the test scenario is
+    /// engineered to fail (by expecting exit code 1 when the main command exits
+    /// 0) so that `keep_on_failure` preserves the sandbox. After run() returns,
+    /// the test reads the marker file directly and checks that its content
+    /// matches the sandbox home, not the operator's real home.
+    #[test]
+    fn after_shell_resolves_home_to_sandbox() {
+        use crate::skill_test::fixture::ShellHook;
+
+        let (_tmp, app) = bare_app();
+        let mut scenario =
+            minimal_scenario(vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()]);
+        // Expect exit code 1 so the scenario always fails and kept_path is set.
+        scenario.then.exit_code = 1;
+        scenario.after = Some(ShellHook {
+            // Write $HOME to a file in the source dir so we can read it after run().
+            shell: r#"printf '%s' "$HOME" > "$CREFT_PROJECT_ROOT/after-home.out""#.to_owned(),
+        });
+        let opts = RunOpts {
+            creft_binary: Some(creft_bin()),
+            default_timeout: Duration::from_secs(10),
+            keep_on_failure: true,
+        };
+        let outcome = run(&scenario, &app, &opts);
+
+        // The scenario exits 0 but expects 1 — it must fail.
+        assert!(
+            matches!(outcome.status, ScenarioStatus::Fail(_)),
+            "scenario must fail so kept_path is populated; got {:?}",
+            outcome.status,
+        );
+
+        let kept = outcome
+            .kept_path
+            .expect("kept_path must be set for a failing scenario with keep_on_failure");
+
+        // The after hook must have written to the sandbox source dir.
+        let marker = kept.join("source").join("after-home.out");
+        assert!(
+            marker.exists(),
+            "after.shell must have run and written {:?}",
+            marker
+        );
+
+        let content = std::fs::read_to_string(&marker).expect("after-home.out");
+        // The content must be the sandbox home path (under the kept dir), not
+        // the operator's real home. Comparing the prefix is sufficient because
+        // the operator's home is a fixed path like /Users/... that cannot match
+        // a randomly-named temp dir.
+        let expected_home = kept.join("home").to_string_lossy().into_owned();
+        assert_eq!(
+            content, expected_home,
+            "after.shell HOME must resolve to sandbox home, not operator's real home",
+        );
+
+        std::fs::remove_dir_all(&kept).ok();
+    }
+
+    /// execute_scenario must strip parent env vars not on the allowlist.
+    ///
+    /// The test calls execute_scenario directly with a hand-crafted parent_env
+    /// slice that includes OPERATOR_SECRET. The child runs
+    /// `printenv OPERATOR_SECRET || printf MISSING` — if OPERATOR_SECRET leaks
+    /// through, the child prints the value; if it is stripped, the child prints
+    /// MISSING. The assertion verifies the latter.
+    ///
+    /// Calling execute_scenario directly lets the test inject parent_env without
+    /// touching std::env (which is `unsafe` in Rust 2024 and couples tests in
+    /// unexpected ways even under nextest's process-per-test isolation).
+    #[test]
+    fn execute_scenario_strips_unknown_parent_vars() {
+        let (_tmp, app) = bare_app();
+        // Minimal scenario: print OPERATOR_SECRET if set, MISSING otherwise.
+        let scenario = {
+            let mut s = minimal_scenario(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printenv OPERATOR_SECRET || printf MISSING".to_owned(),
+            ]);
+            // We only care about stdout content; defaults for the rest are fine.
+            s.then.exit_code = 0;
+            s
+        };
+
+        // Allocate a sandbox for the test manually so we can call execute_scenario directly.
+        let sandbox = crate::skill_test::sandbox::Sandbox::new().expect("sandbox");
+
+        let host_root = app
+            .find_local_root()
+            .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d));
+        sandbox
+            .mirror_project_skills(host_root.as_deref())
+            .expect("mirror");
+
+        // Expand the scenario against the sandbox paths.
+        let scenario = crate::skill_test::expand::expand_scenario(&scenario, &sandbox.paths());
+        sandbox.materialise(&scenario.given).expect("materialise");
+
+        let creft_binary = creft_bin();
+        let opts = test_opts();
+
+        // Inject a parent env that includes both PATH (needed for executables)
+        // and OPERATOR_SECRET (must be stripped by execute_scenario).
+        let parent_env: Vec<(String, String)> = vec![
+            ("PATH".to_owned(), std::env::var("PATH").unwrap_or_default()),
+            ("OPERATOR_SECRET".to_owned(), "value".to_owned()),
+        ];
+
+        let (status, stdout, _stderr, _trace) =
+            execute_scenario(&scenario, &sandbox, &creft_binary, &parent_env, &opts);
+
+        assert_eq!(
+            status,
+            ScenarioStatus::Pass,
+            "scenario must pass — exit code 0 is expected"
+        );
+        assert_eq!(
+            stdout.trim(),
+            "MISSING",
+            "OPERATOR_SECRET must be stripped; child printed {:?}",
+            stdout,
         );
     }
 
