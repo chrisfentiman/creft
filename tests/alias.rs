@@ -131,7 +131,11 @@ fn alias_followed_by_help_flag_shows_canonical_help() {
         .args(["bl", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("backlog"));
+        // The rewrite produces ["backlog", "--help"]; cli::parse then renders the
+        // canonical name in the Usage line. A regression that surfaced the alias
+        // name ("bl") instead of the canonical name ("backlog") in the Usage line
+        // would be caught here.
+        .stdout(predicate::str::contains("Usage: creft backlog"));
 }
 
 // ── creft help <alias> does NOT rewrite ──────────────────────────────────────
@@ -147,19 +151,18 @@ fn creft_help_alias_shows_root_listing_not_alias_target() {
     write_global_aliases(&env, "- from: bl\n  to: backlog\n");
 
     // When "bl" doesn't resolve as a skill or namespace, handle_help falls
-    // through to the root listing. The root listing shows the backlog skill.
+    // through to the root listing. The root listing renders
+    // "Usage: creft <command> [ARGS] [OPTIONS]" (src/cmd/skill.rs:244).
+    // A hypothetical rewrite-also-applied-to-help path would instead render
+    // "Usage: creft backlog" — these strings are mutually exclusive, so
+    // testing for the root-listing string and the absence of the skill-help
+    // string discriminates the two paths precisely.
     creft_two_scope(&env)
         .args(["help", "bl"])
         .assert()
         .success()
-        // Root listing must appear (contains the real skill name).
-        .stdout(predicate::str::contains("backlog"))
-        // Must NOT show backlog's own help preamble that would only appear if
-        // the alias had been rewritten and backlog's --help was invoked.
-        // We pin this by checking that "bl" itself is not shown as the skill
-        // name in a help header context. (The root listing shows "backlog"
-        // as a listed skill name, not as a help target for "bl".)
-        .stdout(predicate::str::is_match("backlog").unwrap());
+        .stdout(predicate::str::contains("Usage: creft <command>"))
+        .stdout(predicate::str::contains("Usage: creft backlog").not());
 }
 
 // ── malformed aliases.yaml emits warning but does not break dispatch ──────────
