@@ -1,0 +1,15 @@
+- name: upstream creft_exit recovers stdout for non-sponge downstream
+  notes: |
+    Block 0 prints a deny JSON payload and calls creft_exit(0).
+    Block 1 is a Python sleep that has not read stdin when the runner
+    cancels the chain. Before this fix, block 0's stdout was dropped
+    because the dup-fd drain was gated on the legacy exit-99 wait status.
+    After this fix, the post-loop creft_exit branch drains the dup-fd
+    symmetrically and the JSON reaches the parent.
+  when:
+    argv: ["creft", "_test", "pipe", "creft_exit_python_next"]
+    timeout_seconds: 5
+  then:
+    exit_code: 0
+    stdout_json:
+      deny: "regex match"

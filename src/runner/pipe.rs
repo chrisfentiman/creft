@@ -610,6 +610,28 @@ fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
     }
 }
 
+/// Drain the duplicated read-end of the inter-block pipe for `block_idx`,
+/// returning the bytes that were sitting unread in the kernel pipe.
+///
+/// Returns `None` when no dup'd reader is registered for `block_idx` or when
+/// the drain produced zero bytes (no upstream output, or the downstream block
+/// already consumed everything before being killed). Returns `Some(buf)` when
+/// bytes were recovered.
+///
+/// The 500ms per-poll timeout matches the legacy exit-99 drain site: it
+/// bounds the wait if a grandchild of the early-exit block still holds the
+/// pipe's write end open after `killpg`.
+#[cfg(unix)]
+fn drain_block_pipe_fd(
+    drains: &mut std::collections::HashMap<usize, DupedPipeReader>,
+    block_idx: usize,
+) -> Option<Vec<u8>> {
+    let mut reader = drains.remove(&block_idx)?;
+    let mut buf = Vec::new();
+    reader.drain_with_timeout(&mut buf, 500);
+    if buf.is_empty() { None } else { Some(buf) }
+}
+
 /// Arguments for `wait_pipe_children_unix`, grouped to stay within clippy's
 /// argument count limit.
 #[cfg(unix)]
@@ -642,13 +664,14 @@ struct WaitArgs {
 /// calling this function so the channel closes when all reaper and sponge
 /// threads finish.
 ///
-/// Relay buffer flush is selective: if an exit-99 block is the last block in
-/// the chain, its output has already been captured in the relay buffer and is
-/// flushed to the terminal. If the exit-99 block is a middle block, the
-/// duplicated pipe fd in `exit99_drains` is drained and flushed instead. Sponge
-/// handles are joined here (before the relay thread) so that any captured
-/// upstream bytes returned by cancelled sponge threads are available for the
-/// output selection decision.
+/// Relay buffer flush is selective: if an early-exit block (legacy exit 99
+/// or creft_exit) is the last block in the chain, its output has already
+/// been captured in the relay buffer and is flushed to the terminal. If the
+/// early-exit block is a middle block, the duplicated pipe fd in
+/// `exit99_drains` is drained and flushed instead. Sponge handles are
+/// joined here (before the relay thread) so that any captured upstream
+/// bytes returned by cancelled sponge threads are available for the output
+/// selection decision.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     args: WaitArgs,
@@ -754,17 +777,12 @@ fn wait_pipe_children_unix(
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 
                     // Drain the dup'd pipe fd for this block (if it's not the last block).
-                    // The exit-99 block has already exited, so its write end is closed and
-                    // read_to_end returns promptly with whatever remains in the pipe buffer.
-                    // Drain errors are ignored — same behavior as today if drain is absent.
-                    if let Some(mut drain_reader) = exit99_drains.remove(&reaper_result.block_idx) {
-                        let mut buf = Vec::new();
-                        // Use poll()-based drain to avoid blocking if an orphaned
-                        // grandchild still holds the pipe write end open after killpg.
-                        drain_reader.drain_with_timeout(&mut buf, 500);
-                        if !buf.is_empty() {
-                            exit99_captured = Some(buf);
-                        }
+                    // Drain errors are ignored — the pipe buffer may be empty or a
+                    // grandchild may still hold the write end open briefly after killpg.
+                    if let Some(buf) =
+                        drain_block_pipe_fd(&mut exit99_drains, reaper_result.block_idx)
+                    {
+                        exit99_captured = Some(buf);
                     }
                 }
 
@@ -777,11 +795,6 @@ fn wait_pipe_children_unix(
             }
         }
     }
-
-    // Close all remaining dup'd fds (those not consumed by drain above).
-    // These are independent inter-block pipes; dropping them does not affect
-    // the relay thread's pipe to the last block.
-    drop(exit99_drains);
 
     // All reaper results received. Join sponge threads to collect any data they
     // captured from the cancel path. Joining here is a synchronization barrier:
@@ -806,12 +819,27 @@ fn wait_pipe_children_unix(
                 .and_then(|s| s.lock().ok().and_then(|g| g.map(|_| idx)))
         });
 
-    if creft_exit_block.is_some() && !early_exit {
-        early_exit = true;
-        // Kill any lingering grandchildren that still hold pipe write ends open.
-        // No-op for already-exited PIDs (ESRCH is silently ignored by kill_group).
-        kill_pipe_group_by_pids(child_pgid, &child_pids);
+    if let Some(idx) = creft_exit_block {
+        if !early_exit {
+            early_exit = true;
+            // Kill any lingering grandchildren that still hold pipe write ends open.
+            // No-op for already-exited PIDs (ESRCH is silently ignored by kill_group).
+            kill_pipe_group_by_pids(child_pgid, &child_pids);
+        }
+        // Recover the early-exit block's stdout from the inter-block pipe.
+        // Skipped when the legacy exit-99 path already populated exit99_captured
+        // (precedence matches early_exit_idx below: exit-99 wins over creft_exit).
+        if exit99_captured.is_none()
+            && let Some(buf) = drain_block_pipe_fd(&mut exit99_drains, idx)
+        {
+            exit99_captured = Some(buf);
+        }
     }
+
+    // Close all remaining dup'd fds (those not consumed by either drain path above).
+    // These are independent inter-block pipes; dropping them does not affect
+    // the relay thread's pipe to the last block.
+    drop(exit99_drains);
 
     if early_exit {
         // Prefer the exit-99 block (preserves existing behaviour); fall back to the

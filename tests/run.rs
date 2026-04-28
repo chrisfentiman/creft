@@ -3149,3 +3149,77 @@ fn creft_prompt_interactive_returns_stdin_answer() {
         "creft_prompt must return the stdin answer; stdout={stdout:?}"
     );
 }
+
+// ── creft_exit pipe drain ─────────────────────────────────────────────────────
+
+/// When the first block in a multi-block chain calls creft_exit() after writing
+/// to stdout, its bytes must appear on creft's stdout.
+///
+/// The early-exit block is not the last block, so its output lives in an
+/// inter-block kernel pipe. The runner holds a dup'd read-end of that pipe
+/// and must drain it in the post-loop creft_exit branch — the same path that
+/// the legacy exit-99 drain exercises via the in-loop branch.
+///
+/// Regression guard: before this fix, the post-loop creft_exit branch killed
+/// the pipe group but never drained the dup'd fd, dropping block 0's bytes.
+#[test]
+#[cfg(unix)]
+fn test_pipe_creft_exit_first_block_stdout_captured() {
+    if !helpers::tool_available("python3") {
+        eprintln!("skipping test_pipe_creft_exit_first_block_stdout_captured: python3 not on PATH");
+        return;
+    }
+
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: creft-exit-first-capture\n",
+            "description: first block creft_exit stdout is captured\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```python\n",
+            "import json\n",
+            "print(json.dumps({\"deny\": \"x\"}))\n",
+            "creft_exit()\n",
+            "```\n",
+            "\n",
+            "```python\n",
+            "import time\n",
+            "time.sleep(5)\n",
+            "import sys\n",
+            "sys.stdin.read()\n",
+            "```\n",
+            "\n",
+            "```python\n",
+            "import time\n",
+            "time.sleep(5)\n",
+            "import sys\n",
+            "sys.stdin.read()\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["creft-exit-first-capture"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("\"deny\""),
+        "block 0's JSON must appear on stdout; stdout={stdout:?}"
+    );
+    assert!(
+        !stderr.contains("exit 99 is deprecated"),
+        "creft_exit must not trigger the legacy deprecation warning; stderr={stderr:?}"
+    );
+}
