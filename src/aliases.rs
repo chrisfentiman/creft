@@ -575,13 +575,16 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn rewrite_single_segment_prefix() {
+    #[rstest]
+    #[case::single_prefix(&["bl", "list"], &["backlog", "list"])]
+    #[case::no_remainder(&["bl"], &["backlog"])]
+    #[case::non_matching(&["other", "args"], &["other", "args"])]
+    #[case::empty(&[], &[])]
+    #[case::help_at_index_one(&["help", "bl"], &["help", "bl"])]
+    #[case::list_at_index_one(&["list", "bl"], &["list", "bl"])]
+    fn rewrite_single_segment_alias(#[case] input: &[&str], #[case] expected: &[&str]) {
         let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(
-            rewrite(&args(&["bl", "list"]), &map),
-            args(&["backlog", "list"])
-        );
+        assert_eq!(rewrite(&args(input), &map), args(expected));
     }
 
     #[test]
@@ -603,27 +606,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_with_no_remainder_produces_to_only() {
-        let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(rewrite(&args(&["bl"]), &map), args(&["backlog"]));
-    }
-
-    #[test]
-    fn rewrite_non_matching_args_unchanged() {
-        let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(
-            rewrite(&args(&["other", "args"]), &map),
-            args(&["other", "args"])
-        );
-    }
-
-    #[test]
-    fn rewrite_empty_args_unchanged() {
-        let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(rewrite(&[], &map), Vec::<String>::new());
-    }
-
-    #[test]
     fn rewrite_creft_internal_prefix_never_rewritten() {
         // Even if an alias for _creft is somehow in the map, it must not fire.
         let map = make_map(&[(&["_creft"], &["something"])]);
@@ -631,19 +613,6 @@ mod tests {
             rewrite(&args(&["_creft", "anything"]), &map),
             args(&["_creft", "anything"])
         );
-    }
-
-    #[test]
-    fn rewrite_help_prefix_is_not_at_index_zero_for_alias() {
-        // args[0] is "help", not "bl", so the bl → backlog alias does not fire.
-        let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(rewrite(&args(&["help", "bl"]), &map), args(&["help", "bl"]));
-    }
-
-    #[test]
-    fn rewrite_list_prefix_is_not_at_index_zero_for_alias() {
-        let map = make_map(&[(&["bl"], &["backlog"])]);
-        assert_eq!(rewrite(&args(&["list", "bl"]), &map), args(&["list", "bl"]));
     }
 
     #[test]
@@ -688,6 +657,46 @@ mod tests {
             result.unwrap().to,
             vec!["tasks".to_string()],
             "local alias must shadow global alias"
+        );
+    }
+
+    #[test]
+    fn alias_map_loads_global_only_when_no_local_root() {
+        // Verify the spec's "running outside any project" success criterion:
+        // when find_local_root() returns None, AliasMap::load still resolves
+        // global aliases correctly and does not error.
+        let home_dir = tempdir().unwrap();
+        let cwd_dir = tempdir().unwrap(); // no .creft/ — find_local_root() returns None
+
+        std::fs::create_dir_all(home_dir.path().join(".creft")).unwrap();
+        std::fs::write(
+            home_dir.path().join(".creft").join("aliases.yaml"),
+            b"- from: bl\n  to: backlog\n",
+        )
+        .unwrap();
+
+        // home_dir and cwd_dir are independent temp dirs; cwd_dir has no .creft/
+        // ancestor, so find_local_root() returns None for this context.
+        let ctx = crate::model::AppContext::for_test(
+            home_dir.path().to_path_buf(),
+            cwd_dir.path().to_path_buf(),
+        );
+        assert!(
+            ctx.find_local_root().is_none(),
+            "test setup: cwd must have no local root"
+        );
+
+        let map =
+            AliasMap::load(&ctx).expect("AliasMap::load must succeed with global-only aliases");
+        let result = map.find_prefix(&args(&["bl"]));
+        assert!(
+            result.is_some(),
+            "global alias must resolve when there is no local root"
+        );
+        assert_eq!(
+            result.unwrap().to,
+            vec!["backlog".to_string()],
+            "global alias must rewrite bl to backlog"
         );
     }
 }

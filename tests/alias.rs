@@ -209,3 +209,31 @@ fn no_alias_file_produces_no_warning_on_missing_command() {
         .failure()
         .stderr(predicate::str::contains("warning: ignoring aliases").not());
 }
+
+/// Running a skill when no `aliases.yaml` exists must not create the file in
+/// either scope. Silent file creation in `~/.creft/` is the kind of side-effect
+/// users notice in `git status` and report as unexpected pollution.
+#[test]
+fn running_skill_without_alias_file_does_not_create_aliases_yaml() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    // Deliberately write no aliases.yaml in either scope.
+
+    creft_two_scope(&env)
+        .args(["backlog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backlog-ran"));
+
+    let global_aliases = env.home_dir.path().join(".creft").join("aliases.yaml");
+    let local_aliases = env.project_dir.path().join(".creft").join("aliases.yaml");
+
+    assert!(
+        !global_aliases.exists(),
+        "dispatch must not create global aliases.yaml when it did not exist"
+    );
+    assert!(
+        !local_aliases.exists(),
+        "dispatch must not create local aliases.yaml when it did not exist"
+    );
+}
