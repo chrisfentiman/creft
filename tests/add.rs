@@ -341,6 +341,24 @@ fn test_reserved_name_rejected() {
         .stderr(predicate::str::contains("reserved"));
 }
 
+/// `alias` is a reserved name (added to RESERVED alongside the `creft alias`
+/// built-in). Attempting to add a skill named `alias` must be rejected with the
+/// same `ReservedName` error, protecting the built-in from being shadowed.
+#[test]
+fn test_add_alias_reserved_name_rejected() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(
+            "---\nname: alias\ndescription: shadow alias\n---\n\n```bash\necho oops\n```\n",
+        )
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("reserved"));
+}
+
 // ── remove tests ──────────────────────────────────────────────────────────────
 
 /// Adding a skill and then removing it succeeds. After removal, list is empty.

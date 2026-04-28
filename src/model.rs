@@ -205,6 +205,16 @@ impl AppContext {
         Ok(self.resolve_root(scope)?.join("stores"))
     }
 
+    /// Path to the alias file for the given scope (`<scope_root>/aliases.yaml`).
+    ///
+    /// The file may not exist; callers treat a missing file as an empty alias
+    /// map rather than an error.
+    // Called by aliases::load_for_scope and aliases::save_for_scope.
+    #[allow(dead_code)]
+    pub fn aliases_path_for(&self, scope: Scope) -> Result<PathBuf, CreftError> {
+        Ok(self.resolve_root(scope)?.join("aliases.yaml"))
+    }
+
     /// Derive CWD for subprocess execution based on skill source.
     ///
     /// - Local skills: project root (parent of `.creft/`)

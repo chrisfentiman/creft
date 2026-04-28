@@ -1,3 +1,4 @@
+mod aliases;
 mod catalog;
 mod cli;
 mod cmd;
@@ -51,14 +52,20 @@ fn main() {
 }
 
 fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError> {
-    // Hidden internal commands dispatched before skill resolution.
-    // The `_creft` prefix is reserved for built-in infrastructure; no user skill
-    // can shadow these because native dispatch wins before the skill runner runs.
-    // Unknown `_creft` subcommands fall through to skill resolution below.
+    // Hidden internal commands are dispatched before alias rewrite. The `_creft`
+    // prefix is reserved for built-in infrastructure and must never be rewritten —
+    // a misconfigured alias file must not be able to redirect internal control flow.
     if args.len() >= 2 && args[0] == "_creft" && args[1] == "welcome" {
         let force = args.iter().any(|a| a == "--force");
         return cmd::welcome::cmd_welcome(ctx, force);
     }
+
+    // Apply alias rewrite once, ahead of every direct-dispatch branch. Rewrite
+    // happens before the `help` short-circuit so that `creft bl --help` (where
+    // `bl → backlog`) reaches cli::parse with `["backlog", "--help"]`. The
+    // prefix match starts at args[0], so `creft help bl` is unaffected: the arg
+    // vector `["help", "bl"]` does not match an alias whose `from` is `["bl"]`.
+    let args = aliases::rewrite_args(ctx, args);
 
     // `creft help <args...>`: user skills take priority over built-in subcommand
     // names. Resolve as skill first; fall back to namespace help; then show root.
@@ -132,6 +139,12 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         cli::Command::Remove { skill, global } => cmd::skill::cmd_rm(ctx, &skill, global),
 
         cli::Command::RemoveTest { skill, name } => cmd::skill::cmd_remove_test(ctx, &skill, &name),
+
+        cli::Command::Alias(alias_cmd) => match alias_cmd {
+            cli::AliasCommand::Add { from, to } => cmd::alias::cmd_alias_add(ctx, &from, &to),
+            cli::AliasCommand::Remove { from } => cmd::alias::cmd_alias_remove(ctx, &from),
+            cli::AliasCommand::List => cmd::alias::cmd_alias_list(ctx),
+        },
 
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
             cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),
