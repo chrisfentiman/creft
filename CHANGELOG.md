@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/chrisfentiman/creft/compare/creft-v0.3.4...creft-v0.4.0) (2026-04-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runner:** creft_exit drain + CREFT_ARG_ prefix + drop exit 99 + skill-test polish ([#80](https://github.com/chrisfentiman/creft/issues/80))
+* skill test framework + add test + remove test ([#77](https://github.com/chrisfentiman/creft/issues/77))
+
+### Features
+
+* **alias:** namespace aliases for skill paths ([#82](https://github.com/chrisfentiman/creft/issues/82)) ([ab3058f](https://github.com/chrisfentiman/creft/commit/ab3058f4cb0ae0c8104385f728ed6d2e23a18882))
+* **search:** hand-rolled XOR filter search primitive with fuzzy matching ([#66](https://github.com/chrisfentiman/creft/issues/66)) ([5d738a3](https://github.com/chrisfentiman/creft/commit/5d738a3f27142d694084f457fc611a68b1de2a29))
+* skill test framework + add test + remove test ([#77](https://github.com/chrisfentiman/creft/issues/77)) ([bf903d8](https://github.com/chrisfentiman/creft/commit/bf903d84293e232e7740345f0bf60610b790f744))
+* **store:** redb-backed searchable key-value store primitive ([#67](https://github.com/chrisfentiman/creft/issues/67)) ([6404028](https://github.com/chrisfentiman/creft/commit/6404028e1ac9c67c61425d41c697897c397fcbd3))
+
+
+### Bug Fixes
+
+* **preamble:** drain Node stdout before process.exit ([#64](https://github.com/chrisfentiman/creft/issues/64)) ([2465632](https://github.com/chrisfentiman/creft/commit/24656328d4200112958a964b1341ec6e27027c94))
+* **runner:** creft_exit drain + CREFT_ARG_ prefix + drop exit 99 + skill-test polish ([#80](https://github.com/chrisfentiman/creft/issues/80)) ([b56b249](https://github.com/chrisfentiman/creft/commit/b56b249cf61d562facdb3627592bd600e085a7b8))
+
 ## [0.3.4](https://github.com/chrisfentiman/creft/compare/creft-v0.3.3...creft-v0.3.4) (2026-04-17)
 
 
