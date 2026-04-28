@@ -19,6 +19,7 @@ use crate::model::AppContext;
 use crate::runner::TraceRecord;
 use crate::skill_test::assertion::{self, AssertionFailure};
 use crate::skill_test::coverage;
+use crate::skill_test::expand;
 use crate::skill_test::fixture::{Scenario, StdinPayload};
 use crate::skill_test::sandbox::Sandbox;
 
@@ -166,7 +167,11 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
         };
     }
 
-    // Materialise seed files from given.files.
+    // Expand all placeholders in the scenario once, before any further use.
+    // After this point every field in `scenario` contains resolved paths.
+    let scenario = expand::expand_scenario(scenario, &sandbox.paths());
+
+    // Materialise seed files from given.files (paths and content already expanded).
     if let Err(e) = sandbox.materialise(&scenario.given) {
         return ScenarioOutcome {
             status: ScenarioStatus::SetupError(format!("materialise seed files: {e}")),
@@ -179,10 +184,10 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
 
     // Run before.shell hook if present. Failure aborts the scenario.
     if let Some(before) = &scenario.before {
-        let expanded = sandbox.expand(&before.shell);
+        // `before.shell` is already expanded by expand_scenario above.
         let status = std::process::Command::new("sh")
             .arg("-c")
-            .arg(&expanded)
+            .arg(&before.shell)
             .current_dir(sandbox.source())
             .status();
         match status {
@@ -212,14 +217,14 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
     }
 
     // Execute the scenario and collect the outcome.
-    let (status, stdout, stderr, trace) = execute_scenario(scenario, &sandbox, &creft_bin, opts);
+    let (status, stdout, stderr, trace) = execute_scenario(&scenario, &sandbox, &creft_bin, opts);
 
     // Run after.shell hook if present. Runs regardless of outcome.
+    // `after.shell` is already expanded by expand_scenario above.
     if let Some(after) = &scenario.after {
-        let expanded = sandbox.expand(&after.shell);
         let _ = std::process::Command::new("sh")
             .arg("-c")
-            .arg(&expanded)
+            .arg(&after.shell)
             .current_dir(sandbox.source())
             .status();
     }
@@ -280,15 +285,8 @@ fn execute_scenario(
         }
     };
 
-    // Expand argv and build the command.
-    let expanded_argv: Vec<String> = scenario
-        .when
-        .argv
-        .iter()
-        .map(|s| sandbox.expand(s))
-        .collect();
-
-    let (program, args) = match expanded_argv.split_first() {
+    // argv and env are already placeholder-expanded by expand_scenario in run_unix.
+    let (program, args) = match scenario.when.argv.split_first() {
         Some((prog, rest)) => (resolve_argv0(prog, creft_bin), rest.to_vec()),
         None => {
             return (
@@ -302,12 +300,8 @@ fn execute_scenario(
 
     // Build the child environment.
     let parent_env: Vec<(String, String)> = std::env::vars().collect();
-    let expanded_scenario_env: Vec<(String, String)> = scenario
-        .when
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), sandbox.expand(v)))
-        .collect();
+    // scenario.when.env values are already expanded; keys are identifiers.
+    let expanded_scenario_env: Vec<(String, String)> = scenario.when.env.clone();
 
     let trace_fd_raw = trace_write_fd.as_raw_fd();
     let mut child_env = sandbox.env_for_child(&parent_env, &expanded_scenario_env);
@@ -539,8 +533,8 @@ fn execute_scenario(
     if let Some(f) = assertion::check_stdout_json(&scenario.then, &stdout) {
         failures.push(f);
     }
-    failures.extend(assertion::check_files(&scenario.then, sandbox));
-    failures.extend(assertion::check_files_absent(&scenario.then, sandbox));
+    failures.extend(assertion::check_files(&scenario.then));
+    failures.extend(assertion::check_files_absent(&scenario.then));
     if let Some(cov_exp) = &scenario.then.coverage {
         failures.extend(coverage::check_coverage(cov_exp, &trace));
     }
@@ -955,6 +949,140 @@ mod tests {
             "after.shell must run and create the marker file even when the scenario fails"
         );
         std::fs::remove_dir_all(&kept).ok();
+    }
+
+    // ── Placeholder expansion end-to-end ──────────────────────────────────────
+
+    #[test]
+    fn stdin_text_with_home_placeholder_reaches_child_expanded() {
+        use crate::skill_test::fixture::StdinPayload;
+        let (_tmp, app) = bare_app();
+        // cat echoes stdin back to stdout. The placeholder in the stdin text
+        // must be resolved to the real sandbox home path before the bytes
+        // reach the child.
+        let mut scenario = minimal_scenario(vec!["cat".to_owned()]);
+        scenario.when.stdin = Some(StdinPayload::Text("{home}/.creft".to_owned()));
+        // stdout_contains checks for the resolved path. If the placeholder
+        // were sent verbatim, this check would fail because the child echoes
+        // the literal string "{home}/.creft" rather than the resolved path.
+        scenario.then.stdout_contains = vec!["/.creft".to_owned()];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "stdout must contain the resolved home path; stdout={:?}",
+            outcome.stdout,
+        );
+        // Also verify the placeholder itself is not present in stdout.
+        assert!(
+            !outcome.stdout.contains("{home}"),
+            "placeholder must be resolved before reaching the child; stdout={:?}",
+            outcome.stdout,
+        );
+    }
+
+    #[test]
+    fn stdin_json_with_sandbox_placeholder_reaches_child_expanded() {
+        use crate::skill_test::fixture::StdinPayload;
+        let (_tmp, app) = bare_app();
+        // cat echoes stdin to stdout. JSON value containing {sandbox} must be
+        // expanded before serialisation so the child receives the resolved path.
+        let mut scenario = minimal_scenario(vec!["cat".to_owned()]);
+        scenario.when.stdin = Some(StdinPayload::Json(
+            serde_json::json!({"cwd": "{sandbox}/wt"}),
+        ));
+        // The serialised JSON the child echoes must not contain the placeholder.
+        scenario.then.stdout_contains = vec!["/wt".to_owned()];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "stdout must contain the resolved sandbox path; stdout={:?}",
+            outcome.stdout,
+        );
+        assert!(
+            !outcome.stdout.contains("{sandbox}"),
+            "sandbox placeholder must be resolved in JSON stdin; stdout={:?}",
+            outcome.stdout,
+        );
+    }
+
+    #[test]
+    fn file_assertion_equals_with_home_placeholder_passes() {
+        use crate::skill_test::fixture::FileAssertion;
+        let (_tmp, app) = bare_app();
+        // The child writes the resolved home path to a file.
+        // The equals assertion also contains the placeholder. Both must expand
+        // to the same value for the assertion to pass.
+        let mut scenario = minimal_scenario(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            // Write the resolved $HOME to a file in the project root.
+            r#"printf '%s' "$HOME" > "$CREFT_PROJECT_ROOT/out.txt""#.to_owned(),
+        ]);
+        scenario.then.files = vec![(
+            "{source}/out.txt".to_owned(),
+            // The equals value uses the same placeholder; after expansion both
+            // sides resolve to the real sandbox home path.
+            FileAssertion::Equals("{home}".to_owned()),
+        )];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "file equals assertion with placeholder must pass; stdout={:?} stderr={:?}",
+            outcome.stdout,
+            outcome.stderr,
+        );
+    }
+
+    #[test]
+    fn stderr_contains_with_sandbox_placeholder_passes() {
+        let (_tmp, app) = bare_app();
+        // The child writes the sandbox root path to stderr.
+        // then.stderr_contains uses the placeholder; it must expand and match.
+        let mut scenario = minimal_scenario(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            r#"printf '%s' "$CREFT_PROJECT_ROOT" >&2"#.to_owned(),
+        ]);
+        // {source} resolves to the sandbox's source directory, which the child
+        // echoes via CREFT_PROJECT_ROOT.
+        scenario.then.stderr_contains = vec!["{source}".to_owned()];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "stderr_contains placeholder must be resolved before matching; stderr={:?}",
+            outcome.stderr,
+        );
+    }
+
+    #[test]
+    fn file_assertion_json_subset_with_sandbox_placeholder_passes() {
+        use crate::skill_test::fixture::FileAssertion;
+        let (_tmp, app) = bare_app();
+        // The child writes a JSON object containing the resolved source path.
+        // The json_subset assertion uses the placeholder; both must expand to
+        // the same value.
+        let mut scenario = minimal_scenario(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            r#"printf '{"dir":"%s"}' "$CREFT_PROJECT_ROOT" > "$CREFT_PROJECT_ROOT/out.json""#
+                .to_owned(),
+        ]);
+        scenario.then.files = vec![(
+            "{source}/out.json".to_owned(),
+            FileAssertion::JsonSubset(serde_json::json!({"dir": "{source}"})),
+        )];
+        let outcome = run(&scenario, &app, &test_opts());
+        assert_eq!(
+            outcome.status,
+            ScenarioStatus::Pass,
+            "json_subset placeholder in assertion value must be resolved; stdout={:?} stderr={:?}",
+            outcome.stdout,
+            outcome.stderr,
+        );
     }
 
     // ── Keep on failure ───────────────────────────────────────────────────────

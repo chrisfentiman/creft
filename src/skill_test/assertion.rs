@@ -9,7 +9,6 @@ use std::path::Path;
 use regex::Regex;
 
 use crate::skill_test::fixture::{FileAssertion, Then};
-use crate::skill_test::sandbox::Sandbox;
 
 /// A single failed assertion, carrying enough context to print a useful message.
 #[derive(Debug, PartialEq, Eq)]
@@ -112,15 +111,13 @@ pub(crate) fn check_stdout_json(then: &Then, stdout: &str) -> Option<AssertionFa
 
 /// Verify every expected file assertion.
 ///
-/// Paths are expanded via [`Sandbox::expand`] — the single expansion entry
-/// point for the framework. This ensures callers cannot bypass placeholder
-/// expansion by accident.
-pub(crate) fn check_files(then: &Then, sandbox: &Sandbox) -> Vec<AssertionFailure> {
+/// Paths and assertion values in `then` must already be placeholder-expanded
+/// by the caller. This function reads files and compares content directly.
+pub(crate) fn check_files(then: &Then) -> Vec<AssertionFailure> {
     let mut failures = Vec::new();
 
-    for (raw_path, assertion) in &then.files {
-        let path_str = sandbox.expand(raw_path);
-        let path = Path::new(&path_str);
+    for (path_str, assertion) in &then.files {
+        let path = Path::new(path_str);
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
@@ -135,7 +132,7 @@ pub(crate) fn check_files(then: &Then, sandbox: &Sandbox) -> Vec<AssertionFailur
             }
         };
 
-        if let Some(failure) = check_file_assertion(&path_str, &content, assertion) {
+        if let Some(failure) = check_file_assertion(path_str, &content, assertion) {
             failures.push(failure);
         }
     }
@@ -250,20 +247,19 @@ fn check_file_assertion(
 
 /// Verify that every path in `then.files_absent` does not exist after the scenario.
 ///
-/// Paths are expanded via [`Sandbox::expand`] for the same reason as [`check_files`].
-pub(crate) fn check_files_absent(then: &Then, sandbox: &Sandbox) -> Vec<AssertionFailure> {
+/// Paths in `then` must already be placeholder-expanded by the caller.
+pub(crate) fn check_files_absent(then: &Then) -> Vec<AssertionFailure> {
     let mut failures = Vec::new();
 
-    for raw_path in &then.files_absent {
-        let path_str = sandbox.expand(raw_path);
-        let path = Path::new(&path_str);
+    for path_str in &then.files_absent {
+        let path = Path::new(path_str);
 
         if path.exists() {
             failures.push(AssertionFailure {
                 kind: "file_absent",
                 expected: "path to not exist".to_owned(),
                 actual: "path exists".to_owned(),
-                locator: Some(path_str),
+                locator: Some(path_str.clone()),
             });
         }
     }
@@ -342,6 +338,8 @@ mod tests {
     use rstest::rstest;
 
     use crate::skill_test::fixture::{FileAssertion, Then};
+    use crate::skill_test::placeholder;
+    use crate::skill_test::sandbox::Sandbox;
 
     use super::*;
 
@@ -349,9 +347,13 @@ mod tests {
         Then::default()
     }
 
+    /// Create a sandbox, write `content` to the expanded `path`, and return
+    /// the sandbox and the resolved (expanded) path string. Callers use the
+    /// returned path string to construct `then.files` entries with pre-expanded
+    /// paths, matching what `expand_scenario` would produce at runtime.
     fn sandbox_with_file(path: &str, content: &str) -> (Sandbox, String) {
         let sb = Sandbox::new().expect("sandbox");
-        let full_path = sb.expand(path);
+        let full_path = placeholder::expand(path, &sb.paths());
         if let Some(parent) = std::path::Path::new(&full_path).parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -451,81 +453,72 @@ mod tests {
 
     #[test]
     fn file_equals_passes() {
-        let (sb, _) = sandbox_with_file("{source}/f.txt", "exact content");
+        let (_sb, full_path) = sandbox_with_file("{source}/f.txt", "exact content");
         let mut then = empty_then();
-        then.files = vec![(
-            "{source}/f.txt".to_owned(),
-            FileAssertion::Equals("exact content".to_owned()),
-        )];
-        assert!(check_files(&then, &sb).is_empty());
+        then.files = vec![(full_path, FileAssertion::Equals("exact content".to_owned()))];
+        assert!(check_files(&then).is_empty());
     }
 
     #[test]
     fn file_equals_fails_on_mismatch() {
-        let (sb, _) = sandbox_with_file("{source}/f.txt", "actual");
+        let (_sb, full_path) = sandbox_with_file("{source}/f.txt", "actual");
         let mut then = empty_then();
-        then.files = vec![(
-            "{source}/f.txt".to_owned(),
-            FileAssertion::Equals("expected".to_owned()),
-        )];
-        let failures = check_files(&then, &sb);
+        then.files = vec![(full_path, FileAssertion::Equals("expected".to_owned()))];
+        let failures = check_files(&then);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, "file");
     }
 
     #[test]
     fn file_contains_passes() {
-        let (sb, _) = sandbox_with_file("{source}/f.txt", "hello world");
+        let (_sb, full_path) = sandbox_with_file("{source}/f.txt", "hello world");
         let mut then = empty_then();
-        then.files = vec![(
-            "{source}/f.txt".to_owned(),
-            FileAssertion::Contains("hello".to_owned()),
-        )];
-        assert!(check_files(&then, &sb).is_empty());
+        then.files = vec![(full_path, FileAssertion::Contains("hello".to_owned()))];
+        assert!(check_files(&then).is_empty());
     }
 
     #[test]
     fn file_regex_passes() {
-        let (sb, _) = sandbox_with_file("{source}/f.txt", "version: 1.2.3");
+        let (_sb, full_path) = sandbox_with_file("{source}/f.txt", "version: 1.2.3");
         let mut then = empty_then();
         then.files = vec![(
-            "{source}/f.txt".to_owned(),
+            full_path,
             FileAssertion::Regex(r"version: \d+\.\d+\.\d+".to_owned()),
         )];
-        assert!(check_files(&then, &sb).is_empty());
+        assert!(check_files(&then).is_empty());
     }
 
     #[test]
     fn file_json_equals_passes() {
-        let (sb, _) = sandbox_with_file("{source}/f.json", r#"{"a":1}"#);
+        let (_sb, full_path) = sandbox_with_file("{source}/f.json", r#"{"a":1}"#);
         let mut then = empty_then();
         then.files = vec![(
-            "{source}/f.json".to_owned(),
+            full_path,
             FileAssertion::JsonEquals(serde_json::json!({"a": 1})),
         )];
-        assert!(check_files(&then, &sb).is_empty());
+        assert!(check_files(&then).is_empty());
     }
 
     #[test]
     fn file_json_subset_passes_when_superset() {
-        let (sb, _) = sandbox_with_file("{source}/f.json", r#"{"a":1,"b":2}"#);
+        let (_sb, full_path) = sandbox_with_file("{source}/f.json", r#"{"a":1,"b":2}"#);
         let mut then = empty_then();
         then.files = vec![(
-            "{source}/f.json".to_owned(),
+            full_path,
             FileAssertion::JsonSubset(serde_json::json!({"a": 1})),
         )];
-        assert!(check_files(&then, &sb).is_empty());
+        assert!(check_files(&then).is_empty());
     }
 
     #[test]
     fn file_json_subset_fails_when_key_missing() {
-        let (sb, _) = sandbox_with_file("{source}/f.json", r#"{"a":1}"#);
+        let (_sb, full_path) = sandbox_with_file("{source}/f.json", r#"{"a":1}"#);
         let mut then = empty_then();
         then.files = vec![(
-            "{source}/f.json".to_owned(),
+            full_path,
             FileAssertion::JsonSubset(serde_json::json!({"b": 2})),
         )];
-        let failures = check_files(&then, &sb);
+        let failures = check_files(&then);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, "file");
     }
@@ -533,12 +526,11 @@ mod tests {
     #[test]
     fn file_missing_reports_read_error() {
         let sb = Sandbox::new().expect("sandbox");
+        // Use a pre-expanded path pointing to a file that does not exist.
+        let nonexistent = placeholder::expand("{source}/nonexistent.txt", &sb.paths());
         let mut then = empty_then();
-        then.files = vec![(
-            "{source}/nonexistent.txt".to_owned(),
-            FileAssertion::Equals("anything".to_owned()),
-        )];
-        let failures = check_files(&then, &sb);
+        then.files = vec![(nonexistent, FileAssertion::Equals("anything".to_owned()))];
+        let failures = check_files(&then);
         assert_eq!(failures.len(), 1);
         assert!(failures[0].actual.contains("read error"));
     }
@@ -548,17 +540,19 @@ mod tests {
     #[test]
     fn files_absent_passes_when_not_present() {
         let sb = Sandbox::new().expect("sandbox");
+        // Pre-expand the path; the file does not exist, which is the passing case.
+        let missing = placeholder::expand("{source}/missing.txt", &sb.paths());
         let mut then = empty_then();
-        then.files_absent = vec!["{source}/missing.txt".to_owned()];
-        assert!(check_files_absent(&then, &sb).is_empty());
+        then.files_absent = vec![missing];
+        assert!(check_files_absent(&then).is_empty());
     }
 
     #[test]
     fn files_absent_fails_when_file_exists() {
-        let (sb, _) = sandbox_with_file("{source}/exists.txt", "content");
+        let (_sb, full_path) = sandbox_with_file("{source}/exists.txt", "content");
         let mut then = empty_then();
-        then.files_absent = vec!["{source}/exists.txt".to_owned()];
-        let failures = check_files_absent(&then, &sb);
+        then.files_absent = vec![full_path];
+        let failures = check_files_absent(&then);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, "file_absent");
     }

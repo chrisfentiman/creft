@@ -88,7 +88,7 @@ pub(crate) struct Given {
 }
 
 /// Content of a seed file written into the sandbox.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FileContent {
     /// Written verbatim (including any newline from YAML block scalars).
     Text(String),
@@ -111,7 +111,7 @@ pub(crate) struct When {
 }
 
 /// Stdin content for a scenario.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum StdinPayload {
     /// Written verbatim to the child's stdin.
     Text(String),
@@ -155,7 +155,7 @@ impl Default for Then {
 }
 
 /// Assertion applied to a file in the sandbox after the scenario runs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FileAssertion {
     /// File content must exactly equal this string.
     Equals(String),
