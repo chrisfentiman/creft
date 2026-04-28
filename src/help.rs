@@ -1260,7 +1260,7 @@ mod renderer {
                 (
                     "SKILL",
                     "Pattern matching skill basenames (the part of the filename before \
-                     `.test.yaml`). Plain text matches any skill whose name contains it. \
+                     `.test.yaml`). Plain text matches a basename exactly. \
                      Patterns containing `*` or `?` are anchored fnmatch globs.",
                 ),
                 (
