@@ -140,6 +140,12 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
 
         cli::Command::RemoveTest { skill, name } => cmd::skill::cmd_remove_test(ctx, &skill, &name),
 
+        cli::Command::Alias(alias_cmd) => match alias_cmd {
+            cli::AliasCommand::Add { from, to } => cmd::alias::cmd_alias_add(ctx, &from, &to),
+            cli::AliasCommand::Remove { from } => cmd::alias::cmd_alias_remove(ctx, &from),
+            cli::AliasCommand::List => cmd::alias::cmd_alias_list(ctx),
+        },
+
         cli::Command::Plugin(plugin_cmd) => match plugin_cmd {
             cli::PluginCommand::Install { source } => cmd::plugin::cmd_plugin_install(ctx, &source),
             cli::PluginCommand::Update { name } => cmd::plugin::cmd_plugin_update(ctx, name),

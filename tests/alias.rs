@@ -240,3 +240,407 @@ fn running_skill_without_alias_file_does_not_create_aliases_yaml() {
         "dispatch must not create local aliases.yaml when it did not exist"
     );
 }
+
+// ── creft alias add ───────────────────────────────────────────────────────────
+
+/// `creft alias add bl backlog` writes to the global scope when the target
+/// skill lives in the global scope. Stderr includes the scope tag `[global]`.
+#[test]
+fn alias_add_global_skill_writes_global_scope() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "backlog"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("added: bl → backlog [global]"));
+
+    // The alias file must exist in the global scope.
+    let global_aliases = env.home_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        global_aliases.exists(),
+        "aliases.yaml must be created in the global scope"
+    );
+    // The local scope must remain untouched.
+    let local_aliases = env.project_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        !local_aliases.exists(),
+        "aliases.yaml must not be created in the local scope"
+    );
+}
+
+/// After `creft alias add bl backlog`, running `creft bl` dispatches to the
+/// `backlog` skill.
+#[test]
+fn alias_add_then_invocation_dispatches_to_target() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "backlog"])
+        .assert()
+        .success();
+
+    creft_two_scope(&env)
+        .args(["bl"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backlog-ran"));
+}
+
+/// `creft alias add bl tasks` writes to the local scope when the target skill
+/// lives in the local scope. Stderr includes `[local]`.
+#[test]
+fn alias_add_local_skill_writes_local_scope() {
+    let env = TwoScopeEnv::new();
+    add_local_skill(&env, "tasks", "echo tasks-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "tasks"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("added: bl → tasks [local]"));
+
+    // Local scope gets the alias; global scope must be untouched.
+    let local_aliases = env.project_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        local_aliases.exists(),
+        "aliases.yaml must be created in the local scope"
+    );
+    let global_aliases = env.home_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        !global_aliases.exists(),
+        "aliases.yaml must not be created in the global scope"
+    );
+}
+
+/// Multi-segment `from` (e.g. `my new`) is accepted as a single quoted argument.
+#[test]
+fn alias_add_multi_segment_from_quoted() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "my new", "backlog"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("added: my new → backlog [global]"));
+}
+
+/// Updating an existing alias (same `from`) replaces it in-place rather than
+/// appending a duplicate.
+#[test]
+fn alias_add_update_existing_alias_replaces_in_place() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    add_global_skill(&env, "tasks", "echo tasks-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "backlog"])
+        .assert()
+        .success();
+
+    // Re-add with a different target — must replace, not duplicate.
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "tasks"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("added: bl → tasks [global]"));
+
+    // Running `creft bl` must dispatch to `tasks`, not `backlog`.
+    creft_two_scope(&env)
+        .args(["bl"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tasks-ran"));
+}
+
+// ── creft alias list ──────────────────────────────────────────────────────────
+
+/// When no aliases are defined, `creft alias list` prints "no aliases defined".
+#[test]
+fn alias_list_empty_prints_no_aliases_defined() {
+    let env = TwoScopeEnv::new();
+
+    creft_two_scope(&env)
+        .args(["alias", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no aliases defined"));
+}
+
+/// `creft alias list` shows all aliases sorted by `from` (lexicographic),
+/// with scope tags, to stdout.
+#[test]
+fn alias_list_shows_sorted_aliases_with_scope_tags() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    add_local_skill(&env, "tasks", "echo tasks-ran");
+    // Write aliases.yaml files directly to bypass the add command.
+    write_global_aliases(&env, "- from: zz\n  to: backlog\n");
+    write_local_aliases(&env, "- from: aa\n  to: tasks\n");
+
+    let out = creft_two_scope(&env)
+        .args(["alias", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+
+    // Both entries must appear.
+    assert!(
+        text.contains("aa → tasks [local]"),
+        "local alias must appear with [local] tag; got:\n{text}"
+    );
+    assert!(
+        text.contains("zz → backlog [global]"),
+        "global alias must appear with [global] tag; got:\n{text}"
+    );
+    // 'aa' must come before 'zz' (lexicographic sort).
+    let aa_pos = text.find("aa →").unwrap();
+    let zz_pos = text.find("zz →").unwrap();
+    assert!(
+        aa_pos < zz_pos,
+        "aliases must be sorted lexicographically by from; got:\n{text}"
+    );
+}
+
+// ── creft alias remove ────────────────────────────────────────────────────────
+
+/// `creft alias remove bl` removes the local alias first when both scopes
+/// define the same `from`.
+#[test]
+fn alias_remove_local_first_when_both_scopes_have_same_from() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    add_local_skill(&env, "tasks", "echo tasks-ran");
+    write_global_aliases(&env, "- from: bl\n  to: backlog\n");
+    write_local_aliases(&env, "- from: bl\n  to: tasks\n");
+
+    // First remove: takes the local alias.
+    creft_two_scope(&env)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("removed: bl [local]"));
+
+    // After removing local, the global alias is now active.
+    creft_two_scope(&env)
+        .args(["bl"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backlog-ran"));
+}
+
+/// A second `creft alias remove bl` after the local alias is gone removes the
+/// global alias.
+#[test]
+fn alias_remove_second_call_removes_global_alias() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    add_local_skill(&env, "tasks", "echo tasks-ran");
+    write_global_aliases(&env, "- from: bl\n  to: backlog\n");
+    write_local_aliases(&env, "- from: bl\n  to: tasks\n");
+
+    // Remove local first.
+    creft_two_scope(&env)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .success();
+
+    // Remove global next.
+    creft_two_scope(&env)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("removed: bl [global]"));
+
+    // No alias remains — `creft bl` must fail with command-not-found.
+    creft_two_scope(&env)
+        .args(["bl"])
+        .assert()
+        .failure();
+}
+
+/// A third `creft alias remove bl` when neither scope has it exits 2 with a
+/// not-found message.
+#[test]
+fn alias_remove_not_found_exits_2() {
+    let env = TwoScopeEnv::new();
+
+    creft_two_scope(&env)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("bl"));
+}
+
+// ── conflict rejection ────────────────────────────────────────────────────────
+
+/// Aliasing a built-in command name is rejected with exit code 3.
+#[test]
+fn alias_add_rejects_builtin_from() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "list", "backlog"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("built-in command"));
+}
+
+/// Aliasing an existing skill name is rejected with exit code 3.
+#[test]
+fn alias_add_rejects_existing_skill_from() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    // `backlog` is already a skill; aliasing it must fail.
+    creft_two_scope(&env)
+        .args(["alias", "add", "backlog", "backlog"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("skill"));
+}
+
+/// Aliasing a name whose target doesn't exist is rejected with exit code 2.
+#[test]
+fn alias_add_rejects_nonexistent_target() {
+    let env = TwoScopeEnv::new();
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "bl", "nonexistent-skill"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("nonexistent-skill"));
+}
+
+/// A `from` value with an invalid path token (e.g. a slash) is rejected with
+/// exit code 3.
+#[test]
+fn alias_add_rejects_invalid_from_segment() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+
+    creft_two_scope(&env)
+        .args(["alias", "add", "my/bad", "backlog"])
+        .assert()
+        .code(3);
+}
+
+/// Adding an alias that would create a cycle is rejected with exit code 3.
+///
+/// The setup: `fb` is a real skill. `aliases.yaml` already contains both
+/// `fa → fb` and `fb → fa` (written directly, bypassing the CLI target
+/// check that would normally reject `fb → fa` because `fa` is not a skill).
+///
+/// Calling `creft alias add fa fb`:
+///   - `fa` is not a skill/builtin/namespace → conflict check passes.
+///   - `fb` is a real skill → target check passes.
+///   - Post-write view: `fa → fb` (replaced), `fb → fa`.
+///   - Cycle walker starts at `fb` (new.to). Finds `fb → fa`. Lands on `fa`
+///     which equals `new.from`. Cycle detected → exit 3.
+#[test]
+fn alias_add_rejects_cycle() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "fb", "echo fb");
+    // Write both hops directly: fa → fb AND fb → fa.
+    // fb → fa bypasses add-time target validation (fa is not a real skill).
+    write_global_aliases(&env, "- from: fa\n  to: fb\n- from: fb\n  to: fa\n");
+
+    // alias add fa fb: conflict check passes (fa is not a skill), target check
+    // passes (fb is a real skill), then post-write cycle detection fires.
+    creft_two_scope(&env)
+        .args(["alias", "add", "fa", "fb"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("cycle"));
+}
+
+// ── argument parsing edge cases ───────────────────────────────────────────────
+
+/// `creft alias remove my new` (two unquoted tokens) causes the parser to
+/// reject "new" as an unexpected argument. Exit code 2 (CliParse).
+#[test]
+fn alias_remove_unquoted_two_tokens_exits_2() {
+    let env = TwoScopeEnv::new();
+
+    creft_two_scope(&env)
+        .args(["alias", "remove", "my", "new"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unexpected argument: new"));
+}
+
+/// `creft alias remove "my new"` (quoted, single argument) succeeds when the
+/// alias exists.
+#[test]
+fn alias_remove_quoted_two_segment_from_succeeds() {
+    let env = TwoScopeEnv::new();
+    add_global_skill(&env, "backlog", "echo backlog-ran");
+    write_global_aliases(&env, "- from: my new\n  to: backlog\n");
+
+    creft_two_scope(&env)
+        .args(["alias", "remove", "my new"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("removed: my new [global]"));
+}
+
+// ── --docs flag ───────────────────────────────────────────────────────────────
+
+/// `creft alias --docs` prints non-empty documentation to stdout.
+#[test]
+fn alias_docs_prints_nonempty_output() {
+    let env = TwoScopeEnv::new();
+
+    let out = creft_two_scope(&env)
+        .args(["alias", "--docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !out.is_empty(),
+        "`creft alias --docs` must print documentation to stdout"
+    );
+}
+
+/// `creft alias add --docs` prints non-empty documentation to stdout.
+#[test]
+fn alias_add_docs_prints_nonempty_output() {
+    let env = TwoScopeEnv::new();
+
+    let out = creft_two_scope(&env)
+        .args(["alias", "add", "--docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !out.is_empty(),
+        "`creft alias add --docs` must print documentation to stdout"
+    );
+}
+
+// ── malformed aliases.yaml ────────────────────────────────────────────────────
+
+/// A malformed `aliases.yaml` in the global scope causes `creft alias list`
+/// to exit 1 and include the file path in the error message.
+#[test]
+fn alias_list_malformed_aliases_yaml_exits_1_with_path() {
+    let env = TwoScopeEnv::new();
+    write_global_aliases(&env, "not: a: list:\n");
+
+    creft_two_scope(&env)
+        .args(["alias", "list"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("aliases.yaml"));
+}

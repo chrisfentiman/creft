@@ -11,18 +11,19 @@ use crate::search;
 
 const RESERVED: &[&str] = &[
     "add",
+    "alias",
+    "completions",
+    "doctor",
+    "help",
+    "init",
     "list",
-    "show",
-    "remove",
     "plugin",
+    "remove",
     "settings",
+    "show",
     "skills",
     "up",
-    "help",
     "version",
-    "init",
-    "doctor",
-    "completions",
 ];
 
 /// Returns `true` if `name` is a built-in creft subcommand that cannot be used as a skill name.
@@ -385,6 +386,39 @@ pub fn namespace_exists(ctx: &AppContext, prefix: &[&str]) -> Result<bool, Creft
     }))
 }
 
+/// Check if a given namespace prefix has any skills under it in a single scope.
+///
+/// Like `namespace_exists` but limited to one scope. Used by `cmd_alias_add`
+/// to decide which scope file to write the alias into when the target is a
+/// namespace prefix rather than a leaf skill.
+pub(crate) fn namespace_exists_in_scope(
+    ctx: &AppContext,
+    prefix: &[&str],
+    scope: Scope,
+) -> Result<bool, CreftError> {
+    let scope_skills = list_scope_with_packages(ctx, scope)?;
+    if scope_skills.iter().any(|(def, _)| {
+        let parts = def.name_parts();
+        parts.len() > prefix.len()
+            && parts[..prefix.len()]
+                .iter()
+                .zip(prefix.iter())
+                .all(|(a, b)| a == b)
+    }) {
+        return Ok(true);
+    }
+    let mut plugin_skills: Vec<(CommandDef, SkillSource)> = Vec::new();
+    append_activated_plugin_skills_for_scope(ctx, scope, &mut plugin_skills)?;
+    Ok(plugin_skills.iter().any(|(def, _)| {
+        let parts = def.name_parts();
+        parts.len() > prefix.len()
+            && parts[..prefix.len()]
+                .iter()
+                .zip(prefix.iter())
+                .all(|(a, b)| a == b)
+    }))
+}
+
 /// Check whether a command name is also a namespace prefix with child commands.
 ///
 /// Returns `true` if any command exists whose name starts with `name` followed
@@ -513,7 +547,7 @@ pub fn load_from(
 ///
 /// Skills in `scope`'s commands directory are returned first, followed by package skills
 /// from that scope's packages directory.
-fn list_scope_with_packages(
+pub(crate) fn list_scope_with_packages(
     ctx: &AppContext,
     scope: Scope,
 ) -> Result<Vec<(CommandDef, SkillSource)>, CreftError> {
@@ -594,6 +628,64 @@ pub fn list_all_with_source(
     Ok(result)
 }
 
+/// Collect activated plugin skills for a single scope and append them to `result`.
+///
+/// Deduplication (via `seen_plugin_skills`) is the caller's responsibility when
+/// spanning multiple scopes. When called from `append_activated_plugin_skills`,
+/// the cross-scope dedup set is threaded through both calls.
+pub(crate) fn append_activated_plugin_skills_for_scope(
+    ctx: &AppContext,
+    scope: Scope,
+    result: &mut Vec<(CommandDef, SkillSource)>,
+) -> Result<(), CreftError> {
+    let mut seen_plugin_skills: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    append_activated_plugin_skills_for_scope_dedup(ctx, scope, result, &mut seen_plugin_skills)
+}
+
+/// Inner helper that accepts a shared dedup set.
+///
+/// Shared between the per-scope public helper and the cross-scope
+/// `append_activated_plugin_skills`, which threads one dedup set across both
+/// scope calls so that a plugin activated in both local and global does not
+/// produce duplicate entries.
+fn append_activated_plugin_skills_for_scope_dedup(
+    ctx: &AppContext,
+    scope: Scope,
+    result: &mut Vec<(CommandDef, SkillSource)>,
+    seen_plugin_skills: &mut std::collections::HashSet<String>,
+) -> Result<(), CreftError> {
+    let settings = registry::load_settings(ctx, scope)?;
+    for (plugin_name, entry) in &settings.activated {
+        match registry::list_plugin_skills_unprefixed(ctx, plugin_name) {
+            Ok(skills) => {
+                for skill in skills {
+                    let key = format!("{}/{}", plugin_name, skill.name);
+                    if seen_plugin_skills.contains(&key) {
+                        continue;
+                    }
+                    let activated = match entry {
+                        ActivationEntry::All(true) => true,
+                        ActivationEntry::Commands(cmds) => cmds.contains(&skill.name),
+                        ActivationEntry::All(false) => false,
+                    };
+                    if activated {
+                        seen_plugin_skills.insert(key);
+                        result.push((skill, SkillSource::Plugin(plugin_name.clone())));
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not list skills for plugin '{}': {}",
+                    plugin_name, e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collect skills from all activated plugins and append them to `result`.
 ///
 /// Reads activation settings from both local and global scopes when available.
@@ -618,34 +710,12 @@ fn append_activated_plugin_skills(
     };
 
     for scope in scopes {
-        let settings = registry::load_settings(ctx, scope)?;
-        for (plugin_name, entry) in &settings.activated {
-            match registry::list_plugin_skills_unprefixed(ctx, plugin_name) {
-                Ok(skills) => {
-                    for skill in skills {
-                        let key = format!("{}/{}", plugin_name, skill.name);
-                        if seen_plugin_skills.contains(&key) {
-                            continue;
-                        }
-                        let activated = match entry {
-                            ActivationEntry::All(true) => true,
-                            ActivationEntry::Commands(cmds) => cmds.contains(&skill.name),
-                            ActivationEntry::All(false) => false,
-                        };
-                        if activated {
-                            seen_plugin_skills.insert(key);
-                            result.push((skill, SkillSource::Plugin(plugin_name.clone())));
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "warning: could not list skills for plugin '{}': {}",
-                        plugin_name, e
-                    );
-                }
-            }
-        }
+        append_activated_plugin_skills_for_scope_dedup(
+            ctx,
+            scope,
+            result,
+            &mut seen_plugin_skills,
+        )?;
     }
 
     Ok(())
@@ -733,10 +803,14 @@ fn migrate_flat_file(ctx: &AppContext, name: &str, scope: Scope) -> Result<bool,
     }
 }
 
-/// Resolve a command within a single scope (owned commands, then packages).
+/// Resolve a command within a single scope (owned commands, packages, and plugins).
 ///
 /// Returns `(command_name, remaining_args, SkillSource)` or `CreftError::CommandNotFound`.
-fn resolve_in_single_scope(
+///
+/// Exposed as `pub(crate)` so `cmd::alias` can determine which scope a target
+/// lives in without re-implementing the resolution logic. The internal caller
+/// (`resolve_command`) uses this function unchanged.
+pub(crate) fn resolve_in_scope(
     ctx: &AppContext,
     args: &[String],
     scope: Scope,
@@ -930,16 +1004,16 @@ pub fn resolve_command(
     }
 
     if ctx.creft_home.is_some() {
-        return resolve_in_single_scope(ctx, args, Scope::Global);
+        return resolve_in_scope(ctx, args, Scope::Global);
     }
 
     if ctx.find_local_root().is_some()
-        && let Ok(result) = resolve_in_single_scope(ctx, args, Scope::Local)
+        && let Ok(result) = resolve_in_scope(ctx, args, Scope::Local)
     {
         return Ok(result);
     }
 
-    resolve_in_single_scope(ctx, args, Scope::Global)
+    resolve_in_scope(ctx, args, Scope::Global)
 }
 
 #[cfg(test)]

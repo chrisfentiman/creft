@@ -768,6 +768,88 @@ Examples:
 
 Run 'creft add test --docs' for the full reference.";
 
+// ── Alias built-in help text ─────────────────────────────────────────────────
+
+const ALIAS_SHORT_ABOUT: &str = "\
+Manage namespace aliases that rewrite path prefixes at dispatch.
+
+Subcommands: add, remove, list
+
+Run 'creft alias <subcommand> --help' for details.
+Run 'creft alias --docs' for the full reference.";
+
+const ALIAS_LONG_ABOUT: &str = "\
+Manage namespace aliases that rewrite path prefixes at dispatch.
+
+Usage: creft alias <subcommand> [args]
+
+Subcommands:
+  add     Add an alias from one path to another
+  remove  Remove an alias by its 'from' path
+  list    List all aliases with scope tags
+
+Run 'creft alias <subcommand> --help' for details.";
+
+const ALIAS_ADD_SHORT_ABOUT: &str = "\
+Add a namespace alias: 'creft alias add bl backlog'.
+
+The alias is stored in the same scope as <to> (local or global).
+Conflicts with built-ins, existing skills, and cycles are rejected.
+
+Run 'creft alias add --docs' for the full reference.";
+
+const ALIAS_ADD_LONG_ABOUT: &str = "\
+Add a namespace alias.
+
+Aliases rewrite path prefixes at dispatch. After 'creft alias add bl backlog',
+'creft bl list' resolves to 'creft backlog list'. Multi-word prefixes use
+quoting: 'creft alias add \"my new\" \"foo bar\"'.
+
+The alias's storage scope is derived from <to>: if <to> is a local skill,
+package, or plugin, the alias goes in <project>/.creft/aliases.yaml; if
+global, in ~/.creft/aliases.yaml.
+
+Conflicts with built-in commands, existing skills, and existing namespaces
+are rejected. Cycles among aliases are rejected.
+
+Aliases rewrite argv only at the position of a direct skill invocation:
+'creft bl --help' rewrites to 'creft backlog --help'. Built-in arguments
+are not rewritten — 'creft help bl' does NOT show backlog's help; it shows
+the root listing because 'help' is the built-in's name and 'bl' is its
+literal argument.";
+
+const ALIAS_REMOVE_SHORT_ABOUT: &str = "\
+Remove an alias: 'creft alias remove bl'.
+
+Searches local then global; removes from the first scope that contains it.
+Multi-word <from> requires shell quoting: 'creft alias remove \"my new\"'.
+
+Run 'creft alias remove --docs' for the full reference.";
+
+const ALIAS_REMOVE_LONG_ABOUT: &str = "\
+Remove an alias.
+
+Searches local then global; removes from the first scope that contains
+the alias. Errors if no scope contains it.
+
+Multi-word <from> requires shell quoting: 'creft alias remove \"my new\"'.
+Unquoted multi-token forms error as 'unexpected argument'.";
+
+const ALIAS_LIST_SHORT_ABOUT: &str = "\
+List all aliases with scope tags.
+
+Prints aliases sorted by 'from', one per line, with '[local]' or '[global]'
+tags. 'no aliases defined' when empty.
+
+Run 'creft alias list --docs' for the full reference.";
+
+const ALIAS_LIST_LONG_ABOUT: &str = "\
+List all aliases.
+
+Prints aliases sorted by 'from', one per line, with the scope tag in
+brackets. Aliases are loaded from <project>/.creft/aliases.yaml (when
+present) and ~/.creft/aliases.yaml.";
+
 // ── Builtin entry list ──────────────────────────────────────────────────────
 
 /// A built-in command's listing metadata, used by the root listing.
@@ -782,6 +864,10 @@ const BUILTIN_ENTRIES: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: "add",
         description: "Save a skill from stdin",
+    },
+    BuiltinEntry {
+        name: "alias",
+        description: "Manage namespace aliases",
     },
     BuiltinEntry {
         name: "completions",
@@ -843,6 +929,10 @@ pub(crate) fn builtins() -> &'static [BuiltinEntry] {
 pub(crate) enum BuiltinHelp {
     Add,
     AddTest,
+    Alias,
+    AliasAdd,
+    AliasRemove,
+    AliasList,
     List,
     Show,
     Remove,
@@ -876,6 +966,10 @@ impl BuiltinHelp {
         match self {
             Self::Add => "add",
             Self::AddTest => "add test",
+            Self::Alias => "alias",
+            Self::AliasAdd => "alias add",
+            Self::AliasRemove => "alias remove",
+            Self::AliasList => "alias list",
             Self::List => "list",
             Self::Show => "show",
             Self::Remove => "remove",
@@ -918,6 +1012,10 @@ impl BuiltinHelp {
         &[
             Self::Add,
             Self::AddTest,
+            Self::Alias,
+            Self::AliasAdd,
+            Self::AliasRemove,
+            Self::AliasList,
             Self::List,
             Self::Show,
             Self::Remove,
@@ -953,6 +1051,10 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add_short(),
         BuiltinHelp::AddTest => renderer::render_add_test_short(),
+        BuiltinHelp::Alias => renderer::render_alias_short(),
+        BuiltinHelp::AliasAdd => renderer::render_alias_add_short(),
+        BuiltinHelp::AliasRemove => renderer::render_alias_remove_short(),
+        BuiltinHelp::AliasList => renderer::render_alias_list_short(),
         BuiltinHelp::List => renderer::render_list_short(),
         BuiltinHelp::Show => renderer::render_show_short(),
         BuiltinHelp::Remove => renderer::render_remove_short(),
@@ -985,6 +1087,10 @@ pub(crate) fn render_docs(which: BuiltinHelp) -> String {
     match which {
         BuiltinHelp::Add => renderer::render_add(),
         BuiltinHelp::AddTest => renderer::render_add_test(),
+        BuiltinHelp::Alias => renderer::render_alias(),
+        BuiltinHelp::AliasAdd => renderer::render_alias_add(),
+        BuiltinHelp::AliasRemove => renderer::render_alias_remove(),
+        BuiltinHelp::AliasList => renderer::render_alias_list(),
         BuiltinHelp::List => renderer::render_list(),
         BuiltinHelp::Show => renderer::render_show(),
         BuiltinHelp::Remove => renderer::render_remove(),
@@ -1027,18 +1133,21 @@ mod renderer {
 
     use super::{
         ADD_LONG_ABOUT, ADD_SHORT_ABOUT, ADD_TEST_LONG_ABOUT, ADD_TEST_SHORT_ABOUT,
-        COMPLETIONS_LONG_ABOUT, COMPLETIONS_SHORT_ABOUT, DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT,
-        INIT_LONG_ABOUT, INIT_SHORT_ABOUT, LIST_LONG_ABOUT, LIST_SHORT_ABOUT,
-        PLUGIN_ACTIVATE_LONG_ABOUT, PLUGIN_ACTIVATE_SHORT_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT,
-        PLUGIN_DEACTIVATE_SHORT_ABOUT, PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_INSTALL_SHORT_ABOUT,
-        PLUGIN_LIST_LONG_ABOUT, PLUGIN_LIST_SHORT_ABOUT, PLUGIN_LONG_ABOUT,
-        PLUGIN_SEARCH_LONG_ABOUT, PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT,
-        PLUGIN_UNINSTALL_LONG_ABOUT, PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT,
-        PLUGIN_UPDATE_SHORT_ABOUT, REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, REMOVE_TEST_LONG_ABOUT,
-        REMOVE_TEST_SHORT_ABOUT, SETTINGS_LONG_ABOUT, SETTINGS_SET_SHORT_ABOUT,
-        SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT, SHOW_SHORT_ABOUT,
-        SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT, SKILLS_TEST_SHORT_ABOUT,
-        UP_LONG_ABOUT, UP_SHORT_ABOUT,
+        ALIAS_ADD_LONG_ABOUT, ALIAS_ADD_SHORT_ABOUT, ALIAS_LIST_LONG_ABOUT,
+        ALIAS_LIST_SHORT_ABOUT, ALIAS_LONG_ABOUT, ALIAS_REMOVE_LONG_ABOUT,
+        ALIAS_REMOVE_SHORT_ABOUT, ALIAS_SHORT_ABOUT, COMPLETIONS_LONG_ABOUT,
+        COMPLETIONS_SHORT_ABOUT, DOCTOR_LONG_ABOUT, DOCTOR_SHORT_ABOUT, INIT_LONG_ABOUT,
+        INIT_SHORT_ABOUT, LIST_LONG_ABOUT, LIST_SHORT_ABOUT, PLUGIN_ACTIVATE_LONG_ABOUT,
+        PLUGIN_ACTIVATE_SHORT_ABOUT, PLUGIN_DEACTIVATE_LONG_ABOUT, PLUGIN_DEACTIVATE_SHORT_ABOUT,
+        PLUGIN_INSTALL_LONG_ABOUT, PLUGIN_INSTALL_SHORT_ABOUT, PLUGIN_LIST_LONG_ABOUT,
+        PLUGIN_LIST_SHORT_ABOUT, PLUGIN_LONG_ABOUT, PLUGIN_SEARCH_LONG_ABOUT,
+        PLUGIN_SEARCH_SHORT_ABOUT, PLUGIN_SHORT_ABOUT, PLUGIN_UNINSTALL_LONG_ABOUT,
+        PLUGIN_UNINSTALL_SHORT_ABOUT, PLUGIN_UPDATE_LONG_ABOUT, PLUGIN_UPDATE_SHORT_ABOUT,
+        REMOVE_LONG_ABOUT, REMOVE_SHORT_ABOUT, REMOVE_TEST_LONG_ABOUT, REMOVE_TEST_SHORT_ABOUT,
+        SETTINGS_LONG_ABOUT, SETTINGS_SET_SHORT_ABOUT, SETTINGS_SHORT_ABOUT,
+        SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT, SHOW_SHORT_ABOUT, SKILLS_LONG_ABOUT,
+        SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT, SKILLS_TEST_SHORT_ABOUT, UP_LONG_ABOUT,
+        UP_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -1105,6 +1214,38 @@ mod renderer {
                  a warning is printed. Note: replacement re-emits the file via \
                  the YAML emitter; comments may be lost.",
             )],
+        )
+    }
+
+    pub fn render_alias() -> String {
+        page(
+            "Manage namespace aliases",
+            "creft alias <subcommand> [args]",
+            ALIAS_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_alias_add() -> String {
+        page(
+            "Add a namespace alias",
+            "creft alias add <from> <to>",
+            ALIAS_ADD_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_alias_remove() -> String {
+        page(
+            "Remove an alias",
+            "creft alias remove <from>",
+            ALIAS_REMOVE_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_alias_list() -> String {
+        page(
+            "List all aliases",
+            "creft alias list",
+            ALIAS_LIST_LONG_ABOUT,
         )
     }
 
@@ -1357,6 +1498,38 @@ mod renderer {
         )
     }
 
+    pub fn render_alias_short() -> String {
+        page(
+            "Manage namespace aliases",
+            "creft alias <subcommand> [args]",
+            ALIAS_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_alias_add_short() -> String {
+        page(
+            "Add a namespace alias",
+            "creft alias add <from> <to>",
+            ALIAS_ADD_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_alias_remove_short() -> String {
+        page(
+            "Remove an alias",
+            "creft alias remove <from>",
+            ALIAS_REMOVE_SHORT_ABOUT,
+        )
+    }
+
+    pub fn render_alias_list_short() -> String {
+        page(
+            "List all aliases",
+            "creft alias list",
+            ALIAS_LIST_SHORT_ABOUT,
+        )
+    }
+
     pub fn render_list_short() -> String {
         page_with_options(
             "List available skills",
@@ -1573,8 +1746,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_returns_eleven_entries() {
-        assert_eq!(builtins().len(), 11);
+    fn builtins_returns_twelve_entries() {
+        assert_eq!(builtins().len(), 12);
     }
 
     #[test]

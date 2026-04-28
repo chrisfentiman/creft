@@ -77,6 +77,7 @@ pub(crate) enum Command {
         skill: String,
         name: String,
     },
+    Alias(AliasCommand),
     Plugin(PluginCommand),
     Settings(SettingsCommand),
     Skills(SkillsCommand),
@@ -103,6 +104,17 @@ pub(crate) enum PluginCommand {
     Deactivate { target: String, global: bool },
     List { name: Option<String> },
     Search { query: Vec<String> },
+}
+
+/// Subcommands for `creft alias`.
+#[derive(Debug)]
+pub(crate) enum AliasCommand {
+    /// `creft alias add <from> <to>`
+    Add { from: String, to: String },
+    /// `creft alias remove <from>`
+    Remove { from: String },
+    /// `creft alias list`
+    List,
 }
 
 /// Subcommands for `creft settings`.
@@ -189,6 +201,7 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
 
     match first.as_str() {
         "add" => parse_add(parser),
+        "alias" => parse_alias(parser),
         "list" => parse_list(parser),
         "show" => parse_show(parser, false),
         "remove" => parse_remove(parser),
@@ -700,6 +713,97 @@ fn parse_plugin_search(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> 
     Ok(Parsed::Command(Command::Plugin(PluginCommand::Search {
         query,
     })))
+}
+
+fn parse_alias(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let sub = match parser.next()? {
+        // Bare `creft alias` shows the alias-root help, mirroring `creft plugin`.
+        None => return Ok(Parsed::Help(BuiltinHelp::Alias)),
+        Some(Long("help") | Short('h')) => return Ok(Parsed::Help(BuiltinHelp::Alias)),
+        Some(Long("docs")) => return docs_or_search(parser, BuiltinHelp::Alias),
+        Some(Value(v)) => v.string()?,
+        Some(arg) => return Err(CliError::Usage(arg.unexpected().to_string())),
+    };
+
+    match sub.as_str() {
+        "add" => parse_alias_add(parser),
+        "remove" => parse_alias_remove(parser),
+        "list" => parse_alias_list(parser),
+        other => Err(CliError::UnknownCommand(format!("alias {other}"))),
+    }
+}
+
+fn parse_alias_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut from = None;
+    let mut to = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::AliasAdd)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::AliasAdd),
+            Value(v) if from.is_none() => from = Some(v.string()?),
+            Value(v) if to.is_none() => to = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let from = from.ok_or_else(|| {
+        CliError::MissingArg("<from>\n\nUsage: creft alias add <from> <to>".to_string())
+    })?;
+    let to = to.ok_or_else(|| {
+        CliError::MissingArg("<to>\n\nUsage: creft alias add <from> <to>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Alias(AliasCommand::Add { from, to })))
+}
+
+fn parse_alias_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut from = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::AliasRemove)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::AliasRemove),
+            Value(v) if from.is_none() => from = Some(v.string()?),
+            Value(v) => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument: {}",
+                    v.string()?
+                )));
+            }
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    let from = from.ok_or_else(|| {
+        CliError::MissingArg("<from>\n\nUsage: creft alias remove <from>".to_string())
+    })?;
+    Ok(Parsed::Command(Command::Alias(AliasCommand::Remove { from })))
+}
+
+fn parse_alias_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    if let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::AliasList)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::AliasList),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Alias(AliasCommand::List)))
 }
 
 fn parse_settings(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {

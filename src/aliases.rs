@@ -180,7 +180,6 @@ fn read_field(map: &Hash, field: &'static str) -> Result<String, YamlError> {
 /// Returns `CreftError::Frontmatter` when the file exists, is non-empty, but
 /// cannot be parsed; the path is included in the error message so the user can
 /// locate and fix the file.
-#[allow(dead_code)]
 pub fn load_for_scope(ctx: &AppContext, scope: Scope) -> Result<AliasFile, CreftError> {
     let path = ctx.aliases_path_for(scope)?;
     if !path.exists() {
@@ -198,7 +197,6 @@ pub fn load_for_scope(ctx: &AppContext, scope: Scope) -> Result<AliasFile, Creft
 ///
 /// Creates `<scope_root>/` if it does not exist. An empty `AliasFile` produces
 /// a zero-byte file, which `load_for_scope` reads back as `AliasFile::default()`.
-#[allow(dead_code)]
 pub fn save_for_scope(ctx: &AppContext, scope: Scope, file: &AliasFile) -> Result<(), CreftError> {
     let path = ctx.aliases_path_for(scope)?;
     if let Some(parent) = path.parent() {
@@ -266,13 +264,25 @@ impl AliasMap {
     ///
     /// Used by `cmd_alias_add`'s cycle detection to walk the same view the
     /// runtime rewrite uses.
-    // Stage 3 consumer. The method is public API for the alias built-in; the
-    // compiler cannot see the future call site from this crate, so suppress
-    // the unused warning explicitly rather than letting it drift into clippy
-    // noise.
-    #[allow(dead_code)]
     pub fn entries(&self) -> &[Alias] {
         &self.entries
+    }
+
+    /// Mutable access to entries for in-place replacement during cycle detection.
+    ///
+    /// Used by `insert_or_replace` in `cmd::alias` to build the post-write view
+    /// without re-sorting (the caller maintains sort order manually when needed).
+    pub(crate) fn entries_mut(&mut self) -> &mut Vec<Alias> {
+        &mut self.entries
+    }
+
+    /// Append a new alias without deduplication.
+    ///
+    /// Callers that need dedup+sort (like `insert_or_replace`) manage that
+    /// themselves. This is the primitive push used when building the
+    /// post-write view in `cmd::alias`.
+    pub(crate) fn push(&mut self, alias: Alias) {
+        self.entries.push(alias);
     }
 }
 
