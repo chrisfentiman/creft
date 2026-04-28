@@ -242,7 +242,7 @@ impl AliasMap {
             }
         }
         // Sort longest-from first so find_prefix() takes the first match.
-        entries.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.from.len()));
         Ok(AliasMap { entries })
     }
 
@@ -577,7 +577,7 @@ mod tests {
             })
             .collect();
         // Mirror AliasMap::load: sort longest-first.
-        entries.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.from.len()));
         AliasMap { entries }
     }
 

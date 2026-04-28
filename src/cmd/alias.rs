@@ -243,7 +243,7 @@ fn insert_or_replace(map: &mut AliasMap, new: &Alias) {
     // New entry appended at the end; re-sort to restore longest-first order.
     map.push(new.clone());
     map.entries_mut()
-        .sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        .sort_by_key(|e| std::cmp::Reverse(e.from.len()));
 }
 
 /// Upsert `alias` into `file`: replace any existing entry with the same `from`.
