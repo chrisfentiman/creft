@@ -296,20 +296,20 @@ fn test_llm_pipe_empty_prev_sends_eof() {
         .success();
 }
 
-/// An llm block that exits 99 causes creft to return success (early pipeline termination).
+/// An LLM provider that exits 99 causes creft to propagate code 99 as a failure.
 ///
-/// Exit code 99 is the conventional "early successful exit" signal. Any block — including
-/// llm blocks — that exits 99 should stop pipeline execution and report success to the caller.
+/// Code 99 is a normal failure — the provider's exit code is no longer treated
+/// as an early-exit signal.
 #[test]
-fn test_llm_block_exit_99_early_return() {
+fn llm_block_provider_failure_propagates() {
     let dir = creft_env();
 
     // Write a script that consumes stdin, prints output, then exits 99.
     let script_dir = tempfile::TempDir::new().unwrap();
-    let script_path = script_dir.path().join("exit99.sh");
+    let script_path = script_dir.path().join("provider-fail.sh");
     {
         let mut f = std::fs::File::create(&script_path).unwrap();
-        f.write_all(b"#!/bin/sh\ncat\necho \"early exit output\"\nexit 99\n")
+        f.write_all(b"#!/bin/sh\ncat > /dev/null\nexit 99\n")
             .unwrap();
     }
 
@@ -324,7 +324,7 @@ fn test_llm_block_exit_99_early_return() {
 
     let provider_path = script_path.to_string_lossy();
     let skill = format!(
-        "---\nname: llm-exit99\ndescription: llm block that exits 99\n---\n\n\
+        "---\nname: llm-provider-fail\ndescription: llm provider exits 99\n---\n\n\
 ```llm\nprovider: {provider_path}\n---\nprompt text\n```\n"
     );
 
@@ -334,12 +334,11 @@ fn test_llm_block_exit_99_early_return() {
         .assert()
         .success();
 
-    // Exit 99 from the llm block means early successful termination — creft must exit 0.
+    // Provider exits 99 → creft must propagate that as a failure.
     creft_with(&dir)
-        .args(["llm-exit99"])
+        .args(["llm-provider-fail"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("early exit output"));
+        .failure();
 }
 
 /// Data flows from bash through an LLM sponge stage to a downstream bash block via true pipe.
@@ -418,16 +417,18 @@ fn test_llm_sponge_provider_not_found_in_pipe() {
         .stderr(predicate::str::contains("nonexistent-xyz"));
 }
 
-/// Exit 99 from an LLM provider in a pipe chain suppresses relay output.
+/// An LLM provider that exits 99 in a pipe chain propagates the failure; the
+/// downstream bash block does not run.
 #[test]
-fn test_llm_sponge_exit_99_in_pipe() {
+fn llm_sponge_provider_failure_propagates() {
     let dir = creft_env();
 
     let script_dir = tempfile::TempDir::new().unwrap();
-    let script_path = script_dir.path().join("exit99.sh");
+    let script_path = script_dir.path().join("provider-fail.sh");
     {
         let mut f = std::fs::File::create(&script_path).unwrap();
-        f.write_all(b"#!/bin/sh\ncat\nexit 99\n").unwrap();
+        f.write_all(b"#!/bin/sh\ncat > /dev/null\nexit 99\n")
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -440,7 +441,7 @@ fn test_llm_sponge_exit_99_in_pipe() {
 
     let provider_path = script_path.to_string_lossy();
     let skill = format!(
-        "---\nname: sponge-exit99\ndescription: sponge exit 99 suppression\n---\n\n\
+        "---\nname: sponge-provider-fail\ndescription: sponge provider exits 99\n---\n\n\
 ```bash\necho data\n```\n\n\
 ```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n\n\
 ```bash\necho should-not-appear\n```\n"
@@ -453,10 +454,9 @@ fn test_llm_sponge_exit_99_in_pipe() {
         .success();
 
     creft_with(&dir)
-        .args(["sponge-exit99"])
+        .args(["sponge-provider-fail"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("should-not-appear").not());
+        .failure();
 }
 
 /// When the first block in a pipe chain is an LLM sponge, it reads from parent stdin.
@@ -531,14 +531,14 @@ args:\n  - name: greeting\n    required: true\n---\n\n\
         .stdout(predicate::str::contains("data"));
 }
 
-/// When an upstream bash block exits 99, the downstream LLM sponge must NOT
-/// spawn its provider. The provider should never run.
+/// When an upstream bash block calls `creft_exit`, the downstream LLM sponge
+/// must NOT spawn its provider. The provider should never run.
 ///
-/// Regression guard for Bug 1: before the fix, the sponge would read EOF and
+/// Regression guard: before the fix, the sponge would read EOF and
 /// unconditionally spawn the provider with an empty prompt.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_prevents_sponge_spawn() {
+fn pipe_creft_exit_prevents_sponge_spawn() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = creft_env();
@@ -558,8 +558,8 @@ fn test_pipe_exit_99_prevents_sponge_spawn() {
 
     let provider_path = script_path.to_string_lossy();
     let skill = format!(
-        "---\nname: exit99-no-sponge\ndescription: upstream exit 99 prevents sponge spawn\n---\n\n\
-```bash\nexit 99\n```\n\n\
+        "---\nname: creft-exit-no-sponge\ndescription: upstream creft_exit prevents sponge spawn\n---\n\n\
+```bash\ncreft_exit\n```\n\n\
 ```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n"
     );
 
@@ -571,7 +571,7 @@ fn test_pipe_exit_99_prevents_sponge_spawn() {
 
     let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["exit99-no-sponge"])
+        .args(["creft-exit-no-sponge"])
         .assert()
         .success();
     let elapsed = start.elapsed();
@@ -582,19 +582,20 @@ fn test_pipe_exit_99_prevents_sponge_spawn() {
     );
     assert!(
         elapsed.as_secs() < 5,
-        "must complete quickly when upstream exits 99 (took {:?})",
+        "must complete quickly when upstream calls creft_exit (took {:?})",
         elapsed
     );
 }
 
-/// Exit 99 with output followed by an LLM sponge: the sponge consumes the upstream
-/// output via read_to_end before the cancel token fires. The sponge capture channel
-/// must recover the output and the main thread must write it to stdout.
+/// `creft_exit` with output followed by an LLM sponge: the sponge consumes the
+/// upstream output via read_to_end before the cancel token fires. The sponge
+/// capture channel must recover the output and the main thread must write it to
+/// stdout.
 ///
-/// Regression guard for the sponge-consumes-exit-99-output gap.
+/// Regression guard for the sponge-captures-upstream-output path.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_sponge_captures_upstream_output() {
+fn pipe_creft_exit_sponge_captures_upstream_output() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = creft_env();
@@ -614,11 +615,11 @@ fn test_pipe_exit_99_sponge_captures_upstream_output() {
     }
 
     let provider_path = script_path.to_string_lossy();
-    // Block 0 writes output then exits 99. Block 1 (sponge) reads that output via
-    // read_to_end before cancel fires — the capture channel recovers it.
+    // Block 0 writes output then calls creft_exit. Block 1 (sponge) reads that
+    // output via read_to_end before cancel fires — the capture channel recovers it.
     let skill = format!(
-        "---\nname: sponge-captures-exit99\ndescription: sponge capture channel recovery\n---\n\n\
-```bash\necho captured-by-sponge; exit 99\n```\n\n\
+        "---\nname: sponge-captures-creft-exit\ndescription: sponge capture channel recovery\n---\n\n\
+```bash\necho captured-by-sponge; creft_exit\n```\n\n\
 ```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n"
     );
 
@@ -630,7 +631,7 @@ fn test_pipe_exit_99_sponge_captures_upstream_output() {
 
     let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["sponge-captures-exit99"])
+        .args(["sponge-captures-creft-exit"])
         .assert()
         .success()
         .stdout(predicate::str::contains("captured-by-sponge"));
@@ -647,16 +648,17 @@ fn test_pipe_exit_99_sponge_captures_upstream_output() {
     );
 }
 
-/// Exit 99 from an upstream bash block must not spawn either downstream LLM sponge.
+/// `creft_exit` from an upstream bash block must not spawn either downstream
+/// LLM sponge.
 ///
 /// Regression guard for the sponge-to-sponge cancel propagation gap: before the
-/// fix, the first sponge had no way to send the exit-99 determination to the
+/// fix, the first sponge had no way to send the cancel determination to the
 /// second sponge. The second sponge's `cancel_rx` was `None`, so it fell back to
 /// `ctx.is_cancelled()`, which may not be set before `read_to_end` completes and
 /// the sponge tries to spawn its provider.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_propagates_through_sponge_chain() {
+fn pipe_creft_exit_propagates_through_sponge_chain() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = creft_env();
@@ -681,12 +683,12 @@ fn test_pipe_exit_99_propagates_through_sponge_chain() {
     let p1 = script1_path.to_string_lossy();
     let p2 = script2_path.to_string_lossy();
 
-    // Block 0 (bash): exits 99 immediately.
+    // Block 0 (bash): calls creft_exit immediately.
     // Block 1 (llm): first sponge — must not spawn mock-provider1.
     // Block 2 (llm): second sponge — must not spawn mock-provider2.
     let skill = format!(
-        "---\nname: sponge-chain-exit99\ndescription: exit 99 propagates through sponge chain\n---\n\n\
-```bash\nexit 99\n```\n\n\
+        "---\nname: sponge-chain-creft-exit\ndescription: creft_exit propagates through sponge chain\n---\n\n\
+```bash\ncreft_exit\n```\n\n\
 ```llm\nprovider: {p1}\n---\n{{{{prev}}}}\n```\n\n\
 ```llm\nprovider: {p2}\n---\n{{{{prev}}}}\n```\n"
     );
@@ -699,7 +701,7 @@ fn test_pipe_exit_99_propagates_through_sponge_chain() {
 
     let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["sponge-chain-exit99"])
+        .args(["sponge-chain-creft-exit"])
         .assert()
         .success();
     let elapsed = start.elapsed();
@@ -714,7 +716,7 @@ fn test_pipe_exit_99_propagates_through_sponge_chain() {
     );
     assert!(
         elapsed.as_secs() < 5,
-        "must complete quickly when upstream exits 99 (took {:?})",
+        "must complete quickly when upstream calls creft_exit (took {:?})",
         elapsed
     );
 }
@@ -750,14 +752,14 @@ fn test_pipe_sponge_chain_normal_exit_proceeds() {
         .stdout(predicate::str::contains("start"));
 }
 
-/// Three-block chain: bash → bash(exit 99 with output) → LLM sponge.
+/// Three-block chain: bash → bash(creft_exit with output) → LLM sponge.
 ///
-/// Block 1 reads block 0's output, prints "mid-result", exits 99.
+/// Block 1 reads block 0's output, prints "mid-result", calls creft_exit.
 /// Block 2 (sponge) consumed block 1's output via read_to_end before cancel fired.
 /// The sponge capture channel must recover "mid-result" for the main thread.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_three_block_sponge_captures() {
+fn pipe_creft_exit_three_block_sponge_captures() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = creft_env();
@@ -776,9 +778,9 @@ fn test_pipe_exit_99_three_block_sponge_captures() {
 
     let provider_path = script_path.to_string_lossy();
     let skill = format!(
-        "---\nname: three-block-sponge-exit99\ndescription: three-block sponge capture\n---\n\n\
+        "---\nname: three-block-sponge-creft-exit\ndescription: three-block sponge capture\n---\n\n\
 ```bash\necho input\n```\n\n\
-```bash\ncat; echo mid-result; exit 99\n```\n\n\
+```bash\ncat; echo mid-result; creft_exit\n```\n\n\
 ```llm\nprovider: {provider_path}\n---\n{{{{prev}}}}\n```\n"
     );
 
@@ -790,7 +792,7 @@ fn test_pipe_exit_99_three_block_sponge_captures() {
 
     let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["three-block-sponge-exit99"])
+        .args(["three-block-sponge-creft-exit"])
         .assert()
         .success()
         .stdout(predicate::str::contains("mid-result"));
@@ -807,33 +809,33 @@ fn test_pipe_exit_99_three_block_sponge_captures() {
     );
 }
 
-/// A sponge whose own LLM provider exits 99 propagates that cancel to the downstream sponge.
+/// A sponge whose own LLM provider exits 99 propagates that as a failure to
+/// the downstream sponge.
 ///
-/// `bash | llm(exits 99) | llm(sentinel)` — the first sponge's child exits 99, so the
-/// origination path at pipe.rs:519-523 sends `true` through `cancel_tx_downstream`. The
-/// downstream sponge must not spawn its provider. This is distinct from the forwarding path
-/// tested by `test_pipe_exit_99_propagates_through_sponge_chain`, which exercises cancel
-/// forwarded from an upstream non-sponge (bash exits 99).
+/// `bash | llm(provider exits 99) | llm(sentinel)` — the first sponge's child
+/// exits with code 99. After this change, code 99 from a provider is a normal
+/// failure: it propagates as `ExecutionFailed { code: 99 }` and the downstream
+/// sponge does not run.
 #[test]
 #[cfg(unix)]
-fn test_pipe_sponge_originated_exit_99_cancels_downstream() {
+fn pipe_sponge_provider_99_propagates_as_failure() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = creft_env();
     let script_dir = tempfile::TempDir::new().unwrap();
 
-    let exit99_path = script_dir.path().join("provider-exit99.sh");
+    let fail_path = script_dir.path().join("provider-fail.sh");
     let sentinel = script_dir.path().join("sentinel.txt");
     let sentinel_provider_path = script_dir.path().join("sentinel-provider.sh");
 
     // First provider: reads stdin to satisfy the sponge's read_to_end, then exits 99.
     {
         let content = "#!/bin/sh\ncat > /dev/null\nexit 99\n";
-        let mut f = std::fs::File::create(&exit99_path).unwrap();
+        let mut f = std::fs::File::create(&fail_path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         let mut perms = f.metadata().unwrap().permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&exit99_path, perms).unwrap();
+        std::fs::set_permissions(&fail_path, perms).unwrap();
     }
 
     // Second provider (sentinel): creates a file when spawned, proving it ran.
@@ -846,11 +848,11 @@ fn test_pipe_sponge_originated_exit_99_cancels_downstream() {
         std::fs::set_permissions(&sentinel_provider_path, perms).unwrap();
     }
 
-    let p1 = exit99_path.to_string_lossy();
+    let p1 = fail_path.to_string_lossy();
     let p2 = sentinel_provider_path.to_string_lossy();
 
     let skill = format!(
-        "---\nname: sponge-exit99-originated\ndescription: sponge-originated exit-99 cancels downstream\n---\n\n\
+        "---\nname: sponge-provider-99-fail\ndescription: sponge provider 99 propagates as failure\n---\n\n\
 ```bash\necho input\n```\n\n\
 ```llm\nprovider: {p1}\n---\n{{{{prev}}}}\n```\n\n\
 ```llm\nprovider: {p2}\n---\n{{{{prev}}}}\n```\n"
@@ -862,20 +864,13 @@ fn test_pipe_sponge_originated_exit_99_cancels_downstream() {
         .assert()
         .success();
 
-    let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["sponge-exit99-originated"])
+        .args(["sponge-provider-99-fail"])
         .assert()
-        .success();
-    let elapsed = start.elapsed();
+        .failure();
 
     assert!(
         !sentinel.exists(),
         "downstream sponge provider must not have been spawned (sentinel file found)",
-    );
-    assert!(
-        elapsed.as_secs() < 5,
-        "must complete quickly when upstream sponge exits 99 (took {:?})",
-        elapsed
     );
 }

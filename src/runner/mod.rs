@@ -317,13 +317,6 @@ impl RunContext {
     }
 }
 
-/// Exit code that signals early successful return — skip remaining blocks.
-///
-/// A block that exits 99 is treated as a successful early termination of
-/// the pipeline. creft intercepts this code and returns 0 to the caller.
-/// All other non-zero exit codes propagate as errors.
-pub(crate) const EARLY_EXIT: i32 = 99;
-
 /// Prefix applied to every arg-derived environment variable name.
 ///
 /// Segregates user-controlled arg values from inherited environment variables
@@ -958,27 +951,6 @@ fn execute_block(
         .unwrap_or_default();
     #[cfg(not(unix))]
     let primitives_snapshot = std::collections::BTreeMap::new();
-
-    if exit_code_of(&output.status) == Some(EARLY_EXIT) {
-        eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
-        // Print any output produced before the early exit so it is not lost.
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        print!("{}", stdout);
-        if ctx.is_verbose() && !output.stderr.is_empty() {
-            let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
-            let _ = std::io::stderr().write_all(&output.stderr);
-        }
-        emit_trace(
-            ctx,
-            &TraceRecord {
-                block: block_idx,
-                lang: block.lang.clone(),
-                exit: EARLY_EXIT,
-                primitives: primitives_snapshot,
-            },
-        );
-        return Err(CreftError::EarlyExit);
-    }
 
     if !output.status.success() {
         // Suppress child stderr when killed by SIGINT: the user pressed Ctrl+C
@@ -2953,12 +2925,11 @@ echo "get completed"
         );
     }
 
-    /// A block that triggers the EARLY_EXIT path (`exit 99`) emits a trace record
-    /// before the runner propagates the early-exit error. Without this record the
-    /// framework cannot account for the block in coverage.
+    /// A block that exits with code 99 emits a trace record carrying the raw
+    /// wait-status (code 99 is a normal failure, not a special sentinel).
     #[cfg(unix)]
     #[test]
-    fn trace_early_exit_99_emits_record() {
+    fn trace_code_99_emits_failure_record() {
         let raw =
             "---\nname: trace-early-exit\ndescription: trace test\n---\n\n```bash\nexit 99\n```\n";
         let cmd = parse_skill(raw);
@@ -2972,12 +2943,12 @@ echo "get completed"
         assert_eq!(
             records.len(),
             1,
-            "trace record must arrive even for exit-99 early-exit"
+            "one trace record expected for a failed block"
         );
-        // exit 99 is the EARLY_EXIT sentinel; the trace carries the raw wait-status.
+        // code 99 is a normal failure; the trace carries the raw wait-status.
         assert_eq!(
             records[0]["exit"], 99,
-            "EARLY_EXIT (exit 99) must propagate as exit code 99 in the trace record"
+            "code 99 must propagate as exit code 99 in the trace record"
         );
     }
 

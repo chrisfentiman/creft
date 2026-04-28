@@ -6,9 +6,7 @@ use crate::model::{CodeBlock, ParsedCommand};
 
 use super::blocks::spawn_block;
 use super::substitute::substitute;
-use super::{
-    EARLY_EXIT, RunContext, exit_code_of, make_execution_error, preamble, prepare_block_script,
-};
+use super::{RunContext, exit_code_of, make_execution_error, preamble, prepare_block_script};
 
 #[cfg(unix)]
 use super::channel::{ExitSignal, PrimitiveContext, SideChannel, TerminalWriter};
@@ -19,8 +17,11 @@ use super::signal::PipeSignalGuard;
 ///
 /// Created by `dup_pipe_stdout` to hold a second handle to an inter-block pipe
 /// buffer. Kept alive so the kernel pipe buffer survives after the downstream
-/// block is killed. On exit 99, drain this reader to recover the exit-99
-/// block's unread output.
+/// block is killed. When a middle-block calls `creft_exit`, drain this reader
+/// to recover the bytes that block wrote to its stdout pipe but were not yet
+/// consumed by the downstream block (which is killed on the side-channel signal).
+/// The identifier name retains its original "exit99" prefix from the legacy
+/// consumer; this is identifier history, not current behavior.
 #[cfg(unix)]
 struct DupedPipeReader {
     fd: std::os::unix::io::OwnedFd,
@@ -49,8 +50,9 @@ impl DupedPipeReader {
     /// arrives within `timeout_ms` milliseconds per poll call, drain stops.
     ///
     /// This prevents the drain from hanging when an orphaned grandchild of
-    /// the exit-99 block still holds the pipe's write end open after the
-    /// process group was killed.
+    /// the early-exit block still holds the pipe's write end open after the
+    /// process group was killed (the surviving consumer is the `creft_exit`
+    /// middle-block recovery path).
     fn drain_with_timeout(&mut self, out: &mut Vec<u8>, timeout_ms: i32) {
         use std::os::unix::io::AsRawFd as _;
         let raw_fd = self.fd.as_raw_fd();
@@ -162,14 +164,14 @@ pub(super) struct PipeResult {
 /// Outcome of a single block in a pipe chain.
 ///
 /// Replaces `Result<ExitStatus, io::Error>` in `ReaperResult` to accommodate
-/// blocks that were cancelled before spawning (e.g. upstream exit 99).
+/// blocks that were cancelled before spawning (upstream `creft_exit`).
 #[cfg(unix)]
 pub(crate) enum BlockOutcome {
     /// Block spawned and exited with a status.
     Exited(std::process::ExitStatus),
     /// Block failed to spawn or wait.
     Error(std::io::Error),
-    /// Block was cancelled before spawning (upstream exit 99).
+    /// Block was cancelled before spawning (upstream `creft_exit`).
     Cancelled,
 }
 
@@ -195,18 +197,23 @@ pub(super) struct SpongeChannels {
     pub(super) pgid_tx: Option<std::sync::mpsc::SyncSender<Result<u32, ()>>>,
     /// Sends the block's exit status to the reaper collector in `run_pipe_chain`.
     pub(super) reaper_tx: std::sync::mpsc::Sender<ReaperResult>,
-    /// Receiver for the upstream block's exit-99 determination.
-    /// The upstream reaper or upstream sponge sends `true` if it exited 99,
-    /// `false` otherwise. `None` when this sponge is block 0.
+    /// Receiver for the upstream block's cancel determination. The upstream
+    /// reaper sends `true` if it observed `creft_exit` on the side channel;
+    /// the upstream sponge sends `true` from its own cancel arm (when the
+    /// sponge thread itself was cancelled, panicked, or had a substitute error)
+    /// and `false` from its normal-completion arm (sponges cannot emit
+    /// `creft_exit` because the side channel is a child-process primitive).
+    /// `None` when this sponge is block 0.
     pub(super) cancel_rx: Option<std::sync::mpsc::Receiver<bool>>,
-    /// Sender to notify the downstream sponge of this block's exit-99
-    /// determination. `None` when the next block is not a sponge.
+    /// Sender to notify the downstream sponge of this block's cancel
+    /// determination (`true` on observed `creft_exit` or sponge cancel arm,
+    /// `false` otherwise). `None` when the next block is not a sponge.
     pub(super) cancel_tx_downstream: Option<std::sync::mpsc::Sender<bool>>,
 }
 
-/// Block until the upstream reaper reports whether the upstream block exited 99.
+/// Block until the upstream reaper reports its cancel determination.
 ///
-/// Returns `true` if the sponge should cancel (upstream exit 99 or SIGINT
+/// Returns `true` if the sponge should cancel (upstream `creft_exit` or SIGINT
 /// already fired). Returns `false` if the sponge should proceed.
 ///
 /// When `cancel_rx` is `None` (block 0), falls back to the shared cancel flag only.
@@ -221,7 +228,7 @@ fn should_cancel_sponge(
     match cancel_rx {
         Some(rx) => {
             // Block until the reaper sends its determination. The reaper
-            // always sends: true (exit 99) or false (normal exit). RecvError
+            // always sends: true (creft_exit) or false (normal exit). RecvError
             // means the reaper panicked — proceed rather than silently cancel.
             rx.recv().unwrap_or(false)
         }
@@ -254,11 +261,11 @@ fn should_cancel_sponge(
 /// back to `run_pipe_chain` so subsequent non-sponge blocks can join the process
 /// group.
 ///
-/// On cancellation (upstream exit 99), the sponge returns any buffered upstream
-/// bytes as `Some(data)` via the `JoinHandle` return value. The main thread joins
-/// the handle and writes the data to stdout deterministically, eliminating the
-/// race where a direct stdout write from the sponge thread could lose data during
-/// process teardown.
+/// On cancellation (upstream `creft_exit`), the sponge returns any buffered
+/// upstream bytes as `Some(data)` via the `JoinHandle` return value. The main
+/// thread joins the handle and writes the data to stdout deterministically,
+/// eliminating the race where a direct stdout write from the sponge thread
+/// could lose data during process teardown.
 ///
 /// Note: during pipe execution `PipeSignalGuard` overwrites the signal-hook
 /// handler, so `ctx.is_cancelled()` will not fire from SIGINT during pipe
@@ -302,10 +309,11 @@ pub(super) fn sponge_stage(
         // takes the vec; second check takes whatever is left.
         let mut raw_upstream = Some(raw_upstream_vec);
 
-        // If the pipeline was cancelled (upstream exit 99 or SIGINT), bail without
-        // spawning the provider. Return the buffered upstream bytes via the JoinHandle
-        // so the main thread can write them to stdout after joining — avoids the race
-        // where a direct thread write loses data during process teardown.
+        // If the pipeline was cancelled (upstream `creft_exit` or SIGINT), bail
+        // without spawning the provider. Return the buffered upstream bytes via the
+        // JoinHandle so the main thread can write them to stdout after joining —
+        // avoids the race where a direct thread write loses data during process
+        // teardown.
         if should_cancel_sponge(&ctx, &cancel_rx) {
             drop(pipe_writer);
             let data = raw_upstream.take().unwrap_or_default();
@@ -521,10 +529,15 @@ pub(super) fn sponge_stage(
 
         let status = child.wait();
 
-        let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
-            == Some(crate::runner::EARLY_EXIT);
         if let Some(ref tx) = cancel_tx_downstream {
-            let _ = tx.send(exit_99);
+            // An upstream sponge has no side channel (sponges run inside creft,
+            // not as child processes that can write fd 3). Its cancel arm already
+            // sends `true`; the normal-completion arm sends `false` (proceed) so
+            // the downstream sponge can run. If the provider exited non-zero, the
+            // downstream sponge's input is empty or partial — send `true` so it
+            // does not run with meaningless input.
+            let provider_failed = status.as_ref().ok().map(|s| !s.success()).unwrap_or(true);
+            let _ = tx.send(provider_failed);
         }
 
         let _ = reaper_tx.send(ReaperResult {
@@ -618,9 +631,10 @@ fn kill_pipe_group_by_pids(pgid: Option<u32>, pids: &[u32]) {
 /// already consumed everything before being killed). Returns `Some(buf)` when
 /// bytes were recovered.
 ///
-/// The 500ms per-poll timeout matches the legacy exit-99 drain site: it
-/// bounds the wait if a grandchild of the early-exit block still holds the
-/// pipe's write end open after `killpg`.
+/// The 500ms per-poll timeout bounds the wait if a grandchild of the
+/// early-exit block still holds the pipe's write end open after `killpg`.
+/// (The drain is invoked from the `creft_exit` middle-block stdout-recovery
+/// path.)
 #[cfg(unix)]
 fn drain_block_pipe_fd(
     drains: &mut std::collections::HashMap<usize, DupedPipeReader>,
@@ -664,14 +678,13 @@ struct WaitArgs {
 /// calling this function so the channel closes when all reaper and sponge
 /// threads finish.
 ///
-/// Relay buffer flush is selective: if an early-exit block (legacy exit 99
-/// or creft_exit) is the last block in the chain, its output has already
-/// been captured in the relay buffer and is flushed to the terminal. If the
-/// early-exit block is a middle block, the duplicated pipe fd in
-/// `exit99_drains` is drained and flushed instead. Sponge handles are
-/// joined here (before the relay thread) so that any captured upstream
-/// bytes returned by cancelled sponge threads are available for the output
-/// selection decision.
+/// Relay buffer flush is selective: if the `creft_exit` block is the last
+/// block in the chain, its output has already been captured in the relay
+/// buffer and is flushed to the terminal. If the `creft_exit` block is a
+/// middle block, the duplicated pipe fd in `exit99_drains` is drained and
+/// flushed instead. Sponge handles are joined here (before the relay thread)
+/// so that any captured upstream bytes returned by cancelled sponge threads
+/// are available for the output selection decision.
 #[cfg(unix)]
 fn wait_pipe_children_unix(
     args: WaitArgs,
@@ -753,7 +766,10 @@ fn wait_pipe_children_unix(
 
     let mut results: Vec<PipeResult> = Vec::new();
     let mut early_exit = false;
-    // Captured stdout from a middle-block exit 99, recovered via the dup'd fd.
+    // Captured stdout from a middle-block that called `creft_exit`, recovered
+    // via the dup'd fd. The local's name retains its "exit99" prefix from the
+    // legacy consumer; the only path that populates it now is the post-loop
+    // `creft_exit_block` branch below.
     let mut exit99_captured: Option<Vec<u8>> = None;
 
     while let Ok(reaper_result) = rx.recv() {
@@ -767,25 +783,6 @@ fn wait_pipe_children_unix(
                 return Err(CreftError::Io(e));
             }
             BlockOutcome::Exited(status) => {
-                if exit_code_of(&status) == Some(EARLY_EXIT) && !early_exit {
-                    early_exit = true;
-                    eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
-                    // Kill all processes in the pipe group so grandchildren are also killed.
-                    // Falls back to per-PID kills if killpg fails.
-                    kill_pipe_group_by_pids(child_pgid, &child_pids);
-                    // Signal sponge threads to bail before spawning.
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                    // Drain the dup'd pipe fd for this block (if it's not the last block).
-                    // Drain errors are ignored — the pipe buffer may be empty or a
-                    // grandchild may still hold the write end open briefly after killpg.
-                    if let Some(buf) =
-                        drain_block_pipe_fd(&mut exit99_drains, reaper_result.block_idx)
-                    {
-                        exit99_captured = Some(buf);
-                    }
-                }
-
                 results.push(PipeResult {
                     block: reaper_result.block_idx,
                     lang: reaper_result.lang,
@@ -827,11 +824,7 @@ fn wait_pipe_children_unix(
             kill_pipe_group_by_pids(child_pgid, &child_pids);
         }
         // Recover the early-exit block's stdout from the inter-block pipe.
-        // Skipped when the legacy exit-99 path already populated exit99_captured
-        // (precedence matches early_exit_idx below: exit-99 wins over creft_exit).
-        if exit99_captured.is_none()
-            && let Some(buf) = drain_block_pipe_fd(&mut exit99_drains, idx)
-        {
+        if let Some(buf) = drain_block_pipe_fd(&mut exit99_drains, idx) {
             exit99_captured = Some(buf);
         }
     }
@@ -842,13 +835,9 @@ fn wait_pipe_children_unix(
     drop(exit99_drains);
 
     if early_exit {
-        // Prefer the exit-99 block (preserves existing behaviour); fall back to the
-        // creft_exit block when no block used the legacy early-exit code.
-        let early_exit_idx: Option<usize> = results
-            .iter()
-            .find(|r| exit_code_of(&r.status) == Some(EARLY_EXIT))
-            .map(|r| r.block)
-            .or(creft_exit_block);
+        // The only path that sets `early_exit` is the post-loop `creft_exit_block`
+        // branch above, so the output-source index is exactly that block.
+        let early_exit_idx: Option<usize> = creft_exit_block;
 
         // Select output source by priority:
         // 1. Early-exit block is last → relay buffer has its output.
@@ -890,8 +879,11 @@ fn wait_pipe_children_unix(
 
 /// Wait for all children in a non-Unix pipe chain using sequential wait calls.
 ///
-/// Fallback for platforms without process groups or kill(-pgid). Has the same
-/// sequential-wait race window as the original implementation.
+/// Non-Unix fallback. No early-exit primitive: `creft_exit` is Unix-only (it
+/// requires the side channel). The pipeline runs to completion or to the first
+/// non-zero failure.
+///
+/// Has the same sequential-wait race window as the original implementation.
 #[cfg(not(unix))]
 fn wait_pipe_children_fallback(
     children: Vec<Option<(std::process::Child, usize, String)>>,
@@ -899,7 +891,6 @@ fn wait_pipe_children_fallback(
     let mut children = children;
     let n = children.len();
     let mut results: Vec<PipeResult> = Vec::with_capacity(n);
-    let mut early_exit = false;
 
     for i in 0..children.len() {
         let (mut child, block_idx, lang) = children[i].take().expect("child taken once");
@@ -914,29 +905,6 @@ fn wait_pipe_children_fallback(
         };
         let status = child.wait().map_err(CreftError::Io)?;
 
-        if exit_code_of(&status) == Some(EARLY_EXIT) {
-            for remaining in children.iter_mut().skip(i + 1) {
-                if let Some((mut c, _, _)) = remaining.take() {
-                    let _ = c.kill();
-                    // Drain stderr from killed children to prevent deadlock.
-                    // The bytes are discarded — killed children's output is not actionable.
-                    if let Some(mut err) = c.stderr.take() {
-                        let mut discard = Vec::new();
-                        let _ = std::io::Read::read_to_end(&mut err, &mut discard);
-                    }
-                    let _ = c.wait();
-                }
-            }
-            early_exit = true;
-            results.push(PipeResult {
-                block: block_idx,
-                lang,
-                status,
-                stderr: captured_stderr,
-            });
-            break;
-        }
-
         results.push(PipeResult {
             block: block_idx,
             lang,
@@ -945,7 +913,7 @@ fn wait_pipe_children_fallback(
         });
     }
 
-    Ok((results, early_exit))
+    Ok((results, false))
 }
 
 /// Execute all blocks in a multi-block command concurrently with OS-level pipe
@@ -954,7 +922,9 @@ fn wait_pipe_children_fallback(
 /// All blocks are spawned before any are waited on. Block N's stdout is
 /// connected to block N+1's stdin via Stdio::from(PipeStdout). On Unix, the
 /// last block's stdout is buffered by a relay thread; output is flushed to the
-/// terminal only after confirming no block exited 99.
+/// terminal only after confirming no block called `creft_exit` (since a
+/// `creft_exit` upstream of the last block triggers the dup'd-fd recovery path
+/// instead).
 ///
 /// Blocks that return `true` from `needs_sponge()` participate as sponge stages:
 /// each sponge thread reads all upstream output, performs template substitution,
@@ -1107,7 +1077,7 @@ pub(super) fn run_pipe_chain(
             let cancel_rx = sponge_cancel_rxs.remove(&i);
 
             // When the next block is also a sponge, create a direct cancel channel
-            // so this sponge thread can send its exit-99 determination to the
+            // so this sponge thread can send its cancel determination to the
             // downstream sponge without going through the reaper.
             let cancel_tx_downstream: Option<std::sync::mpsc::Sender<bool>> = {
                 let next_is_sponge = cmd.blocks.get(i + 1).is_some_and(|b| b.needs_sponge());
@@ -1164,7 +1134,7 @@ pub(super) fn run_pipe_chain(
             if !is_last {
                 let pipe_stdout = PipeStdout::Pipe(pipe_reader);
                 // Dup the read end so the kernel buffer survives if the downstream
-                // block is killed on exit 99. Failure kills already-spawned children.
+                // block is killed on `creft_exit`. Failure kills already-spawned children.
                 let duped = dup_pipe_stdout(&pipe_stdout).inspect_err(|_| {
                     kill_pipe_group_by_pids(child_pgid, &child_pids);
                     drop(node_deps_dirs.drain(..));
@@ -1413,8 +1383,6 @@ pub(super) fn run_pipe_chain(
                     // dropped, which only happens after the loop regardless.
                     let _ = next_spawned_rx.recv();
                     let status = child.wait();
-                    let exit_99 = status.as_ref().ok().and_then(crate::runner::exit_code_of)
-                        == Some(crate::runner::EARLY_EXIT);
                     // Join the reader thread so the exit_signal slot is final.
                     // The child closed its fd 3 write end on exit; close_child_ends()
                     // closed the parent's copy at spawn time. So the reader has already
@@ -1422,13 +1390,11 @@ pub(super) fn run_pipe_chain(
                     reader_handle
                         .join()
                         .expect("side-channel reader thread panicked");
-                    let creft_exit_observed = exit_signal
+                    // signal fired: `creft_exit` reported via the side channel.
+                    let should_cancel = exit_signal
                         .lock()
                         .expect("exit signal lock poisoned")
                         .is_some();
-                    // Cancel the downstream sponge when either short-circuit
-                    // signal fired: exit 99 (legacy) or creft_exit (side channel).
-                    let should_cancel = cancel_verdict(exit_99, creft_exit_observed);
                     // Kill the process group on either cancel cause so orphaned
                     // grandchildren that still hold pipe write ends are cleaned up.
                     // Already-exited PIDs are silently ignored by kill_group.
@@ -1641,15 +1607,6 @@ pub(super) fn run_pipe_chain(
         }
     }
 
-    // Exit 99 from any block means early successful return — downstream blocks
-    // will have received EOF/SIGPIPE and exited cleanly as a side-effect.
-    if results
-        .iter()
-        .any(|r| exit_code_of(&r.status) == Some(EARLY_EXIT))
-    {
-        return Ok(());
-    }
-
     // Under --verbose, emit captured stderr for every block that produced any,
     // regardless of exit status. This lets users see what the child wrote even
     // when the block succeeded. The `[block N stderr]` prefix makes multi-block
@@ -1703,16 +1660,6 @@ fn find_root_cause(results: &[PipeResult]) -> Option<&PipeResult> {
         .find(|r| !r.status.success() && exit_code_of(&r.status).is_some())
 }
 
-/// Returns `true` when the downstream sponge should cancel.
-///
-/// Either the upstream block exited with the legacy early-exit code (99) or it
-/// sent a `creft_exit` message on the side channel before exiting. Both signals
-/// mean "stop — do not proceed with the sponge stage".
-#[cfg(unix)]
-fn cancel_verdict(exit_99: bool, creft_exit_observed: bool) -> bool {
-    exit_99 || creft_exit_observed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1748,55 +1695,30 @@ mod tests {
         assert_eq!(buf, b"hello from pipe");
     }
 
-    /// Verify `cancel_verdict` — the function the reaper calls after joining its
-    /// reader to decide whether the downstream sponge should cancel.
+    /// Joining the reader thread provides the happens-before guarantee that
+    /// the reaper's design relies on: a write to the exit-signal slot by the
+    /// reader is guaranteed to be visible to the reaper after `join()`.
     ///
-    /// Cases: creft_exit alone, exit-99 alone, and clean exit with no signal.
-    /// End-to-end coverage (real process spawning + sponge thread) is provided
-    /// by the stage-3 skill-test fixture.
+    /// This is a property of `std::thread::JoinHandle::join` (not this
+    /// codebase specifically), included here as a living document of the
+    /// synchronisation assumption behind the reaper's read ordering.
     #[cfg(unix)]
-    mod cancel_verdict {
-        use super::super::*;
-        use pretty_assertions::assert_eq;
-        use rstest::rstest;
+    #[test]
+    fn join_provides_happens_before_for_exit_signal_write() {
+        let signal: std::sync::Arc<std::sync::Mutex<Option<i32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let signal_for_reader = std::sync::Arc::clone(&signal);
 
-        #[rstest]
-        #[case::creft_exit_zero(false, Some(0), true)]
-        #[case::exit_99(true, None, true)]
-        #[case::clean_exit(false, None, false)]
-        fn cancel_verdict_matches_expected(
-            #[case] exit_99: bool,
-            #[case] signal_value: Option<i32>,
-            #[case] expected: bool,
-        ) {
-            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(signal_value));
-            let creft_exit_observed = signal.lock().expect("exit signal lock poisoned").is_some();
-            assert_eq!(cancel_verdict(exit_99, creft_exit_observed), expected);
-        }
+        let reader_handle = std::thread::spawn(move || {
+            *signal_for_reader.lock().expect("exit signal lock poisoned") = Some(0);
+        });
 
-        /// Joining the reader thread provides the happens-before guarantee that
-        /// the reaper's design relies on: a write to the exit-signal slot by the
-        /// reader is guaranteed to be visible to the reaper after `join()`.
-        ///
-        /// This is a property of `std::thread::JoinHandle::join` (not this
-        /// codebase specifically), included here as a living document of the
-        /// synchronisation assumption behind the reaper's read ordering.
-        #[test]
-        fn join_provides_happens_before_for_exit_signal_write() {
-            let signal: ExitSignal = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let signal_for_reader = std::sync::Arc::clone(&signal);
-
-            let reader_handle = std::thread::spawn(move || {
-                *signal_for_reader.lock().expect("exit signal lock poisoned") = Some(0);
-            });
-
-            reader_handle.join().expect("reader thread must not panic");
-            let observed = *signal.lock().expect("exit signal lock poisoned");
-            assert_eq!(
-                observed,
-                Some(0),
-                "exit signal written by reader must be visible after join"
-            );
-        }
+        reader_handle.join().expect("reader thread must not panic");
+        let observed = *signal.lock().expect("exit signal lock poisoned");
+        assert_eq!(
+            observed,
+            Some(0),
+            "exit signal written by reader must be visible after join"
+        );
     }
 }

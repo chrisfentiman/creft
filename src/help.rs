@@ -88,8 +88,6 @@ Code Blocks:
       creft_exit 0        Same as above
       creft_exit 1        Stop with failure (exit 1)
 
-    exit 99 is deprecated -- use creft_exit instead.
-
   Interpreters: bash, python, node, zsh, docs (not executed -- shown in --help)
 
   LLM Blocks:
