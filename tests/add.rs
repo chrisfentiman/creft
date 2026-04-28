@@ -110,13 +110,15 @@ fn test_add_with_undeclared_placeholder_warns() {
         .stderr(predicate::str::contains("not declared in args or flags"));
 }
 
-/// Adding a skill where every placeholder matches a declared arg produces no
-/// validation warnings. Exit code must be 0 and stderr must not contain "warning:".
+/// Adding a skill where every placeholder matches a declared arg succeeds with no errors.
+/// The only warnings emitted are informational env-var hints (one per declared arg/flag
+/// in shell blocks), not placeholder-undeclared warnings.
 #[test]
-fn test_add_with_valid_placeholders_no_warnings() {
+fn test_add_with_valid_placeholders_succeeds_with_env_var_hints() {
     let dir = creft_env();
 
-    // `{{who}}` is declared in `args`, so no warning should be emitted.
+    // `{{who}}` is declared in `args`, so no undeclared-placeholder warning should appear.
+    // An env-var hint for CREFT_ARG_WHO is expected and informational.
     let markdown = "---\nname: valid-skill\ndescription: skill with valid placeholder\nargs:\n  - name: who\n    description: who to greet\n---\n\n```bash\necho \"Hello, {{who}}!\"\n```\n";
 
     creft_with(&dir)
@@ -126,8 +128,10 @@ fn test_add_with_valid_placeholders_no_warnings() {
         .success()
         // "added:" confirmation must appear.
         .stderr(predicate::str::contains("added: valid-skill"))
-        // No validation warnings expected.
-        .stderr(predicate::str::contains("warning:").not());
+        // No undeclared-placeholder warnings.
+        .stderr(predicate::str::contains("not declared in args or flags").not())
+        // The env-var hint for CREFT_ARG_WHO is expected.
+        .stderr(predicate::str::contains("CREFT_ARG_WHO"));
 }
 
 // ── syntax validation integration tests ──────────────────────────────────────

@@ -8,6 +8,7 @@ use crate::doctor;
 use crate::markdown;
 use crate::model::{AppContext, CodeBlock, CommandDef, PLACEHOLDER_RE};
 use crate::registry_config::{self, HttpMethod, RegistryEndpoint};
+use crate::runner::CREFT_ARG_ENV_PREFIX;
 use crate::store;
 
 /// Outcome of validating a parsed skill.
@@ -446,23 +447,30 @@ fn check_placeholders(
         }
     }
 
-    // In shell blocks, flags with hyphenated names cannot be used as bare bash
-    // variables ($always-confirm is a subtraction expression). Inform the author
-    // of the normalized env var name injected by the runner.
+    // In shell blocks, every declared arg and flag is injected as a
+    // CREFT_ARG_<NAME> environment variable. Inform the author of the mapping
+    // so they can read the value at runtime without guessing the transformation.
     if doctor::is_shell_lang(&block.lang) {
-        for flag in &def.flags {
-            if flag.name.contains('-') {
-                let env_name = flag.name.replace('-', "_").to_uppercase();
-                warnings.push(ValidationDiagnostic {
-                    block_index: Some(block_index),
-                    lang: Some(block.lang.clone()),
-                    message: format!(
-                        "flag '{}' is available as environment variable {} in shell blocks",
-                        flag.name, env_name
-                    ),
-                    line: None,
-                });
-            }
+        let all_names = def
+            .args
+            .iter()
+            .map(|a| a.name.as_str())
+            .chain(def.flags.iter().map(|f| f.name.as_str()));
+        for name in all_names {
+            let env_name = format!(
+                "{}{}",
+                CREFT_ARG_ENV_PREFIX,
+                name.replace('-', "_").to_uppercase()
+            );
+            warnings.push(ValidationDiagnostic {
+                block_index: Some(block_index),
+                lang: Some(block.lang.clone()),
+                message: format!(
+                    "shell block can read '{}' as environment variable {}",
+                    name, env_name
+                ),
+                line: None,
+            });
         }
     }
 }
@@ -1134,9 +1142,16 @@ mod tests {
         let def = make_def(vec!["repo", "number"], vec![]);
         let block = make_block("bash", "gh api repos/{{repo}}/issues/{{number}}");
         let result = validate_skill(&def, &[block], "", None);
+        assert!(result.errors.is_empty(), "expected no errors");
+        // Two env-var hints are emitted (one per declared arg in the shell block);
+        // no undeclared-placeholder warnings.
+        assert_eq!(result.warnings.len(), 2);
         assert!(
-            result.is_clean(),
-            "expected no warnings or errors, got: {:?}",
+            result
+                .warnings
+                .iter()
+                .all(|w| w.message.contains("environment variable")),
+            "all warnings should be env-var hints, got: {:?}",
             result.warnings
         );
     }
@@ -1196,7 +1211,17 @@ mod tests {
         let def = make_def(vec![], vec!["format", "style"]);
         let block = make_block("bash", "echo {{format}} {{style}}");
         let result = validate_skill(&def, &[block], "", None);
-        assert!(result.is_clean(), "flags should be in declared set");
+        assert!(result.errors.is_empty(), "flags should be in declared set");
+        // Two env-var hints are emitted (one per declared flag in the shell block);
+        // no undeclared-placeholder warnings.
+        assert_eq!(result.warnings.len(), 2);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|w| w.message.contains("environment variable")),
+            "all warnings should be env-var hints"
+        );
     }
 
     #[test]
@@ -1222,13 +1247,20 @@ mod tests {
         let def = make_def(vec!["prev"], vec![]);
         let block = make_block("bash", "echo {{prev}}");
         let result = validate_skill(&def, &[block], "", None);
-        // {{prev}} in block 0 produces the "first block has no preceding block" warning
-        // regardless of whether "prev" is also an arg name.
-        assert_eq!(result.warnings.len(), 1);
+        // Two warnings: {{prev}}-in-block-0 warning and the CREFT_ARG_PREV env-var hint.
+        assert_eq!(result.warnings.len(), 2);
         assert!(
-            result.warnings[0]
+            result.warnings.iter().any(|w| w
                 .message
-                .contains("first block has no preceding block output")
+                .contains("first block has no preceding block output")),
+            "expected the {{prev}}-in-block-0 warning"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("CREFT_ARG_PREV")),
+            "expected the CREFT_ARG_PREV env-var hint"
         );
     }
 
@@ -1270,8 +1302,18 @@ mod tests {
         let def = make_def(vec!["declared"], vec![]);
         let block = make_block("bash", "echo {{declared}} {{missing1}} {{missing2}}");
         let result = validate_skill(&def, &[block], "", None);
-        // declared is fine, missing1 and missing2 each produce a warning
-        assert_eq!(result.warnings.len(), 2);
+        // Three warnings: undeclared for missing1, undeclared for missing2, and
+        // the CREFT_ARG_DECLARED env-var hint for the declared arg.
+        assert_eq!(result.warnings.len(), 3);
+        let undeclared_count = result
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("not declared in args or flags"))
+            .count();
+        assert_eq!(
+            undeclared_count, 2,
+            "missing1 and missing2 each produce a warning"
+        );
     }
 
     // ── sanitize_placeholders unit tests ─────────────────────────────────────
@@ -1406,10 +1448,10 @@ mod tests {
         );
     }
 
-    // ── Hyphenated flag env var diagnostics ──────────────────────────────────
+    // ── Arg and flag env var diagnostics ────────────────────────────────────
 
     /// Returns warnings whose message contains "environment variable" — the
-    /// marker for the hyphenated-flag hint emitted by check_placeholders.
+    /// marker for the CREFT_ARG_ hint emitted by check_placeholders.
     fn env_var_hints(result: &ValidationResult) -> Vec<&ValidationDiagnostic> {
         result
             .warnings
@@ -1434,15 +1476,15 @@ mod tests {
             "warning should name the flag"
         );
         assert!(
-            hints[0].message.contains("ALWAYS_CONFIRM"),
-            "warning should show the normalized env var name"
+            hints[0].message.contains("CREFT_ARG_ALWAYS_CONFIRM"),
+            "warning should show the prefixed env var name"
         );
     }
 
     #[test]
     fn hyphenated_flag_in_non_shell_block_emits_no_diagnostic() {
-        // Python authors use os.environ directly; no need to guide them toward
-        // the normalized name since the subtraction-expression trap doesn't apply.
+        // Python authors use os.environ directly; the env-var hint is only
+        // useful for shell blocks.
         let def = make_def(vec![], vec!["always-confirm"]);
         let block = make_block("python", "print('hello')\n");
         let result = validate_skill(&def, &[block], "", None);
@@ -1457,14 +1499,24 @@ mod tests {
     }
 
     #[test]
-    fn non_hyphenated_flag_in_bash_block_emits_no_env_var_warning() {
+    fn non_hyphenated_flag_in_bash_block_emits_env_var_hint() {
         let def = make_def(vec![], vec!["format"]);
         let block = make_block("bash", "echo hello\n");
         let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
+        let hints = env_var_hints(&result);
+        assert_eq!(
+            hints.len(),
+            1,
+            "every flag in a bash block should emit an env var hint"
+        );
         assert!(
-            env_var_hints(&result).is_empty(),
-            "non-hyphenated flag should not emit the env var diagnostic"
+            hints[0].message.contains("format"),
+            "hint should name the flag"
+        );
+        assert!(
+            hints[0].message.contains("CREFT_ARG_FORMAT"),
+            "hint should show the prefixed env var name"
         );
     }
 
@@ -1476,21 +1528,17 @@ mod tests {
         let result = validate_skill(&def, &[block], "", None);
         assert!(result.errors.is_empty());
         let hints = env_var_hints(&result);
-        assert_eq!(
-            hints.len(),
-            2,
-            "each hyphenated flag should produce one env var hint"
-        );
+        assert_eq!(hints.len(), 2, "each flag should produce one env var hint");
         let messages: Vec<&str> = hints.iter().map(|w| w.message.as_str()).collect();
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("output-format") && m.contains("OUTPUT_FORMAT"))
+                .any(|m| m.contains("output-format") && m.contains("CREFT_ARG_OUTPUT_FORMAT"))
         );
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("output-path") && m.contains("OUTPUT_PATH"))
+                .any(|m| m.contains("output-path") && m.contains("CREFT_ARG_OUTPUT_PATH"))
         );
     }
 
@@ -1512,7 +1560,7 @@ mod tests {
         assert!(
             env_var_hints(&result)
                 .iter()
-                .any(|w| w.message.contains("ALWAYS_CONFIRM")),
+                .any(|w| w.message.contains("CREFT_ARG_ALWAYS_CONFIRM")),
             "expected env var hint warning"
         );
     }

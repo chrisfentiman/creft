@@ -2759,7 +2759,7 @@ fn test_sequential_sigterm_preserves_stderr() {
 
 // ── env var injection tests ───────────────────────────────────────────────────
 
-/// A flag is accessible as an environment variable ($FORMAT) in bash blocks.
+/// A flag is accessible as the environment variable $CREFT_ARG_FORMAT in bash blocks.
 #[test]
 fn test_flag_injected_as_env_var() {
     let dir = creft_env();
@@ -2777,7 +2777,7 @@ fn test_flag_injected_as_env_var() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$FORMAT\"\n",
+            "echo \"$CREFT_ARG_FORMAT\"\n",
             "```\n",
         ))
         .assert()
@@ -2790,7 +2790,7 @@ fn test_flag_injected_as_env_var() {
         .stdout(predicate::str::contains("json"));
 }
 
-/// A positional arg is accessible as an environment variable ($TARGET) in bash blocks.
+/// A positional arg is accessible as the environment variable $CREFT_ARG_TARGET in bash blocks.
 #[test]
 fn test_arg_injected_as_env_var() {
     let dir = creft_env();
@@ -2807,7 +2807,7 @@ fn test_arg_injected_as_env_var() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$TARGET\"\n",
+            "echo \"$CREFT_ARG_TARGET\"\n",
             "```\n",
         ))
         .assert()
@@ -2820,7 +2820,7 @@ fn test_arg_injected_as_env_var() {
         .stdout(predicate::str::contains("production"));
 }
 
-/// A hyphenated flag name is accessible as an env var with underscores ($ALWAYS_CONFIRM).
+/// A hyphenated flag name is accessible as $CREFT_ARG_ALWAYS_CONFIRM (hyphens become underscores).
 #[test]
 fn test_hyphenated_flag_injected_with_underscores() {
     let dir = creft_env();
@@ -2838,7 +2838,7 @@ fn test_hyphenated_flag_injected_with_underscores() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$ALWAYS_CONFIRM\"\n",
+            "echo \"$CREFT_ARG_ALWAYS_CONFIRM\"\n",
             "```\n",
         ))
         .assert()
@@ -2851,7 +2851,7 @@ fn test_hyphenated_flag_injected_with_underscores() {
         .stdout(predicate::str::contains("true"));
 }
 
-/// Template substitution ({{format}}) and env var access ($FORMAT) both work in the same block.
+/// Template substitution ({{format}}) and env var access ($CREFT_ARG_FORMAT) both work in the same block.
 #[test]
 fn test_template_and_env_var_both_resolve() {
     let dir = creft_env();
@@ -2869,7 +2869,7 @@ fn test_template_and_env_var_both_resolve() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"template={{format}} env=$FORMAT\"\n",
+            "echo \"template={{format}} env=$CREFT_ARG_FORMAT\"\n",
             "```\n",
         ))
         .assert()
@@ -2882,7 +2882,7 @@ fn test_template_and_env_var_both_resolve() {
         .stdout(predicate::str::contains("template=yaml env=yaml"));
 }
 
-/// In a multi-block pipe chain, all blocks see the injected env vars.
+/// In a multi-block pipe chain, all blocks see the injected env vars ($CREFT_ARG_TAG).
 #[test]
 fn test_pipe_chain_blocks_see_env_vars() {
     let dir = creft_env();
@@ -2900,12 +2900,12 @@ fn test_pipe_chain_blocks_see_env_vars() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"block1:$TAG\"\n",
+            "echo \"block1:$CREFT_ARG_TAG\"\n",
             "```\n",
             "\n",
             "```bash\n",
             "cat -\n",
-            "echo \"block2:$TAG\"\n",
+            "echo \"block2:$CREFT_ARG_TAG\"\n",
             "```\n",
         ))
         .assert()
