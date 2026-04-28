@@ -763,7 +763,10 @@ fn parse_alias_add(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     let to = to.ok_or_else(|| {
         CliError::MissingArg("<to>\n\nUsage: creft alias add <from> <to>".to_string())
     })?;
-    Ok(Parsed::Command(Command::Alias(AliasCommand::Add { from, to })))
+    Ok(Parsed::Command(Command::Alias(AliasCommand::Add {
+        from,
+        to,
+    })))
 }
 
 fn parse_alias_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
@@ -789,7 +792,9 @@ fn parse_alias_remove(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     let from = from.ok_or_else(|| {
         CliError::MissingArg("<from>\n\nUsage: creft alias remove <from>".to_string())
     })?;
-    Ok(Parsed::Command(Command::Alias(AliasCommand::Remove { from })))
+    Ok(Parsed::Command(Command::Alias(AliasCommand::Remove {
+        from,
+    })))
 }
 
 fn parse_alias_list(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {

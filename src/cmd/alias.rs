@@ -8,8 +8,9 @@
 use crate::aliases::{Alias, AliasFile, AliasMap, load_for_scope, save_for_scope};
 use crate::error::CreftError;
 use crate::model::{AppContext, Scope};
-use crate::store::{is_reserved, namespace_exists, namespace_exists_in_scope, resolve_command,
-    resolve_in_scope};
+use crate::store::{
+    is_reserved, namespace_exists, namespace_exists_in_scope, resolve_command, resolve_in_scope,
+};
 
 /// `creft alias add <from> <to>`
 ///
@@ -77,7 +78,11 @@ pub fn cmd_alias_remove(ctx: &AppContext, from: &str) -> Result<(), CreftError> 
         if let Some(idx) = file.aliases.iter().position(|a| a.from == from_segments) {
             file.aliases.remove(idx);
             save_for_scope(ctx, scope, &file)?;
-            eprintln!("removed: {} [{}]", from_segments.join(" "), scope_tag(scope));
+            eprintln!(
+                "removed: {} [{}]",
+                from_segments.join(" "),
+                scope_tag(scope)
+            );
             return Ok(());
         }
     }
@@ -101,16 +106,16 @@ pub fn cmd_alias_list(ctx: &AppContext) -> Result<(), CreftError> {
         crate::aliases::AliasFile::default()
     };
 
-    // Collect tagged entries. Under CREFT_HOME both paths resolve to the same
-    // file; because find_local_root() returns None, the local branch is
-    // skipped and only global entries appear (tagged [global]).
-    let mut entries: Vec<(String, Scope)> = global
+    // Collect (from, to, scope) triples in a single pass. Under CREFT_HOME
+    // find_local_root() returns None, so the local branch is skipped and only
+    // global entries appear (tagged [global]).
+    let mut entries: Vec<(String, String, Scope)> = global
         .aliases
         .iter()
-        .map(|a| (a.from.join(" "), Scope::Global))
+        .map(|a| (a.from.join(" "), a.to.join(" "), Scope::Global))
         .collect();
     for a in &local.aliases {
-        entries.push((a.from.join(" "), Scope::Local));
+        entries.push((a.from.join(" "), a.to.join(" "), Scope::Local));
     }
 
     if entries.is_empty() {
@@ -121,23 +126,7 @@ pub fn cmd_alias_list(ctx: &AppContext) -> Result<(), CreftError> {
     // Stable sort by the joined from string (case-sensitive, lexicographic).
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Build lookup maps for to-strings so we can print the target.
-    let global_map: std::collections::HashMap<String, String> = global
-        .aliases
-        .iter()
-        .map(|a| (a.from.join(" "), a.to.join(" ")))
-        .collect();
-    let local_map: std::collections::HashMap<String, String> = local
-        .aliases
-        .iter()
-        .map(|a| (a.from.join(" "), a.to.join(" ")))
-        .collect();
-
-    for (from_key, scope) in &entries {
-        let to_val = match scope {
-            Scope::Global => global_map.get(from_key).map(String::as_str).unwrap_or("?"),
-            Scope::Local => local_map.get(from_key).map(String::as_str).unwrap_or("?"),
-        };
+    for (from_key, to_val, scope) in &entries {
         println!("{} \u{2192} {} [{}]", from_key, to_val, scope_tag(*scope));
     }
 
@@ -216,9 +205,7 @@ fn check_conflict(ctx: &AppContext, from: &[String]) -> Result<(), CreftError> {
 
     // Check against existing skills (any scope, cross-source).
     let from_str: Vec<&str> = from.iter().map(String::as_str).collect();
-    // We convert to a Vec<String> for resolve_command's &[String] interface.
-    let from_strings: Vec<String> = from.to_vec();
-    match resolve_command(ctx, &from_strings) {
+    match resolve_command(ctx, from) {
         Ok((_, remaining, _)) if remaining.is_empty() => {
             return Err(CreftError::AliasConflict {
                 from: from.join(" "),
@@ -242,16 +229,21 @@ fn check_conflict(ctx: &AppContext, from: &[String]) -> Result<(), CreftError> {
 
 /// Replace an existing alias with the same `from` in `map`, or append.
 ///
-/// Mirrors `AliasMap::load`'s last-write-wins dedup so the cycle check walks
-/// the same post-write view the runtime rewrite would see.
+/// Maintains the longest-first order that `AliasMap::load` establishes so the
+/// cycle walker's `find` uses the same match semantics as the runtime rewrite's
+/// `find_prefix` — longest match first.
 fn insert_or_replace(map: &mut AliasMap, new: &Alias) {
     for entry in map.entries_mut() {
         if entry.from == new.from {
             *entry = new.clone();
+            // In-place replacement preserves length so the sort is unchanged.
             return;
         }
     }
+    // New entry appended at the end; re-sort to restore longest-first order.
     map.push(new.clone());
+    map.entries_mut()
+        .sort_by(|a, b| b.from.len().cmp(&a.from.len()));
 }
 
 /// Upsert `alias` into `file`: replace any existing entry with the same `from`.
@@ -289,10 +281,9 @@ fn would_create_cycle(post_write: &AliasMap, new: &Alias) -> bool {
         visited.insert(current_key);
 
         // Find the next hop using the same prefix-match the runtime uses.
-        let matched = post_write
-            .entries()
-            .iter()
-            .find(|a| current.len() >= a.from.len() && a.from.iter().zip(current.iter()).all(|(f, c)| f == c));
+        let matched = post_write.entries().iter().find(|a| {
+            current.len() >= a.from.len() && a.from.iter().zip(current.iter()).all(|(f, c)| f == c)
+        });
 
         match matched {
             None => return false,
@@ -307,6 +298,7 @@ fn would_create_cycle(post_write: &AliasMap, new: &Alias) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     use rstest::rstest;
 
     use super::*;
@@ -372,11 +364,7 @@ mod tests {
         // Pre-existing 2-cycle: a → b, b → a (disjoint from new alias c → d).
         // The visit set must prevent infinite looping.
         let new = make_alias(&["c"], &["d"]);
-        let map = make_map(&[
-            (&["a"], &["b"]),
-            (&["b"], &["a"]),
-            (&["c"], &["d"]),
-        ]);
+        let map = make_map(&[(&["a"], &["b"]), (&["b"], &["a"]), (&["c"], &["d"])]);
         assert!(
             !would_create_cycle(&map, &new),
             "a pre-existing disjoint cycle must not implicate the new alias"
@@ -406,31 +394,29 @@ mod tests {
     #[test]
     fn check_conflict_rejects_creft_binary_name() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = crate::model::AppContext::for_test(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
+        let ctx =
+            crate::model::AppContext::for_test(dir.path().to_path_buf(), dir.path().to_path_buf());
         let from = vec!["creft".to_string()];
         let err = check_conflict(&ctx, &from).expect_err("creft must be rejected");
-        assert!(
-            matches!(err, CreftError::AliasConflict { ref kind, .. } if kind == "binary name"),
-            "expected AliasConflict with kind='binary name'; got {err:?}"
-        );
+        let kind = match err {
+            CreftError::AliasConflict { kind, .. } => kind,
+            other => panic!("expected AliasConflict, got {other:?}"),
+        };
+        assert_eq!(kind, "binary name");
     }
 
     #[test]
     fn check_conflict_rejects_creft_internal_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = crate::model::AppContext::for_test(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
+        let ctx =
+            crate::model::AppContext::for_test(dir.path().to_path_buf(), dir.path().to_path_buf());
         let from = vec!["_creft".to_string(), "x".to_string()];
         let err = check_conflict(&ctx, &from).expect_err("_creft must be rejected");
-        assert!(
-            matches!(err, CreftError::AliasConflict { ref kind, .. } if kind == "built-in command"),
-            "expected AliasConflict with kind='built-in command'; got {err:?}"
-        );
+        let kind = match err {
+            CreftError::AliasConflict { kind, .. } => kind,
+            other => panic!("expected AliasConflict, got {other:?}"),
+        };
+        assert_eq!(kind, "built-in command");
     }
 
     #[rstest]
@@ -439,15 +425,14 @@ mod tests {
     #[case::alias_builtin("alias")]
     fn check_conflict_rejects_reserved_names(#[case] name: &str) {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = crate::model::AppContext::for_test(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        );
+        let ctx =
+            crate::model::AppContext::for_test(dir.path().to_path_buf(), dir.path().to_path_buf());
         let from = vec![name.to_string()];
         let err = check_conflict(&ctx, &from).expect_err("reserved name must be rejected");
-        assert!(
-            matches!(err, CreftError::AliasConflict { ref kind, .. } if kind == "built-in command"),
-            "expected AliasConflict with kind='built-in command' for '{name}'; got {err:?}"
-        );
+        let kind = match err {
+            CreftError::AliasConflict { kind, .. } => kind,
+            other => panic!("expected AliasConflict for '{name}', got {other:?}"),
+        };
+        assert_eq!(kind, "built-in command");
     }
 }

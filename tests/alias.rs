@@ -7,7 +7,7 @@
 
 mod helpers;
 
-use helpers::{TwoScopeEnv, creft_two_scope};
+use helpers::{TwoScopeEnv, create_test_package, creft_env, creft_two_scope, creft_with};
 use predicates::prelude::*;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -459,10 +459,7 @@ fn alias_remove_second_call_removes_global_alias() {
         .stderr(predicate::str::contains("removed: bl [global]"));
 
     // No alias remains — `creft bl` must fail with command-not-found.
-    creft_two_scope(&env)
-        .args(["bl"])
-        .assert()
-        .failure();
+    creft_two_scope(&env).args(["bl"]).assert().failure();
 }
 
 /// A third `creft alias remove bl` when neither scope has it exits 2 with a
@@ -476,6 +473,93 @@ fn alias_remove_not_found_exits_2() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("bl"));
+}
+
+// ── plugin and package target scope resolution ────────────────────────────────
+
+/// `creft alias add gh gh-issue-body` resolves to the global scope when the
+/// target skill comes from a globally-activated plugin. The alias file is written
+/// to `~/.creft/aliases.yaml`; the local scope is not touched.
+#[test]
+fn alias_add_global_plugin_skill_writes_global_scope() {
+    let env = TwoScopeEnv::new();
+
+    // Build a plugin exposing a skill named "gh-issue-body".
+    let skill_content = "---\nname: gh-issue-body\ndescription: fetch issue body\n---\n\n```bash\necho issue-body\n```\n";
+    let pkg_repo = create_test_package("gh-tools", &[("gh-issue-body.md", skill_content)]);
+
+    // Install (always global) and activate globally.
+    creft_two_scope(&env)
+        .args(["plugin", "install", pkg_repo.path().to_str().unwrap()])
+        .assert()
+        .success();
+    creft_two_scope(&env)
+        .args(["plugin", "activate", "--global", "gh-tools"])
+        .assert()
+        .success();
+
+    // Add alias: target is a globally-activated plugin skill → global scope.
+    creft_two_scope(&env)
+        .args(["alias", "add", "gh", "gh-issue-body"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "added: gh → gh-issue-body [global]",
+        ));
+
+    // Global aliases.yaml must exist; local must not.
+    let global_aliases = env.home_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        global_aliases.exists(),
+        "aliases.yaml must be created in the global scope"
+    );
+    let local_aliases = env.project_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        !local_aliases.exists(),
+        "aliases.yaml must not be created in the local scope"
+    );
+}
+
+/// `creft alias add p "pkg foo"` resolves to the local scope when the target
+/// skill comes from a package staged in the local `packages/` directory. The
+/// alias file is written to `.creft/aliases.yaml`; the global scope is not touched.
+#[test]
+fn alias_add_local_package_skill_writes_local_scope() {
+    let env = TwoScopeEnv::new();
+
+    // Stage a package directly in the local packages/ directory, bypassing
+    // `creft plugin install` (which always writes to global).
+    let pkg_dir = env.local_packages().join("my-pkg");
+    std::fs::create_dir_all(pkg_dir.join(".creft")).unwrap();
+    std::fs::write(
+        pkg_dir.join(".creft").join("catalog.json"),
+        r#"{"name":"my-pkg","description":"test package","plugins":[{"name":"my-pkg","source":".","description":"test package","version":"0.1.0","tags":[]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_dir.join("foo.md"),
+        "---\nname: foo\ndescription: foo skill\n---\n\n```bash\necho foo\n```\n",
+    )
+    .unwrap();
+
+    // Add alias: target is `my-pkg foo` — a local package skill.
+    creft_two_scope(&env)
+        .args(["alias", "add", "p", "my-pkg foo"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("added: p → my-pkg foo [local]"));
+
+    // Local aliases.yaml must exist; global must not.
+    let local_aliases = env.project_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        local_aliases.exists(),
+        "aliases.yaml must be created in the local scope"
+    );
+    let global_aliases = env.home_dir.path().join(".creft").join("aliases.yaml");
+    assert!(
+        !global_aliases.exists(),
+        "aliases.yaml must not be created in the global scope"
+    );
 }
 
 // ── conflict rejection ────────────────────────────────────────────────────────
@@ -563,6 +647,41 @@ fn alias_add_rejects_cycle() {
 
 // ── argument parsing edge cases ───────────────────────────────────────────────
 
+/// Under `CREFT_HOME` (no local root), `creft alias remove bl` searches only
+/// the global scope — it does not open a local file, eliminating any risk of
+/// writing to the same path twice. The test verifies: first call removes the
+/// alias and prints `[global]`; second call sees an empty file and exits 2.
+#[test]
+fn alias_remove_under_creft_home_uses_global_only_with_global_tag() {
+    let creft_home = creft_env();
+    let aliases_path = creft_home.path().join("aliases.yaml");
+
+    // Write aliases.yaml directly into CREFT_HOME (the global scope under CREFT_HOME).
+    std::fs::write(&aliases_path, "- from: bl\n  to: backlog\n").unwrap();
+
+    // First removal: finds the alias in global scope, removes it, reports [global].
+    creft_with(&creft_home)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("removed: bl [global]"));
+
+    // The file now exists but is empty — the alias was removed.
+    let content = std::fs::read_to_string(&aliases_path).unwrap_or_default();
+    assert!(
+        content.trim().is_empty(),
+        "aliases.yaml must be empty after removing the only alias; got:\n{content}"
+    );
+
+    // Second removal: alias is gone — exits 2 with a not-found message.
+    // No write occurs because the function returns AliasNotFound before saving.
+    creft_with(&creft_home)
+        .args(["alias", "remove", "bl"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("alias not found: bl"));
+}
+
 /// `creft alias remove my new` (two unquoted tokens) causes the parser to
 /// reject "new" as an unexpected argument. Exit code 2 (CliParse).
 #[test]
@@ -589,6 +708,21 @@ fn alias_remove_quoted_two_segment_from_succeeds() {
         .assert()
         .success()
         .stderr(predicate::str::contains("removed: my new [global]"));
+}
+
+/// `creft alias remove "   "` (whitespace-only quoted argument) triggers the
+/// empty-segments guard at the top of `cmd_alias_remove`, returning a
+/// `MissingArg` error (exit 3) rather than the wrong `AliasNotFound` (exit 2)
+/// that a bare `split_whitespace`-then-search would produce.
+#[test]
+fn alias_remove_whitespace_only_from_returns_missing_arg() {
+    let env = TwoScopeEnv::new();
+
+    creft_two_scope(&env)
+        .args(["alias", "remove", "   "])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("<from>"));
 }
 
 // ── --docs flag ───────────────────────────────────────────────────────────────
@@ -632,7 +766,9 @@ fn alias_add_docs_prints_nonempty_output() {
 // ── malformed aliases.yaml ────────────────────────────────────────────────────
 
 /// A malformed `aliases.yaml` in the global scope causes `creft alias list`
-/// to exit 1 and include the file path in the error message.
+/// to exit 1 and include both the file path and a YAML parse-failure indicator
+/// in the error message. The two pieces together tell the user which file to fix
+/// and what the parser found wrong.
 #[test]
 fn alias_list_malformed_aliases_yaml_exits_1_with_path() {
     let env = TwoScopeEnv::new();
@@ -642,5 +778,6 @@ fn alias_list_malformed_aliases_yaml_exits_1_with_path() {
         .args(["alias", "list"])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("aliases.yaml"));
+        .stderr(predicate::str::contains("aliases.yaml"))
+        .stderr(predicate::str::contains("frontmatter parse error"));
 }

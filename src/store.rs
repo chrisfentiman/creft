@@ -1027,16 +1027,17 @@ mod tests {
     fn test_is_reserved() {
         // Top-level builtins are reserved.
         assert!(is_reserved("add"));
+        assert!(is_reserved("alias"));
+        assert!(is_reserved("completions"));
+        assert!(is_reserved("doctor"));
+        assert!(is_reserved("init"));
         assert!(is_reserved("list"));
-        assert!(is_reserved("show"));
-        assert!(is_reserved("remove"));
         assert!(is_reserved("plugin"));
+        assert!(is_reserved("remove"));
         assert!(is_reserved("settings"));
+        assert!(is_reserved("show"));
         assert!(is_reserved("skills"));
         assert!(is_reserved("up"));
-        assert!(is_reserved("init"));
-        assert!(is_reserved("doctor"));
-        assert!(is_reserved("completions"));
         // Former namespace names are no longer reserved.
         assert!(!is_reserved("cmd"));
         assert!(!is_reserved("plugins"));

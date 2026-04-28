@@ -119,19 +119,15 @@ pub enum CreftError {
     StoreWrite { name: String, reason: String },
 
     #[error("alias not found: {0}")]
-    #[allow(dead_code)]
     AliasNotFound(String),
 
     #[error("alias '{from}' would conflict with an existing {kind}")]
-    #[allow(dead_code)]
     AliasConflict { from: String, kind: String },
 
     #[error("alias '{0}' would create a cycle")]
-    #[allow(dead_code)]
     AliasCycle(String),
 
     #[error("alias target not found: {0}")]
-    #[allow(dead_code)]
     AliasTargetNotFound(String),
 }
 
