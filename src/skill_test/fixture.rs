@@ -2747,17 +2747,17 @@ mod tests {
     }
 
     #[test]
-    fn is_fixture_match_with_exact_pattern_matches_existing_behavior() {
-        // Substring "setup" matches the stem "setup" — a strict superset of
-        // the previous exact-match behavior. Regression guard.
+    fn is_fixture_match_with_exact_plain_text_matches_basename() {
+        // Exact plain-text "setup" matches the stem "setup" exactly.
+        // Negative cases ensure non-matching basenames and non-test-yaml extensions are rejected.
         let matcher = mk("setup");
         assert!(
             is_fixture_match(Path::new("setup.test.yaml"), Some(&matcher)),
-            "exact name matches via substring"
+            "exact basename matches"
         );
         assert!(
             !is_fixture_match(Path::new("other.test.yaml"), Some(&matcher)),
-            "non-matching name rejected"
+            "non-matching basename rejected"
         );
         assert!(
             !is_fixture_match(Path::new("setup.md"), Some(&matcher)),
