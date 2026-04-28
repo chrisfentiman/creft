@@ -317,12 +317,13 @@ impl RunContext {
     }
 }
 
-/// Exit code that signals early successful return — skip remaining blocks.
+/// Prefix applied to every arg-derived environment variable name.
 ///
-/// A block that exits 99 is treated as a successful early termination of
-/// the pipeline. creft intercepts this code and returns 0 to the caller.
-/// All other non-zero exit codes propagate as errors.
-pub(crate) const EARLY_EXIT: i32 = 99;
+/// Segregates user-controlled arg values from inherited environment variables
+/// (`PATH`, `HOME`, `LANG`, …) and from framework-supplied variables
+/// (`CREFT_PROJECT_ROOT`, `CREFT_DRY_RUN`, …). A skill arg named `path` maps
+/// to `CREFT_ARG_PATH` and cannot overwrite the inherited `PATH`.
+pub(crate) const CREFT_ARG_ENV_PREFIX: &str = "CREFT_ARG_";
 
 /// Bound pairs (name → value) and any passthrough args.
 pub type BindResult = (Vec<(String, String)>, Vec<String>);
@@ -902,9 +903,8 @@ fn execute_block(
             .expect("side-channel prompt handler thread panicked");
     }
 
-    // Check the creft_exit side-channel signal before the exit-99 check.
-    // creft_exit causes the block to exit 0, so exit_code_of returns Some(0),
-    // not Some(99). There is no ambiguity between the two paths.
+    // Check the creft_exit side-channel signal. The reader thread was joined
+    // above, so the signal slot is final.
     #[cfg(unix)]
     {
         let signal_code = exit_signal
@@ -950,27 +950,6 @@ fn execute_block(
         .unwrap_or_default();
     #[cfg(not(unix))]
     let primitives_snapshot = std::collections::BTreeMap::new();
-
-    if exit_code_of(&output.status) == Some(EARLY_EXIT) {
-        eprintln!("warning: exit 99 is deprecated, use creft_exit instead");
-        // Print any output produced before the early exit so it is not lost.
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        print!("{}", stdout);
-        if ctx.is_verbose() && !output.stderr.is_empty() {
-            let _ = writeln!(std::io::stderr(), "[block {} stderr]", block_idx + 1);
-            let _ = std::io::stderr().write_all(&output.stderr);
-        }
-        emit_trace(
-            ctx,
-            &TraceRecord {
-                block: block_idx,
-                lang: block.lang.clone(),
-                exit: EARLY_EXIT,
-                primitives: primitives_snapshot,
-            },
-        );
-        return Err(CreftError::EarlyExit);
-    }
 
     if !output.status.success() {
         // Suppress child stderr when killed by SIGINT: the user pressed Ctrl+C
@@ -1023,17 +1002,27 @@ fn execute_block(
     Ok(stdout)
 }
 
-/// Convert bound pairs from `parse_and_bind` into environment variable pairs.
+/// Convert bound pairs from `parse_and_bind` into environment variable pairs
+/// for injection into child processes.
 ///
-/// Names are uppercased and hyphens are replaced with underscores so that
-/// shell-invalid identifiers like `always-confirm` become valid env var names
-/// (`ALWAYS_CONFIRM`). The original names in `bound` are left unchanged for
-/// template substitution; only the env var keys are transformed here.
+/// Names are upper-cased, hyphens are replaced with underscores, and the
+/// fixed `CREFT_ARG_` prefix is prepended. The prefix segregates user-controlled
+/// arg values from inherited environment variables (`PATH`, `HOME`, `LANG`, …)
+/// and from framework-supplied vars (`CREFT_PROJECT_ROOT`, `CREFT_DRY_RUN`, …),
+/// so that a skill arg named `path` cannot overwrite the inherited `PATH`.
+///
+/// The original bare names in the `bound` slice are unchanged for template
+/// substitution (`{{name}}` and `{{name|default}}`); only the env-var keys
+/// produced here carry the prefix.
 fn bound_pairs_to_env(pairs: &[(String, String)]) -> Vec<(String, String)> {
     pairs
         .iter()
         .map(|(name, val)| {
-            let env_name = name.replace('-', "_").to_uppercase();
+            let env_name = format!(
+                "{}{}",
+                CREFT_ARG_ENV_PREFIX,
+                name.replace('-', "_").to_uppercase()
+            );
             (env_name, val.clone())
         })
         .collect()
@@ -1053,9 +1042,9 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Inject bound args and flags as environment variables into every child
-    // process. Names are normalized (uppercase, hyphens → underscores) so
-    // shell authors can write $FORMAT instead of only {{format}}.
+    // Inject bound args and flags as CREFT_ARG_<NAME> environment variables
+    // into every child process. The prefix prevents arg names from colliding
+    // with inherited variables like PATH or HOME.
     let mut extended_env = ctx.env().to_vec();
     extended_env.extend(bound_pairs_to_env(&bound));
     // Rebuild with extended env; struct-update syntax carries all other fields
@@ -2311,12 +2300,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case::lowercase("format", "json", "FORMAT", "json")]
-    #[case::hyphenated("always-confirm", "true", "ALWAYS_CONFIRM", "true")]
-    #[case::multi_hyphen("output-file-path", "out.txt", "OUTPUT_FILE_PATH", "out.txt")]
-    #[case::already_upper("TARGET", "prod", "TARGET", "prod")]
-    #[case::mixed_case("myFlag", "val", "MYFLAG", "val")]
-    #[case::underscore_unchanged("my_flag", "1", "MY_FLAG", "1")]
+    #[case::lowercase("format", "json", "CREFT_ARG_FORMAT", "json")]
+    #[case::hyphenated("always-confirm", "true", "CREFT_ARG_ALWAYS_CONFIRM", "true")]
+    #[case::multi_hyphen("output-file-path", "out.txt", "CREFT_ARG_OUTPUT_FILE_PATH", "out.txt")]
+    #[case::already_upper("TARGET", "prod", "CREFT_ARG_TARGET", "prod")]
+    #[case::mixed_case("myFlag", "val", "CREFT_ARG_MYFLAG", "val")]
+    #[case::underscore_unchanged("my_flag", "1", "CREFT_ARG_MY_FLAG", "1")]
+    #[case::collision_with_path("path", "/x", "CREFT_ARG_PATH", "/x")]
     fn bound_pairs_to_env_name_normalization(
         #[case] input_name: &str,
         #[case] input_val: &str,
@@ -2341,16 +2331,34 @@ mod tests {
         ];
         let result = bound_pairs_to_env(&pairs);
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0], ("ALPHA".to_string(), "1".to_string()));
-        assert_eq!(result[1], ("BETA_FLAG".to_string(), "2".to_string()));
-        assert_eq!(result[2], ("GAMMA".to_string(), "3".to_string()));
+        assert_eq!(result[0], ("CREFT_ARG_ALPHA".to_string(), "1".to_string()));
+        assert_eq!(
+            result[1],
+            ("CREFT_ARG_BETA_FLAG".to_string(), "2".to_string())
+        );
+        assert_eq!(result[2], ("CREFT_ARG_GAMMA".to_string(), "3".to_string()));
     }
 
     #[test]
     fn bound_pairs_to_env_empty_value_preserved() {
         let pairs = vec![("format".to_string(), String::new())];
         let result = bound_pairs_to_env(&pairs);
-        assert_eq!(result, vec![("FORMAT".to_string(), String::new())]);
+        assert_eq!(
+            result,
+            vec![("CREFT_ARG_FORMAT".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn bound_pairs_to_env_path_arg_does_not_produce_bare_path_key() {
+        let result = bound_pairs_to_env(&[("path".to_string(), "/tmp".to_string())]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "CREFT_ARG_PATH");
+        assert_eq!(result[0].1, "/tmp");
+        assert!(
+            !result.iter().any(|(k, _)| k == "PATH"),
+            "bare PATH key must not appear in env pairs"
+        );
     }
 
     // ---- prepare_block_script ----
@@ -2916,12 +2924,11 @@ echo "get completed"
         );
     }
 
-    /// A block that triggers the EARLY_EXIT path (`exit 99`) emits a trace record
-    /// before the runner propagates the early-exit error. Without this record the
-    /// framework cannot account for the block in coverage.
+    /// A block that exits with code 99 emits a trace record carrying the raw
+    /// wait-status (code 99 is a normal failure, not a special sentinel).
     #[cfg(unix)]
     #[test]
-    fn trace_early_exit_99_emits_record() {
+    fn trace_code_99_emits_failure_record() {
         let raw =
             "---\nname: trace-early-exit\ndescription: trace test\n---\n\n```bash\nexit 99\n```\n";
         let cmd = parse_skill(raw);
@@ -2935,12 +2942,12 @@ echo "get completed"
         assert_eq!(
             records.len(),
             1,
-            "trace record must arrive even for exit-99 early-exit"
+            "one trace record expected for a failed block"
         );
-        // exit 99 is the EARLY_EXIT sentinel; the trace carries the raw wait-status.
+        // code 99 is a normal failure; the trace carries the raw wait-status.
         assert_eq!(
             records[0]["exit"], 99,
-            "EARLY_EXIT (exit 99) must propagate as exit code 99 in the trace record"
+            "code 99 must propagate as exit code 99 in the trace record"
         );
     }
 

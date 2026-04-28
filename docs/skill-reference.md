@@ -192,9 +192,7 @@ Summarize these warnings in one paragraph: {{prev}}
 | Code | Meaning |
 |---|---|
 | `0` | Success. Continue to the next block. |
-| `1`–`98` | Error. Stop the pipeline and propagate the exit code. |
-| `99` | **Deprecated.** Early return. Use `creft_exit` instead. |
-| `100+` | Error. Stop the pipeline and propagate the exit code. |
+| `1`+ | Error. Stop the pipeline and propagate the exit code. |
 
 ### Early Exit
 
@@ -215,8 +213,6 @@ if deployed_already; then
 fi
 ```
 
-**Exit 99** is deprecated. It still works but prints a warning. Migrate to `creft_exit` for new skills.
-
 ---
 
 ## Template Placeholders
@@ -232,6 +228,38 @@ Unmatched placeholders — those with no corresponding arg or flag, and no pipe-
 
 ```bash
 echo "Deploying {{branch|main}} to {{env}}"
+```
+
+---
+
+## Reading Args and Flags from Env Vars
+
+Args and flags declared in skill frontmatter are injected into child processes as `CREFT_ARG_<UPPERCASED_NAME>` environment variables. Hyphens in the declared name become underscores in the env-var key: `--always-confirm` becomes `$CREFT_ARG_ALWAYS_CONFIRM`. The prefix segregates user-controlled arg values from inherited environment variables (`PATH`, `HOME`, `LANG`, …) and from framework-supplied variables (`CREFT_PROJECT_ROOT`, `CREFT_DRY_RUN`, …).
+
+**Prefer `{{name}}` placeholders for cross-language consumption.** Placeholder substitution works identically in `bash`, `python`, and `node` blocks and does not interact with the process environment. Use the env-var form for shell blocks that need the value at runtime — inside a loop body, a conditional substitution, or a command substitution where a placeholder cannot appear.
+
+```bash
+# Skill declares:
+#   args:
+#     - name: output-dir
+#   flags:
+#     - name: dry-run
+#       type: bool
+
+# Read via env vars at runtime:
+echo "Writing to $CREFT_ARG_OUTPUT_DIR"
+if [ "$CREFT_ARG_DRY_RUN" = "true" ]; then
+  echo "Dry-run active — skipping write"
+fi
+```
+
+The transformation rule is: upper-case the declared name and replace every hyphen with an underscore, then prepend `CREFT_ARG_`. An arg named `path` becomes `$CREFT_ARG_PATH`; the inherited `$PATH` is unaffected.
+
+Creft emits a note at save time listing each arg and flag's env-var name for every shell block in the skill:
+
+```
+note: shell block can read 'output-dir' as environment variable CREFT_ARG_OUTPUT_DIR
+note: shell block can read 'dry-run' as environment variable CREFT_ARG_DRY_RUN
 ```
 
 ---

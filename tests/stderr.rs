@@ -363,29 +363,29 @@ fn nonzero_exit_in_pipe_chain_prints_skill_name() {
     );
 }
 
-/// A skill that uses exit 99 (early exit / creft_exit) must complete
-/// successfully and produce no error message on stderr.
+/// A skill that calls `creft_exit` must complete successfully and produce no
+/// error message on stderr.
 #[test]
-fn exit_99_early_exit_is_silent() {
+fn creft_exit_is_silent() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: early-exit-silent\n",
-            "description: stops early via exit 99\n",
+            "name: creft-exit-silent\n",
+            "description: stops early via creft_exit\n",
             "---\n",
             "\n",
             "```bash\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
         ))
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["early-exit-silent"])
+        .args(["creft-exit-silent"])
         .assert()
         .success()
         .stderr(predicate::str::contains("error:").not());

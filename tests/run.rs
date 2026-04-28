@@ -536,24 +536,22 @@ fn test_help_shows_subcommands_when_parent_and_child_exist() {
         .stdout(predicate::str::contains("Run mutation testing"));
 }
 
-// ── exit 99 pipe kill tests ───────────────────────────────────────────────────
-
-/// When a block in a pipe chain exits 99, all subsequent blocks must be killed
-/// immediately. creft must return 0, and no output from killed blocks should
-/// appear. The test asserts the whole run completes well under 2 seconds even
-/// though block 2 would have blocked for 5 seconds if not killed.
+/// When a block in a pipe chain calls `creft_exit`, all subsequent blocks must
+/// be killed immediately. creft must return 0, and no output from killed blocks
+/// should appear. The test asserts the whole run completes well under 2 seconds
+/// even though block 2 would have blocked for 5 seconds if not killed.
 #[test]
-fn test_pipe_exit_99_kills_remaining_blocks() {
+fn pipe_creft_exit_kills_remaining_blocks() {
     let dir = creft_env();
 
     let markdown = concat!(
         "---\n",
-        "name: pipe-exit-99-kill\n",
-        "description: exit 99 kills remaining blocks\n",
+        "name: pipe-creft-exit-kill\n",
+        "description: creft_exit kills remaining blocks\n",
         "---\n",
         "\n",
         "```bash\n",
-        "exit 99\n",
+        "creft_exit\n",
         "```\n",
         "\n",
         "```bash\n",
@@ -568,7 +566,7 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
         .success();
 
     let output = creft_with(&dir)
-        .args(["pipe-exit-99-kill"])
+        .args(["pipe-creft-exit-kill"])
         .assert()
         .success()
         .get_output()
@@ -578,24 +576,24 @@ fn test_pipe_exit_99_kills_remaining_blocks() {
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("should not appear"),
-        "block 2 output must not appear after exit 99; got: {:?}",
+        "block 2 output must not appear after creft_exit; got: {:?}",
         stdout_str
     );
 }
 
-/// When a **middle** block in a 3-block pipe chain exits 99, all subsequent
-/// blocks must be killed immediately. Block 1 completes normally; block 2
-/// reads stdin, prints something, then exits 99; block 3 (`sleep 5`) must be
-/// killed before it produces output. creft must return 0 and the run must
-/// finish well under 2 seconds.
+/// When a **middle** block in a 3-block pipe chain calls `creft_exit`, all
+/// subsequent blocks must be killed immediately. Block 1 completes normally;
+/// block 2 reads stdin, prints something, then calls `creft_exit`; block 3
+/// (`sleep 5`) must be killed before it produces output. creft must return 0
+/// and the run must finish well under 2 seconds.
 #[test]
-fn test_pipe_exit_99_middle_block() {
+fn pipe_creft_exit_middle_block() {
     let dir = creft_env();
 
     let markdown = concat!(
         "---\n",
-        "name: pipe-mid-exit99\n",
-        "description: middle block exit 99 test\n",
+        "name: pipe-mid-creft-exit\n",
+        "description: middle block creft_exit test\n",
         "---\n",
         "\n",
         "```bash\n",
@@ -605,7 +603,7 @@ fn test_pipe_exit_99_middle_block() {
         "```bash\n",
         "cat\n",
         "echo processed\n",
-        "exit 99\n",
+        "creft_exit\n",
         "```\n",
         "\n",
         "```bash\n",
@@ -622,7 +620,7 @@ fn test_pipe_exit_99_middle_block() {
 
     let start = std::time::Instant::now();
     let output = creft_with(&dir)
-        .args(["pipe-mid-exit99"])
+        .args(["pipe-mid-creft-exit"])
         .assert()
         .success()
         .get_output()
@@ -633,12 +631,12 @@ fn test_pipe_exit_99_middle_block() {
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("should not appear"),
-        "block 3 output must not appear after middle block exits 99; got: {:?}",
+        "block 3 output must not appear after middle block calls creft_exit; got: {:?}",
         stdout_str
     );
     assert!(
         elapsed.as_secs() < 2,
-        "pipe must terminate quickly after middle block exits 99 (took {:?})",
+        "pipe must terminate quickly after middle block calls creft_exit (took {:?})",
         elapsed
     );
 }
@@ -1917,24 +1915,22 @@ fn test_verbose_without_args_shows_empty_defaults() {
     );
 }
 
-// ── exit 99 early return tests ─────────────────────────────────────────────────
-
-/// A block that exits 99 stops the pipeline and creft returns 0.
+/// A block that calls `creft_exit` stops the pipeline and creft returns 0.
 /// Blocks after the exiting block must not execute.
 #[test]
-fn test_early_exit_99_stops_remaining_blocks() {
+fn creft_exit_stops_remaining_blocks() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: early-exit-stop\n",
-            "description: exit 99 stops the pipeline\n",
+            "name: creft-exit-stop\n",
+            "description: creft_exit stops the pipeline\n",
             "---\n",
             "\n",
             "```bash\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -1945,35 +1941,35 @@ fn test_early_exit_99_stops_remaining_blocks() {
         .success();
 
     creft_with(&dir)
-        .args(["early-exit-stop"])
+        .args(["creft-exit-stop"])
         .assert()
         .success()
         .stdout(predicate::str::contains("should not run").not());
 }
 
-/// A block that echoes output and then exits 99 preserves that output.
+/// A block that echoes output and then calls `creft_exit` preserves that output.
 #[test]
-fn test_early_exit_99_preserves_output() {
+fn creft_exit_preserves_output() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: early-exit-output\n",
-            "description: exit 99 preserves block output\n",
+            "name: creft-exit-output\n",
+            "description: creft_exit preserves block output\n",
             "---\n",
             "\n",
             "```bash\n",
             "echo hello\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
         ))
         .assert()
         .success();
 
     creft_with(&dir)
-        .args(["early-exit-output"])
+        .args(["creft-exit-output"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"));
@@ -2002,21 +1998,21 @@ fn test_normal_exit_1_still_fails() {
     creft_with(&dir).args(["exit-one-fails"]).assert().failure();
 }
 
-/// In pipe mode, a block that exits 99 causes the pipeline to return 0.
+/// In pipe mode, a block that calls `creft_exit` causes the pipeline to return 0.
 #[test]
-fn test_early_exit_99_in_pipe_mode() {
+fn creft_exit_in_pipe_mode() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: pipe-early-exit\n",
-            "description: exit 99 in pipe mode\n",
+            "name: pipe-creft-exit\n",
+            "description: creft_exit in pipe mode\n",
             "---\n",
             "\n",
             "```bash\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2027,34 +2023,33 @@ fn test_early_exit_99_in_pipe_mode() {
         .success();
 
     creft_with(&dir)
-        .args(["pipe-early-exit"])
+        .args(["pipe-creft-exit"])
         .assert()
         .success();
 }
 
 /// Verify that output from a fast downstream block is suppressed when an
-/// upstream block exits 99. This is the exact reproduction case from the v2
-/// spec: block 0 exits immediately with 99, block 1 (fast bash echo) must NOT
-/// produce output on creft's stdout.
+/// upstream block calls `creft_exit`. Block 0 exits immediately via `creft_exit`;
+/// block 1 (fast bash echo) must NOT produce output on creft's stdout.
 ///
 /// This test is deterministic because the buffered relay never writes to the
 /// terminal. Output is only flushed after all reapers have reported and
-/// early_exit is confirmed false. Since block 0 exits 99, early_exit is true
-/// and the buffer is dropped without writing.
+/// `early_exit` is confirmed false. Since block 0 calls `creft_exit`,
+/// `early_exit` is true and the buffer is dropped without writing.
 #[test]
-fn test_pipe_exit_99_fast_downstream_no_output() {
+fn pipe_creft_exit_fast_downstream_no_output() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: pipe-fast-exit99\n",
-            "description: fast downstream must not leak output on exit 99\n",
+            "name: pipe-fast-creft-exit\n",
+            "description: fast downstream must not leak output on creft_exit\n",
             "---\n",
             "\n",
             "```bash\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2066,7 +2061,7 @@ fn test_pipe_exit_99_fast_downstream_no_output() {
 
     let start = std::time::Instant::now();
     let output = creft_with(&dir)
-        .args(["pipe-fast-exit99"])
+        .args(["pipe-fast-creft-exit"])
         .assert()
         .success()
         .get_output()
@@ -2077,25 +2072,25 @@ fn test_pipe_exit_99_fast_downstream_no_output() {
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("LEAKED"),
-        "fast downstream output must not appear after exit 99; got: {:?}",
+        "fast downstream output must not appear after creft_exit; got: {:?}",
         stdout_str
     );
     assert!(
         elapsed.as_secs() < 2,
-        "pipe must complete quickly after exit 99 (took {:?})",
+        "pipe must complete quickly after creft_exit (took {:?})",
         elapsed
     );
 }
 
 /// Verify that downstream blocks with stdin-dependent side effects are killed
-/// before those side effects occur when an upstream block exits 99.
+/// before those side effects occur when an upstream block calls `creft_exit`.
 ///
 /// Block 1 reads from stdin, then sleeps 500ms before touching the sentinel.
 /// The sleep gives the reaper-side kill chain (microseconds of latency) ample
 /// time to deliver SIGKILL before the side effect completes. The sentinel file
 /// must never be created.
 #[test]
-fn test_pipe_exit_99_no_side_effects() {
+fn pipe_creft_exit_no_side_effects() {
     let dir = creft_env();
     let sentinel_dir = tempfile::TempDir::new().unwrap();
     let sentinel_path = sentinel_dir.path().join("sentinel");
@@ -2104,12 +2099,12 @@ fn test_pipe_exit_99_no_side_effects() {
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: pipe-exit99-sentinel\n",
-            "description: exit 99 kills downstream before side effects\n",
+            "name: pipe-creft-exit-sentinel\n",
+            "description: creft_exit kills downstream before side effects\n",
             "---\n",
             "\n",
             "```bash\n",
-            "exit 99\n",
+            "creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2121,7 +2116,7 @@ fn test_pipe_exit_99_no_side_effects() {
 
     let start = std::time::Instant::now();
     creft_with(&dir)
-        .args(["pipe-exit99-sentinel"])
+        .args(["pipe-creft-exit-sentinel"])
         .env("CREFT_SENTINEL", sentinel_path.display().to_string())
         .assert()
         .success();
@@ -2129,28 +2124,29 @@ fn test_pipe_exit_99_no_side_effects() {
 
     assert!(
         !sentinel_path.exists(),
-        "sentinel file must not be created when exit 99 kills downstream block"
+        "sentinel file must not be created when creft_exit kills downstream block"
     );
     assert!(
         elapsed.as_secs() < 2,
-        "pipe must complete quickly after exit 99 (took {:?})",
+        "pipe must complete quickly after creft_exit (took {:?})",
         elapsed
     );
 }
 
-/// Verify that when a middle block in a 3-block pipe chain exits 99, the last
-/// block's output is suppressed. Block 2 sleeps before echoing to ensure the
-/// buffered relay + discard path is exercised rather than a timing coincidence.
+/// Verify that when a middle block in a 3-block pipe chain calls `creft_exit`,
+/// the last block's output is suppressed. Block 2 sleeps before echoing to
+/// ensure the buffered relay + discard path is exercised rather than a timing
+/// coincidence.
 #[test]
-fn test_pipe_exit_99_middle_block_output_suppressed() {
+fn pipe_creft_exit_middle_block_output_suppressed() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: pipe-mid-exit99-suppress\n",
-            "description: middle exit 99 suppresses last block output\n",
+            "name: pipe-mid-creft-exit-suppress\n",
+            "description: middle creft_exit suppresses last block output\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -2158,7 +2154,7 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
             "```\n",
             "\n",
             "```bash\n",
-            "cat; exit 99\n",
+            "cat; creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2170,7 +2166,7 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
 
     let start = std::time::Instant::now();
     let output = creft_with(&dir)
-        .args(["pipe-mid-exit99-suppress"])
+        .args(["pipe-mid-creft-exit-suppress"])
         .assert()
         .success()
         .get_output()
@@ -2181,12 +2177,12 @@ fn test_pipe_exit_99_middle_block_output_suppressed() {
     let stdout_str = String::from_utf8_lossy(&output);
     assert!(
         !stdout_str.contains("LEAKED"),
-        "last block output must not appear after middle block exits 99; got: {:?}",
+        "last block output must not appear after middle block calls creft_exit; got: {:?}",
         stdout_str
     );
     assert!(
         elapsed.as_secs() < 2,
-        "pipe must terminate quickly after middle block exits 99 (took {:?})",
+        "pipe must terminate quickly after middle block calls creft_exit (took {:?})",
         elapsed
     );
 }
@@ -2265,114 +2261,23 @@ fn test_legacy_sequential_true_ignored() {
         .stdout(predicate::str::contains("got: piped"));
 }
 
-// ── exit-99 relay flush regression tests ─────────────────────────────────────
-
-/// When the LAST block in a pipe chain exits 99, its stdout must appear on the
-/// terminal. The relay buffer contains valid output from the exit-99 block and
-/// must be flushed, not discarded.
-///
-/// Regression guard for the stdout-swallowing bug: exit-99 output from the
-/// last block was previously discarded unconditionally.
-#[test]
-fn test_pipe_exit_99_last_block_stdout_preserved() {
-    let dir = creft_env();
-
-    creft_with(&dir)
-        .args(["add"])
-        .write_stdin(concat!(
-            "---\n",
-            "name: exit99-last-stdout\n",
-            "description: last block exit 99 preserves stdout\n",
-            "---\n",
-            "\n",
-            "```bash\n",
-            "echo upstream\n",
-            "```\n",
-            "\n",
-            "```bash\n",
-            "cat >/dev/null\n",
-            "echo final-output\n",
-            "exit 99\n",
-            "```\n",
-        ))
-        .assert()
-        .success();
-
-    let start = std::time::Instant::now();
-    creft_with(&dir)
-        .args(["exit99-last-stdout"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("final-output"));
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed.as_secs() < 5,
-        "pipe must terminate quickly (took {:?})",
-        elapsed
-    );
-}
-
-/// When the last block exits 99 after printing multiple lines, all lines must
-/// appear on stdout.
-///
-/// Regression guard: multi-line output from an exit-99 last block must not be
-/// truncated or dropped.
-#[test]
-fn test_pipe_exit_99_last_block_multiline_stdout() {
-    let dir = creft_env();
-
-    creft_with(&dir)
-        .args(["add"])
-        .write_stdin(concat!(
-            "---\n",
-            "name: exit99-last-multiline\n",
-            "description: last block exit 99 preserves all lines\n",
-            "---\n",
-            "\n",
-            "```bash\n",
-            "echo input\n",
-            "```\n",
-            "\n",
-            "```bash\n",
-            "cat >/dev/null\n",
-            "echo line1\n",
-            "echo line2\n",
-            "echo line3\n",
-            "exit 99\n",
-            "```\n",
-        ))
-        .assert()
-        .success();
-
-    creft_with(&dir)
-        .args(["exit99-last-multiline"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("line1"))
-        .stdout(predicate::str::contains("line2"))
-        .stdout(predicate::str::contains("line3"));
-}
-
-// ── middle-block exit-99 stdout capture tests ─────────────────────────────────
-
-/// When a middle block in a 3-block pipe chain exits 99 after writing to
-/// stdout, its output must appear on creft's stdout.
+/// When a middle block in a 3-block pipe chain calls `creft_exit` after writing
+/// to stdout, its output must appear on creft's stdout.
 ///
 /// Regression guard: before this fix, the middle block's output was in the
 /// inter-block pipe buffer but was silently discarded when the downstream
 /// block was killed.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_middle_block_stdout_captured() {
+fn pipe_creft_exit_middle_block_stdout_captured() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: exit99-mid-capture\n",
-            "description: middle block exit 99 stdout is captured\n",
+            "name: creft-exit-mid-capture\n",
+            "description: middle block creft_exit stdout is captured\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -2380,7 +2285,7 @@ fn test_pipe_exit_99_middle_block_stdout_captured() {
             "```\n",
             "\n",
             "```bash\n",
-            "cat; echo \"middle-output\"; exit 99\n",
+            "cat; echo \"middle-output\"; creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2391,33 +2296,33 @@ fn test_pipe_exit_99_middle_block_stdout_captured() {
         .success();
 
     creft_with(&dir)
-        .args(["exit99-mid-capture"])
+        .args(["creft-exit-mid-capture"])
         .assert()
         .success()
         .stdout(predicate::str::contains("middle-output"));
 }
 
-/// When the first block in a multi-block chain exits 99, its stdout must
-/// appear on creft's stdout.
+/// When the first block in a multi-block chain calls `creft_exit`, its stdout
+/// must appear on creft's stdout.
 ///
 /// Block 0 is treated as a "middle" block from the output-capture perspective:
 /// it's not the last block, so its output is in an inter-block pipe and must
 /// be recovered via the dup'd fd.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_first_block_stdout_captured() {
+fn pipe_creft_exit_first_block_stdout_captured() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: exit99-first-capture\n",
-            "description: first block exit 99 stdout is captured\n",
+            "name: creft-exit-first-stdout\n",
+            "description: first block creft_exit stdout is captured\n",
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"first-output\"; exit 99\n",
+            "echo \"first-output\"; creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2432,28 +2337,28 @@ fn test_pipe_exit_99_first_block_stdout_captured() {
         .success();
 
     creft_with(&dir)
-        .args(["exit99-first-capture"])
+        .args(["creft-exit-first-stdout"])
         .assert()
         .success()
         .stdout(predicate::str::contains("first-output"));
 }
 
-/// When a middle block exits 99 after printing multiple lines, all lines must
-/// appear on stdout.
+/// When a middle block calls `creft_exit` after printing multiple lines, all
+/// lines must appear on stdout.
 ///
-/// Regression guard: multi-line output from a middle exit-99 block must not
-/// be truncated or partially captured.
+/// Regression guard: multi-line output from a middle-block `creft_exit` must
+/// not be truncated or partially captured.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_middle_block_multiline_stdout() {
+fn pipe_creft_exit_middle_block_multiline_stdout() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: exit99-mid-multiline\n",
-            "description: middle block exit 99 captures all lines\n",
+            "name: creft-exit-mid-multiline\n",
+            "description: middle block creft_exit captures all lines\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -2461,7 +2366,7 @@ fn test_pipe_exit_99_middle_block_multiline_stdout() {
             "```\n",
             "\n",
             "```bash\n",
-            "cat >/dev/null; echo \"line1\"; echo \"line2\"; echo \"line3\"; exit 99\n",
+            "cat >/dev/null; echo \"line1\"; echo \"line2\"; echo \"line3\"; creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2472,7 +2377,7 @@ fn test_pipe_exit_99_middle_block_multiline_stdout() {
         .success();
 
     creft_with(&dir)
-        .args(["exit99-mid-multiline"])
+        .args(["creft-exit-mid-multiline"])
         .assert()
         .success()
         .stdout(predicate::str::contains("line1"))
@@ -2480,22 +2385,22 @@ fn test_pipe_exit_99_middle_block_multiline_stdout() {
         .stdout(predicate::str::contains("line3"));
 }
 
-/// When a middle block exits 99 without writing anything to stdout, creft
-/// must return 0 with no output and no crash.
+/// When a middle block calls `creft_exit` without writing anything to stdout,
+/// creft must return 0 with no output and no crash.
 ///
 /// Regression guard: the drain path must handle the empty-output case without
 /// writing spurious content or panicking.
 #[test]
 #[cfg(unix)]
-fn test_pipe_exit_99_middle_block_no_stdout() {
+fn pipe_creft_exit_middle_block_no_stdout() {
     let dir = creft_env();
 
     creft_with(&dir)
         .args(["add"])
         .write_stdin(concat!(
             "---\n",
-            "name: exit99-mid-no-stdout\n",
-            "description: middle block exit 99 with no stdout\n",
+            "name: creft-exit-mid-no-stdout\n",
+            "description: middle block creft_exit with no stdout\n",
             "---\n",
             "\n",
             "```bash\n",
@@ -2503,7 +2408,7 @@ fn test_pipe_exit_99_middle_block_no_stdout() {
             "```\n",
             "\n",
             "```bash\n",
-            "cat >/dev/null; exit 99\n",
+            "cat >/dev/null; creft_exit\n",
             "```\n",
             "\n",
             "```bash\n",
@@ -2514,7 +2419,7 @@ fn test_pipe_exit_99_middle_block_no_stdout() {
         .success();
 
     let output = creft_with(&dir)
-        .args(["exit99-mid-no-stdout"])
+        .args(["creft-exit-mid-no-stdout"])
         .assert()
         .success()
         .get_output()
@@ -2523,7 +2428,7 @@ fn test_pipe_exit_99_middle_block_no_stdout() {
 
     assert!(
         output.is_empty(),
-        "stdout must be empty when middle block exits 99 with no output; got: {:?}",
+        "stdout must be empty when middle block calls creft_exit with no output; got: {:?}",
         String::from_utf8_lossy(&output)
     );
 }
@@ -2759,7 +2664,7 @@ fn test_sequential_sigterm_preserves_stderr() {
 
 // ── env var injection tests ───────────────────────────────────────────────────
 
-/// A flag is accessible as an environment variable ($FORMAT) in bash blocks.
+/// A flag is accessible as the environment variable $CREFT_ARG_FORMAT in bash blocks.
 #[test]
 fn test_flag_injected_as_env_var() {
     let dir = creft_env();
@@ -2777,7 +2682,7 @@ fn test_flag_injected_as_env_var() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$FORMAT\"\n",
+            "echo \"$CREFT_ARG_FORMAT\"\n",
             "```\n",
         ))
         .assert()
@@ -2790,7 +2695,7 @@ fn test_flag_injected_as_env_var() {
         .stdout(predicate::str::contains("json"));
 }
 
-/// A positional arg is accessible as an environment variable ($TARGET) in bash blocks.
+/// A positional arg is accessible as the environment variable $CREFT_ARG_TARGET in bash blocks.
 #[test]
 fn test_arg_injected_as_env_var() {
     let dir = creft_env();
@@ -2807,7 +2712,7 @@ fn test_arg_injected_as_env_var() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$TARGET\"\n",
+            "echo \"$CREFT_ARG_TARGET\"\n",
             "```\n",
         ))
         .assert()
@@ -2820,7 +2725,7 @@ fn test_arg_injected_as_env_var() {
         .stdout(predicate::str::contains("production"));
 }
 
-/// A hyphenated flag name is accessible as an env var with underscores ($ALWAYS_CONFIRM).
+/// A hyphenated flag name is accessible as $CREFT_ARG_ALWAYS_CONFIRM (hyphens become underscores).
 #[test]
 fn test_hyphenated_flag_injected_with_underscores() {
     let dir = creft_env();
@@ -2838,7 +2743,7 @@ fn test_hyphenated_flag_injected_with_underscores() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"$ALWAYS_CONFIRM\"\n",
+            "echo \"$CREFT_ARG_ALWAYS_CONFIRM\"\n",
             "```\n",
         ))
         .assert()
@@ -2851,7 +2756,7 @@ fn test_hyphenated_flag_injected_with_underscores() {
         .stdout(predicate::str::contains("true"));
 }
 
-/// Template substitution ({{format}}) and env var access ($FORMAT) both work in the same block.
+/// Template substitution ({{format}}) and env var access ($CREFT_ARG_FORMAT) both work in the same block.
 #[test]
 fn test_template_and_env_var_both_resolve() {
     let dir = creft_env();
@@ -2869,7 +2774,7 @@ fn test_template_and_env_var_both_resolve() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"template={{format}} env=$FORMAT\"\n",
+            "echo \"template={{format}} env=$CREFT_ARG_FORMAT\"\n",
             "```\n",
         ))
         .assert()
@@ -2882,7 +2787,7 @@ fn test_template_and_env_var_both_resolve() {
         .stdout(predicate::str::contains("template=yaml env=yaml"));
 }
 
-/// In a multi-block pipe chain, all blocks see the injected env vars.
+/// In a multi-block pipe chain, all blocks see the injected env vars ($CREFT_ARG_TAG).
 #[test]
 fn test_pipe_chain_blocks_see_env_vars() {
     let dir = creft_env();
@@ -2900,12 +2805,12 @@ fn test_pipe_chain_blocks_see_env_vars() {
             "---\n",
             "\n",
             "```bash\n",
-            "echo \"block1:$TAG\"\n",
+            "echo \"block1:$CREFT_ARG_TAG\"\n",
             "```\n",
             "\n",
             "```bash\n",
             "cat -\n",
-            "echo \"block2:$TAG\"\n",
+            "echo \"block2:$CREFT_ARG_TAG\"\n",
             "```\n",
         ))
         .assert()
@@ -3147,5 +3052,194 @@ fn creft_prompt_interactive_returns_stdin_answer() {
     assert!(
         stdout.contains("got=yes"),
         "creft_prompt must return the stdin answer; stdout={stdout:?}"
+    );
+}
+
+// ── creft_exit pipe drain ─────────────────────────────────────────────────────
+
+/// When the first block in a multi-block chain calls creft_exit() after writing
+/// to stdout, its bytes must appear on creft's stdout.
+///
+/// The early-exit block is not the last block, so its output lives in an
+/// inter-block kernel pipe. The runner holds a dup'd read-end of that pipe
+/// and drains it in the post-loop creft_exit branch.
+///
+/// Regression guard: before this fix, the post-loop creft_exit branch killed
+/// the pipe group but never drained the dup'd fd, dropping block 0's bytes.
+#[test]
+#[cfg(unix)]
+fn test_pipe_creft_exit_first_block_stdout_captured() {
+    if !helpers::tool_available("python3") {
+        eprintln!("skipping test_pipe_creft_exit_first_block_stdout_captured: python3 not on PATH");
+        return;
+    }
+
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: creft-exit-first-capture\n",
+            "description: first block creft_exit stdout is captured\n",
+            "pipe: true\n",
+            "---\n",
+            "\n",
+            "```python\n",
+            "import json\n",
+            "print(json.dumps({\"deny\": \"x\"}))\n",
+            "creft_exit()\n",
+            "```\n",
+            "\n",
+            "```python\n",
+            "import time\n",
+            "time.sleep(5)\n",
+            "import sys\n",
+            "sys.stdin.read()\n",
+            "```\n",
+            "\n",
+            "```python\n",
+            "import time\n",
+            "time.sleep(5)\n",
+            "import sys\n",
+            "sys.stdin.read()\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["creft-exit-first-capture"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("\"deny\""),
+        "block 0's JSON must appear on stdout; stdout={stdout:?}"
+    );
+    let _ = stderr;
+}
+
+/// A skill containing a single bash block `exit 99` causes creft to exit with
+/// code 99 and emit an error on stderr. Code 99 is a normal failure — it is no
+/// longer treated as an early-exit signal.
+#[test]
+fn code_99_is_a_normal_failure() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit-99-fails\n",
+            "description: exit 99 is a normal failure\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["exit-99-fails"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: 'exit-99-fails' exited with code 99"),
+        "stderr must report code 99 as a failure; got: {stderr:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(99),
+        "creft must exit with code 99 when a block exits 99"
+    );
+}
+
+/// A two-block pipe where block 0 does `exit 99` causes creft to exit 99; the
+/// failure is reported as block 0's error.
+#[test]
+fn pipe_code_99_is_a_normal_failure() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: pipe-exit-99-fails\n",
+            "description: exit 99 in pipe mode is a normal failure\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "exit 99\n",
+            "```\n",
+            "\n",
+            "```bash\n",
+            "cat\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["pipe-exit-99-fails"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    assert_eq!(
+        output.status.code(),
+        Some(99),
+        "creft must exit with code 99 when block 0 exits 99"
+    );
+}
+
+/// A single-block skill `echo hello; exit 99` exits with code 99 and does NOT
+/// emit `hello` on creft's stdout.
+///
+/// Regression guard: a failed block's stdout is buffered, not flushed. This
+/// pins the behavioral break — before this change, `exit 99` flushed stdout and
+/// returned 0. Now it is a normal failure.
+#[test]
+fn code_99_failure_does_not_flush_stdout() {
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: exit-99-no-flush\n",
+            "description: exit 99 does not flush stdout\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo hello; exit 99\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    let output = creft_with(&dir)
+        .args(["exit-99-no-flush"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("hello"),
+        "failed block stdout must not be flushed; got: {stdout:?}"
     );
 }

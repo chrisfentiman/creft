@@ -1,0 +1,14 @@
+- name: arg-named-path-does-not-clobber-inherited-PATH
+  notes: |
+    Skill declares an arg named `path`. Under the pre-prefix injection
+    behaviour the value would have been written into the child's `PATH`
+    env var, breaking PATH-based interpreter resolution. With the
+    `CREFT_ARG_` prefix the inherited PATH is preserved and the bash
+    block can resolve `python3` normally.
+  when:
+    argv: ["creft", "_test", "arg_path_no_clobber", "/tmp/some-dir"]
+    timeout_seconds: 10
+  then:
+    exit_code: 0
+    stdout_contains:
+      - "Python "

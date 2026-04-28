@@ -102,11 +102,11 @@ pub enum CreftError {
     #[error("{0}")]
     CliParse(String),
 
-    /// A block exited with code 99: stop the pipeline and return success.
+    /// A block called `creft_exit(0)`: stop the pipeline and return success.
     ///
     /// This variant is an internal signal used by the runner. It is never
     /// surfaced to the user — callers translate it to `Ok(())`.
-    #[error("early exit (exit 99)")]
+    #[error("early exit")]
     EarlyExit,
 
     #[error("cannot open store '{name}': {reason}")]

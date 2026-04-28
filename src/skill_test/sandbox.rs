@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::skill_test::fixture::{FileContent, Given};
-use crate::skill_test::placeholder::{self, Paths};
+use crate::skill_test::placeholder::Paths;
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -142,13 +142,12 @@ impl Sandbox {
 
     /// Write every file in `given` into the sandbox.
     ///
-    /// Expands `{sandbox}`, `{source}`, and `{home}` placeholders in both the
-    /// path and text content. Parent directories are created as needed.
+    /// Paths and text content must already be placeholder-expanded by the
+    /// caller — `materialise` writes bytes to disk without further
+    /// interpretation. Parent directories are created as needed.
     pub(crate) fn materialise(&self, given: &Given) -> Result<(), SandboxError> {
-        let paths = self.paths();
-        for (raw_path, content) in &given.files {
-            let expanded_path = placeholder::expand(raw_path, &paths);
-            let dest = PathBuf::from(&expanded_path);
+        for (path, content) in &given.files {
+            let dest = PathBuf::from(path);
 
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| SandboxError::Materialise {
@@ -158,10 +157,7 @@ impl Sandbox {
             }
 
             let bytes: Vec<u8> = match content {
-                FileContent::Text(s) => {
-                    let expanded = placeholder::expand(s, &paths);
-                    expanded.into_bytes()
-                }
+                FileContent::Text(s) => s.as_bytes().to_vec(),
                 FileContent::Json(val) => serde_json::to_string_pretty(val)
                     .expect("serde_json::Value is always serialisable")
                     .into_bytes(),
@@ -232,11 +228,6 @@ impl Sandbox {
         env
     }
 
-    /// Expand placeholders in a single string using this sandbox's paths.
-    pub(crate) fn expand(&self, s: &str) -> String {
-        placeholder::expand(s, &self.paths())
-    }
-
     /// Root of the sandbox temp directory.
     pub(crate) fn root(&self) -> &Path {
         self.tempdir.path()
@@ -254,12 +245,45 @@ impl Sandbox {
         &self.home
     }
 
-    fn paths(&self) -> Paths<'_> {
+    /// View this sandbox as a [`Paths`] reference borrow for placeholder expansion.
+    pub(crate) fn paths(&self) -> Paths<'_> {
         Paths {
             sandbox: self.root(),
             source: &self.source,
             home: &self.home,
         }
+    }
+
+    /// Run `sh -c <command>` against this sandbox.
+    ///
+    /// The child process sees the sandbox env (`HOME = {sandbox}/home`,
+    /// `CREFT_PROJECT_ROOT = {sandbox}/source`, plus the parent allowlist from
+    /// [`env_for_child`]) and a working directory of [`source`]. All other
+    /// parent env vars are stripped — secrets, user-specific state, agent
+    /// identity.
+    ///
+    /// `command` must already be placeholder-expanded. `expand_scenario` walks
+    /// `before.shell` and `after.shell` strings before any spawn happens.
+    ///
+    /// Returns the child's [`ExitStatus`] for the caller to interpret. The
+    /// caller decides whether a non-zero status is a setup error or
+    /// fire-and-forget cleanup.
+    ///
+    /// [`env_for_child`]: Self::env_for_child
+    /// [`source`]: Self::source
+    /// [`ExitStatus`]: std::process::ExitStatus
+    pub(crate) fn spawn_shell(
+        &self,
+        command: &str,
+        parent_env: &[(String, String)],
+    ) -> std::io::Result<std::process::ExitStatus> {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.source)
+            .env_clear()
+            .envs(self.env_for_child(parent_env, &[]))
+            .status()
     }
 }
 
@@ -314,37 +338,36 @@ mod tests {
     }
 
     // ── materialise ───────────────────────────────────────────────────────────
+    //
+    // materialise writes pre-expanded paths and content to disk. Placeholder
+    // expansion is the caller's responsibility (done by expand::expand_scenario
+    // before materialise is invoked in production). Tests therefore pass
+    // pre-resolved absolute paths.
 
     #[test]
-    fn materialise_text_file_written_with_placeholder_expansion() {
+    fn materialise_text_file_written_to_pre_expanded_path() {
         let sb = Sandbox::new().expect("sandbox");
+        let dest_path = sb.source().join("foo.txt").to_string_lossy().into_owned();
         let given = Given {
-            files: vec![(
-                "{source}/foo.txt".to_owned(),
-                FileContent::Text("hi".to_owned()),
-            )],
+            files: vec![(dest_path.clone(), FileContent::Text("hi".to_owned()))],
         };
         sb.materialise(&given).expect("materialise");
 
-        let dest = sb.source().join("foo.txt");
-        assert!(dest.exists());
-        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hi");
+        assert!(sb.source().join("foo.txt").exists());
+        assert_eq!(std::fs::read_to_string(&dest_path).unwrap(), "hi");
     }
 
     #[test]
     fn materialise_json_file_produces_pretty_printed_output() {
         let sb = Sandbox::new().expect("sandbox");
         let val = serde_json::json!({"key": "value", "n": 42});
+        let dest_path = sb.source().join("data.json").to_string_lossy().into_owned();
         let given = Given {
-            files: vec![(
-                "{source}/data.json".to_owned(),
-                FileContent::Json(val.clone()),
-            )],
+            files: vec![(dest_path.clone(), FileContent::Json(val.clone()))],
         };
         sb.materialise(&given).expect("materialise");
 
-        let dest = sb.source().join("data.json");
-        let written = std::fs::read_to_string(&dest).unwrap();
+        let written = std::fs::read_to_string(&dest_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed, val);
         // Pretty-printed means multi-line output.
@@ -354,11 +377,16 @@ mod tests {
     #[test]
     fn materialise_creates_parent_directories() {
         let sb = Sandbox::new().expect("sandbox");
+        let dest_path = sb
+            .source()
+            .join("deep")
+            .join("nested")
+            .join("dir")
+            .join("file.txt")
+            .to_string_lossy()
+            .into_owned();
         let given = Given {
-            files: vec![(
-                "{source}/deep/nested/dir/file.txt".to_owned(),
-                FileContent::Text("content".to_owned()),
-            )],
+            files: vec![(dest_path, FileContent::Text("content".to_owned()))],
         };
         sb.materialise(&given).expect("materialise");
 
@@ -372,23 +400,17 @@ mod tests {
     }
 
     #[test]
-    fn materialise_expands_placeholders_in_text_content() {
+    fn materialise_writes_text_content_verbatim() {
+        // Expansion is the caller's job; materialise writes the bytes as given.
         let sb = Sandbox::new().expect("sandbox");
+        let dest_path = sb.source().join("out.txt").to_string_lossy().into_owned();
+        let content = "already expanded: /tmp/sb/source".to_owned();
         let given = Given {
-            files: vec![(
-                "{source}/script.sh".to_owned(),
-                FileContent::Text("cd {source} && echo {home}".to_owned()),
-            )],
+            files: vec![(dest_path.clone(), FileContent::Text(content.clone()))],
         };
         sb.materialise(&given).expect("materialise");
 
-        let content = std::fs::read_to_string(sb.source().join("script.sh")).unwrap();
-        let source_str = sb.source().to_string_lossy();
-        let home_str = sb.home().to_string_lossy();
-        assert!(content.contains(source_str.as_ref()));
-        assert!(content.contains(home_str.as_ref()));
-        assert!(!content.contains("{source}"), "placeholder unexpanded");
-        assert!(!content.contains("{home}"), "placeholder unexpanded");
+        assert_eq!(std::fs::read_to_string(&dest_path).unwrap(), content);
     }
 
     // ── env_for_child ─────────────────────────────────────────────────────────
@@ -491,6 +513,116 @@ mod tests {
         assert!(!keys.contains(&"OPENAI_API_KEY"));
         assert!(!keys.contains(&"AWS_PROFILE"));
         assert!(keys.contains(&"PATH"));
+    }
+
+    // ── spawn_shell ───────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn parent_env_with_path() -> Vec<(String, String)> {
+        // Provide PATH so child processes can find executables like `sh`,
+        // `printf`, `command`, etc. Other parent vars are stripped by the
+        // allowlist inside env_for_child.
+        vec![(
+            "PATH".to_owned(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned()),
+        )]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_runs_with_sandbox_home() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        // Write $HOME to a file; then read it back and compare to sandbox home.
+        sb.spawn_shell(r#"printf '%s' "$HOME" > home.out"#, &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("home.out")).expect("home.out");
+        assert_eq!(content, sb.home().to_string_lossy().as_ref());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_runs_in_source_directory() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        sb.spawn_shell("pwd > pwd.out", &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("pwd.out"))
+            .expect("pwd.out")
+            .trim()
+            .to_owned();
+        let expected = sb
+            .source()
+            .canonicalize()
+            .unwrap_or_else(|_| sb.source().to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(content, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_strips_unknown_parent_vars() {
+        use pretty_assertions::assert_eq;
+
+        let sb = Sandbox::new().expect("sandbox");
+        let mut parent_env = parent_env_with_path();
+        parent_env.push(("OPERATOR_SECRET".to_owned(), "value".to_owned()));
+
+        // ${OPERATOR_SECRET-MISSING} expands to MISSING when the var is unset.
+        sb.spawn_shell(
+            r#"printf '%s' "${OPERATOR_SECRET-MISSING}" > secret.out"#,
+            &parent_env,
+        )
+        .expect("spawn_shell")
+        .success()
+        .then_some(())
+        .expect("command must succeed");
+
+        let content = std::fs::read_to_string(sb.source().join("secret.out")).expect("secret.out");
+        assert_eq!(content, "MISSING");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_propagates_exit_status() {
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        let status = sb.spawn_shell("exit 7", &parent_env).expect("spawn_shell");
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_shell_propagates_path_from_parent() {
+        let sb = Sandbox::new().expect("sandbox");
+        let parent_env = parent_env_with_path();
+
+        // `command -v sh` exits 0 when `sh` is found on PATH; exits non-zero
+        // when PATH is unset or empty. Use `command -v` (POSIX) over `which`.
+        sb.spawn_shell("command -v sh > path.out", &parent_env)
+            .expect("spawn_shell")
+            .success()
+            .then_some(())
+            .expect("command -v sh must succeed when PATH is forwarded");
+
+        let content = std::fs::read_to_string(sb.source().join("path.out")).expect("path.out");
+        assert!(!content.trim().is_empty(), "path.out must be non-empty");
     }
 
     // ── mirror_project_skills ─────────────────────────────────────────────────

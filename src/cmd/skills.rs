@@ -14,7 +14,7 @@
 use crate::error::CreftError;
 use crate::model::AppContext;
 use crate::skill_test::fixture::{self, FixtureError, Scenario};
-use crate::skill_test::match_pattern;
+use crate::skill_test::match_pattern::{self, MatchKind};
 use crate::skill_test::scenario::{RunOpts, ScenarioOutcome, ScenarioStatus, run};
 
 // ── Output formatting constants ───────────────────────────────────────────────
@@ -75,11 +75,12 @@ fn cmd_skills_test_unix(
 
     let commands_dir = local_root.join("commands");
 
-    // Compile the SKILL pattern once before the filesystem walk. When the
-    // caller supplied no skill filter, the walk returns every fixture.
+    // Compile the SKILL pattern once before the filesystem walk. Plain text is
+    // an exact basename match; globs are anchored fnmatch. When the caller
+    // supplied no skill filter, the walk returns every fixture.
     let skill_matcher = skill
         .as_deref()
-        .map(match_pattern::compile)
+        .map(|p| match_pattern::compile(p, MatchKind::Exact))
         .transpose()
         .map_err(|e| CreftError::Setup(e.to_string()))?;
 
@@ -109,10 +110,11 @@ fn cmd_skills_test_unix(
     }
 
     // Apply the scenario-name pattern filter (post-parse, because the name is
-    // inside the file). Compile once and apply per-name via the matcher.
+    // inside the file). Scenario names are narrative strings where substring
+    // matching is the expected default.
     if let Some(ref pattern) = scenario_filter {
-        let scenario_matcher =
-            match_pattern::compile(pattern).map_err(|e| CreftError::Setup(e.to_string()))?;
+        let scenario_matcher = match_pattern::compile(pattern, MatchKind::Substring)
+            .map_err(|e| CreftError::Setup(e.to_string()))?;
         all_scenarios.retain(|s| scenario_matcher.matches(&s.name));
     }
 
@@ -707,12 +709,49 @@ mod tests {
     }
 
     #[test]
-    fn cmd_skills_test_skill_substring_pattern_includes_setup_extra() {
+    fn cmd_skills_test_skill_exact_pattern_does_not_include_setup_extra() {
         let (_home, project, ctx) = project_with_commands_dir();
 
-        // Under substring matching, SKILL "setup" matches any fixture whose
-        // basename stem contains "setup" — which includes both setup.test.yaml
-        // and setup-extra.test.yaml. Both must be discovered and run.
+        // SKILL "setup" is an exact basename match — it discovers only
+        // setup.test.yaml and must not discover setup-extra.test.yaml.
+        write_fixture(
+            &project,
+            "setup",
+            r#"
+- name: base-scenario
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+        write_fixture(
+            &project,
+            "setup-extra",
+            r#"
+- name: extra-scenario
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // Only setup.test.yaml is discovered. setup-extra.test.yaml contains a
+        // failing scenario; if it were discovered, the result would be Err.
+        let result = cmd_skills_test(&ctx, Some("setup".to_owned()), None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "SKILL 'setup' exact match must discover only setup.test.yaml, not setup-extra.test.yaml; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_skill_glob_pattern_includes_setup_extra() {
+        let (_home, project, ctx) = project_with_commands_dir();
+
+        // SKILL "setup*" is a glob — it discovers setup.test.yaml and
+        // setup-extra.test.yaml. Both fixtures pass.
         write_fixture(
             &project,
             "setup",
@@ -736,14 +775,48 @@ mod tests {
 "#,
         );
 
-        // Both fixtures pass. Ok(()) confirms both were discovered (if only
-        // setup.test.yaml were discovered, setup-extra's scenario would be
-        // silently skipped rather than failing — but the test documents the
-        // substring shape's inclusive behavior explicitly).
-        let result = cmd_skills_test(&ctx, Some("setup".to_owned()), None, false, false, false);
+        let result = cmd_skills_test(&ctx, Some("setup*".to_owned()), None, false, false, false);
         assert!(
             result.is_ok(),
-            "SKILL 'setup' substring must discover both setup.test.yaml and setup-extra.test.yaml; got: {result:?}",
+            "SKILL 'setup*' glob must discover both setup.test.yaml and setup-extra.test.yaml; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn cmd_skills_test_skill_exact_does_not_match_substring_in_other_basename() {
+        let (_home, project, ctx) = project_with_commands_dir();
+
+        // The user-reported symptom: `creft skills test ask` must discover
+        // ask.test.yaml and must not discover task.test.yaml.
+        write_fixture(
+            &project,
+            "ask",
+            r#"
+- name: ask-scenario
+  when:
+    argv: ["sh", "-c", "exit 0"]
+  then:
+    exit_code: 0
+"#,
+        );
+        write_fixture(
+            &project,
+            "task",
+            r#"
+- name: task-scenario
+  when:
+    argv: ["sh", "-c", "exit 1"]
+  then:
+    exit_code: 0
+"#,
+        );
+
+        // task.test.yaml contains a failing scenario; if "ask" matched it via
+        // substring, the result would be Err.
+        let result = cmd_skills_test(&ctx, Some("ask".to_owned()), None, false, false, false);
+        assert!(
+            result.is_ok(),
+            "SKILL 'ask' exact match must discover ask.test.yaml only, not task.test.yaml; got: {result:?}",
         );
     }
 }
