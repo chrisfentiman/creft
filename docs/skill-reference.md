@@ -236,6 +236,38 @@ echo "Deploying {{branch|main}} to {{env}}"
 
 ---
 
+## Reading Args and Flags from Env Vars
+
+Args and flags declared in skill frontmatter are injected into child processes as `CREFT_ARG_<UPPERCASED_NAME>` environment variables. Hyphens in the declared name become underscores in the env-var key: `--always-confirm` becomes `$CREFT_ARG_ALWAYS_CONFIRM`. The prefix segregates user-controlled arg values from inherited environment variables (`PATH`, `HOME`, `LANG`, …) and from framework-supplied variables (`CREFT_PROJECT_ROOT`, `CREFT_DRY_RUN`, …).
+
+**Prefer `{{name}}` placeholders for cross-language consumption.** Placeholder substitution works identically in `bash`, `python`, and `node` blocks and does not interact with the process environment. Use the env-var form for shell blocks that need the value at runtime — inside a loop body, a conditional substitution, or a command substitution where a placeholder cannot appear.
+
+```bash
+# Skill declares:
+#   args:
+#     - name: output-dir
+#   flags:
+#     - name: dry-run
+#       type: bool
+
+# Read via env vars at runtime:
+echo "Writing to $CREFT_ARG_OUTPUT_DIR"
+if [ "$CREFT_ARG_DRY_RUN" = "true" ]; then
+  echo "Dry-run active — skipping write"
+fi
+```
+
+The transformation rule is: upper-case the declared name and replace every hyphen with an underscore, then prepend `CREFT_ARG_`. An arg named `path` becomes `$CREFT_ARG_PATH`; the inherited `$PATH` is unaffected.
+
+Creft emits a note at save time listing each arg and flag's env-var name for every shell block in the skill:
+
+```
+note: shell block can read 'output-dir' as environment variable CREFT_ARG_OUTPUT_DIR
+note: shell block can read 'dry-run' as environment variable CREFT_ARG_DRY_RUN
+```
+
+---
+
 ## LLM Blocks
 
 An `llm` block sends a prompt to an AI provider CLI. The prompt is the block's content after an optional YAML configuration header.
