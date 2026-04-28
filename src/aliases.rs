@@ -6,11 +6,6 @@
 //! Aliases are stored in `<scope_root>/aliases.yaml`. The file is optional; a
 //! missing file is treated identically to an empty alias map.
 
-// The public API of this module is consumed by the dispatcher rewrite and
-// cmd/alias.rs, which are not yet wired up. Suppress dead-code warnings until
-// those callers land.
-#![allow(dead_code)]
-
 use yaml_rust2::Yaml;
 use yaml_rust2::yaml::Hash;
 
@@ -60,14 +55,16 @@ impl Alias {
         Ok(Alias { from, to })
     }
 
-    /// The `from` segments as a slice. The field is non-public so external
-    /// callers cannot bypass `Alias::new`'s validation.
-    pub(crate) fn prefix(&self) -> &[String] {
+    /// Read-only access to the `from` segments. The field is non-public so
+    /// external callers cannot bypass `Alias::new`'s validation.
+    #[allow(dead_code)]
+    pub(crate) fn from(&self) -> &[String] {
         &self.from
     }
 
-    /// The `to` segments as a slice.
-    pub(crate) fn target(&self) -> &[String] {
+    /// Read-only access to the `to` segments.
+    #[allow(dead_code)]
+    pub(crate) fn to(&self) -> &[String] {
         &self.to
     }
 }
@@ -81,8 +78,6 @@ impl Alias {
 pub struct AliasFile {
     pub aliases: Vec<Alias>,
 }
-
-// ── YAML parsing ──────────────────────────────────────────────────────────────
 
 impl FromYaml for Alias {
     fn from_yaml(yaml: &Yaml) -> Result<Self, YamlError> {
@@ -139,8 +134,6 @@ impl FromYaml for AliasFile {
     }
 }
 
-// ── YAML emission ─────────────────────────────────────────────────────────────
-
 impl ToYaml for AliasFile {
     fn to_yaml(&self, out: &mut String) {
         for alias in &self.aliases {
@@ -181,14 +174,13 @@ fn read_field(map: &Hash, field: &'static str) -> Result<String, YamlError> {
     }
 }
 
-// ── Load / save ───────────────────────────────────────────────────────────────
-
 /// Load `aliases.yaml` for the given scope.
 ///
 /// Returns an empty `AliasFile` when the file does not exist or is zero bytes.
 /// Returns `CreftError::Frontmatter` when the file exists, is non-empty, but
 /// cannot be parsed; the path is included in the error message so the user can
 /// locate and fix the file.
+#[allow(dead_code)]
 pub fn load_for_scope(ctx: &AppContext, scope: Scope) -> Result<AliasFile, CreftError> {
     let path = ctx.aliases_path_for(scope)?;
     if !path.exists() {
@@ -206,6 +198,7 @@ pub fn load_for_scope(ctx: &AppContext, scope: Scope) -> Result<AliasFile, Creft
 ///
 /// Creates `<scope_root>/` if it does not exist. An empty `AliasFile` produces
 /// a zero-byte file, which `load_for_scope` reads back as `AliasFile::default()`.
+#[allow(dead_code)]
 pub fn save_for_scope(ctx: &AppContext, scope: Scope, file: &AliasFile) -> Result<(), CreftError> {
     let path = ctx.aliases_path_for(scope)?;
     if let Some(parent) = path.parent() {
@@ -216,15 +209,12 @@ pub fn save_for_scope(ctx: &AppContext, scope: Scope, file: &AliasFile) -> Resul
     Ok(())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
     use tempfile::tempdir;
-
-    // ── Alias::new construction ───────────────────────────────────────────────
 
     #[test]
     fn alias_new_valid_single_segment() {
@@ -241,17 +231,13 @@ mod tests {
         assert!(alias.is_ok(), "multi-segment alias must succeed");
     }
 
-    #[test]
-    fn alias_new_rejects_dotdot_in_from() {
-        let err = Alias::new(vec!["..".into()], vec!["backlog".into()])
-            .expect_err("'..'' segment must be rejected");
-        assert!(matches!(err, CreftError::InvalidName(_)));
-    }
-
-    #[test]
-    fn alias_new_rejects_slash_in_to() {
-        let err = Alias::new(vec!["bl".into()], vec!["a/b".into()])
-            .expect_err("'/' in a segment must be rejected");
+    #[rstest]
+    #[case::dotdot_in_from(vec!["..".into()], vec!["backlog".into()])]
+    #[case::slash_in_to(vec!["bl".into()], vec!["a/b".into()])]
+    #[case::dot_segment(vec![".".into()], vec!["backlog".into()])]
+    #[case::backslash_segment(vec!["a\\b".into()], vec!["backlog".into()])]
+    fn alias_new_rejects_invalid_segment(#[case] from: Vec<String>, #[case] to: Vec<String>) {
+        let err = Alias::new(from, to).expect_err("invalid path segment must be rejected");
         assert!(matches!(err, CreftError::InvalidName(_)));
     }
 
@@ -267,22 +253,6 @@ mod tests {
         let err = Alias::new(vec!["bl".into()], vec![]).expect_err("empty to must be rejected");
         assert!(matches!(err, CreftError::MissingArg(_)));
     }
-
-    #[test]
-    fn alias_new_rejects_dot_segment() {
-        let err = Alias::new(vec![".".into()], vec!["backlog".into()])
-            .expect_err("'.' segment must be rejected");
-        assert!(matches!(err, CreftError::InvalidName(_)));
-    }
-
-    #[test]
-    fn alias_new_rejects_backslash_segment() {
-        let err = Alias::new(vec!["a\\b".into()], vec!["backlog".into()])
-            .expect_err("backslash in segment must be rejected");
-        assert!(matches!(err, CreftError::InvalidName(_)));
-    }
-
-    // ── Round-trip (serialize → parse → compare) ──────────────────────────────
 
     #[test]
     fn alias_file_round_trips() {
@@ -302,8 +272,6 @@ mod tests {
         assert_eq!(original, parsed);
     }
 
-    // ── Missing file → empty AliasFile ───────────────────────────────────────
-
     #[test]
     fn load_missing_file_returns_empty() {
         let dir = tempdir().unwrap();
@@ -313,8 +281,6 @@ mod tests {
             load_for_scope(&ctx, Scope::Global).expect("missing aliases.yaml must not error");
         assert_eq!(result, AliasFile::default());
     }
-
-    // ── Empty file → empty AliasFile ─────────────────────────────────────────
 
     #[test]
     fn save_empty_writes_zero_bytes_and_loads_back_as_empty() {
@@ -342,8 +308,6 @@ mod tests {
         assert_eq!(loaded, AliasFile::default());
     }
 
-    // ── Malformed YAML → CreftError::Frontmatter with path ───────────────────
-
     #[test]
     fn load_malformed_yaml_returns_frontmatter_error_with_path() {
         let dir = tempdir().unwrap();
@@ -366,8 +330,6 @@ mod tests {
         }
     }
 
-    // ── Token validation from YAML: slash rejected ────────────────────────────
-
     #[test]
     fn load_entry_with_slash_in_from_produces_frontmatter_error() {
         let dir = tempdir().unwrap();
@@ -386,8 +348,6 @@ mod tests {
         assert!(matches!(err, CreftError::Frontmatter(_)));
     }
 
-    // ── Token validation pass-through: special chars that are allowed ─────────
-
     #[test]
     fn alias_new_accepts_at_and_exclamation() {
         // validate_path_token is the dispatch-time rule, not the stricter add-time rule.
@@ -398,8 +358,6 @@ mod tests {
             "dispatch-time validation must not exclude @ or !"
         );
     }
-
-    // ── Empty / whitespace-only from/to in YAML ───────────────────────────────
 
     #[test]
     fn load_whitespace_only_from_produces_error() {
@@ -418,8 +376,6 @@ mod tests {
             .expect_err("whitespace-only from must produce an error");
         assert!(matches!(err, CreftError::Frontmatter(_)));
     }
-
-    // ── Whitespace normalization ───────────────────────────────────────────────
 
     #[test]
     fn double_space_in_from_normalizes_to_single_space_on_save() {
@@ -453,8 +409,6 @@ mod tests {
         );
     }
 
-    // ── Quoting: boolean keyword 'true' must round-trip as string ─────────────
-
     #[test]
     fn boolean_keyword_from_round_trips_as_string() {
         // 'true' would be parsed as Yaml::Boolean(true) if not quoted.
@@ -471,8 +425,6 @@ mod tests {
             yaml::from_str(&yaml_text).expect("quoted 'true' must parse back as string alias");
         assert_eq!(original, parsed);
     }
-
-    // ── exit_code cross-check: re-verify here so a drift is caught locally ────
 
     #[test]
     fn alias_errors_have_correct_exit_codes() {
