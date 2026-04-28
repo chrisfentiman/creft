@@ -117,6 +117,22 @@ pub enum CreftError {
 
     #[error("cannot write store '{name}': {reason}")]
     StoreWrite { name: String, reason: String },
+
+    #[error("alias not found: {0}")]
+    #[allow(dead_code)]
+    AliasNotFound(String),
+
+    #[error("alias '{from}' would conflict with an existing {kind}")]
+    #[allow(dead_code)]
+    AliasConflict { from: String, kind: String },
+
+    #[error("alias '{0}' would create a cycle")]
+    #[allow(dead_code)]
+    AliasCycle(String),
+
+    #[error("alias target not found: {0}")]
+    #[allow(dead_code)]
+    AliasTargetNotFound(String),
 }
 
 impl CreftError {
@@ -131,8 +147,15 @@ impl CreftError {
             | Self::PackageNotFound(_)
             | Self::ActivationNotFound { .. }
             | Self::PluginNotInCatalog { .. }
-            | Self::CliParse(_) => 2,
-            Self::MissingArg(_) | Self::MissingEnvVar(_) | Self::ValidationFailed { .. } => 3,
+            | Self::CliParse(_)
+            | Self::AliasNotFound(_)
+            | Self::AliasTargetNotFound(_) => 2,
+            Self::MissingArg(_)
+            | Self::MissingEnvVar(_)
+            | Self::ValidationFailed { .. }
+            | Self::InvalidName(_)
+            | Self::AliasConflict { .. }
+            | Self::AliasCycle(_) => 3,
             Self::ExecutionFailed { code, .. } => *code,
             Self::ExecutionSignaled { signal, .. } => 128 + signal,
             _ => 1,
@@ -280,6 +303,39 @@ mod tests {
     fn test_exit_code_wildcard_arm_returns_1_for_frontmatter() {
         let err = CreftError::Frontmatter("bad yaml".to_string());
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn test_exit_code_alias_not_found_returns_2() {
+        let err = CreftError::AliasNotFound("x".to_string());
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn test_exit_code_alias_target_not_found_returns_2() {
+        let err = CreftError::AliasTargetNotFound("x".to_string());
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn test_exit_code_alias_conflict_returns_3() {
+        let err = CreftError::AliasConflict {
+            from: "x".to_string(),
+            kind: "built-in command".to_string(),
+        };
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn test_exit_code_alias_cycle_returns_3() {
+        let err = CreftError::AliasCycle("x".to_string());
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn test_exit_code_invalid_name_returns_3() {
+        let err = CreftError::InvalidName("bad/name".to_string());
+        assert_eq!(err.exit_code(), 3);
     }
 
     // --- is_quiet() tests ---
