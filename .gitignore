@@ -16,6 +16,8 @@ target
 # creft local state (plugins, settings, packages)
 .creft/
 !.creft/commands/
+!.creft/commands/_test/
+!.creft/commands/_test/**
 !.creft/catalog.json
 
 # Generated Cloudflare Worker (build artifact from creft deploy install-script)

@@ -1,0 +1,14 @@
+- name: upstream creft_exit cancels downstream LLM sponge before spawn
+  notes: |
+    Block 0 prints a deny JSON payload and calls creft_exit(0).
+    Block 1 is a sponge that, before this fix, would spawn a provider
+    subprocess and block on its API call. After the fix, the sponge
+    observes the cancel signal, never spawns, and returns the buffered
+    upstream bytes, which are flushed to stdout.
+  when:
+    argv: ["creft", "_test", "pipe", "creft_exit_with_llm"]
+    timeout_seconds: 5
+  then:
+    exit_code: 0
+    stdout_json:
+      deny: "regex match"
