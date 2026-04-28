@@ -209,6 +209,114 @@ pub fn save_for_scope(ctx: &AppContext, scope: Scope, file: &AliasFile) -> Resul
     Ok(())
 }
 
+/// Combined view of local and global alias files for rewrite.
+///
+/// Entries are deduplicated (local shadows global for identical `from` vectors)
+/// and sorted by `from.len()` descending so `find_prefix` can take the first
+/// match and longest-match semantics fall out naturally.
+#[derive(Debug, Clone, Default)]
+pub struct AliasMap {
+    entries: Vec<Alias>,
+}
+
+impl AliasMap {
+    /// Build the combined map for the given context.
+    ///
+    /// Loads global first, then local. A local entry with the same `from` as a
+    /// global entry replaces it. Missing files are treated as empty. Returns an
+    /// error only when a present, non-empty file fails to parse.
+    pub fn load(ctx: &AppContext) -> Result<Self, CreftError> {
+        let global = load_for_scope(ctx, Scope::Global)?;
+        let local = if ctx.find_local_root().is_some() {
+            load_for_scope(ctx, Scope::Local)?
+        } else {
+            AliasFile::default()
+        };
+
+        // Plain Vec + linear dedup scan: alias counts are expected in the
+        // single digits, and the project's dependency budget is fixed.
+        let mut entries: Vec<Alias> = Vec::new();
+        for alias in global.aliases.into_iter().chain(local.aliases) {
+            if let Some(existing) = entries.iter_mut().find(|e| e.from == alias.from) {
+                *existing = alias;
+            } else {
+                entries.push(alias);
+            }
+        }
+        // Sort longest-from first so find_prefix() takes the first match.
+        entries.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        Ok(AliasMap { entries })
+    }
+
+    /// Find an alias whose `from` is a prefix of `args` starting at index 0.
+    ///
+    /// Returns the first match, which is the longest match because `entries`
+    /// is sorted by `from.len()` descending.
+    fn find_prefix(&self, args: &[String]) -> Option<&Alias> {
+        self.entries.iter().find(|a| {
+            args.len() >= a.from.len()
+                && a.from
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(from_seg, arg_seg)| from_seg == arg_seg)
+        })
+    }
+
+    /// Iterate the deduplicated entries in longest-first order.
+    ///
+    /// Used by `cmd_alias_add`'s cycle detection to walk the same view the
+    /// runtime rewrite uses.
+    // Stage 3 consumer. The method is public API for the alias built-in; the
+    // compiler cannot see the future call site from this crate, so suppress
+    // the unused warning explicitly rather than letting it drift into clippy
+    // noise.
+    #[allow(dead_code)]
+    pub fn entries(&self) -> &[Alias] {
+        &self.entries
+    }
+}
+
+/// Rewrite `args` by applying at most one alias.
+///
+/// The rewrite is a single hop: if the rewritten args match a second alias,
+/// that second alias is not applied. Chained resolution is rejected at add-time
+/// as a cycle; the single-hop rule here is the runtime defence against
+/// hand-edited files that introduce a chain anyway.
+///
+/// The match is a path-prefix starting at `args[0]`. Built-in arguments are
+/// not examined. If `args` is empty, starts with `"_creft"`, or no alias
+/// matches at index 0, the input is returned unchanged (cloned).
+pub fn rewrite(args: &[String], map: &AliasMap) -> Vec<String> {
+    if args.is_empty() || args[0] == "_creft" {
+        return args.to_vec();
+    }
+    let Some(alias) = map.find_prefix(args) else {
+        return args.to_vec();
+    };
+    let mut out = Vec::with_capacity(alias.to.len() + args.len() - alias.from.len());
+    out.extend(alias.to.iter().cloned());
+    out.extend_from_slice(&args[alias.from.len()..]);
+    out
+}
+
+/// Load the alias map and rewrite `args`.
+///
+/// Called once per `dispatch` invocation, before any other dispatch logic.
+/// When the alias file exists but cannot be parsed, emits a one-line warning
+/// to stderr and returns `args` unchanged — a broken alias file must not break
+/// unrelated commands. The user sees the warning once per invocation and can
+/// fix the file or remove the offending entry with `creft alias remove`.
+pub fn rewrite_args(ctx: &AppContext, args: Vec<String>) -> Vec<String> {
+    let map = match AliasMap::load(ctx) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: ignoring aliases (failed to load): {e}");
+            return args;
+        }
+    };
+    rewrite(&args, &map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +549,145 @@ mod tests {
         );
         assert_eq!(CreftError::AliasCycle("x".into()).exit_code(), 3);
         assert_eq!(CreftError::InvalidName("bad/name".into()).exit_code(), 3);
+    }
+
+    // ── AliasMap and rewrite tests ────────────────────────────────────────────
+
+    /// Build an `AliasMap` directly from a list of (from, to) segment pairs,
+    /// bypassing the filesystem load. Used by all rewrite unit tests.
+    fn make_map(aliases: &[(&[&str], &[&str])]) -> AliasMap {
+        let mut entries: Vec<Alias> = aliases
+            .iter()
+            .map(|(from, to)| {
+                Alias::new(
+                    from.iter().map(|s| s.to_string()).collect(),
+                    to.iter().map(|s| s.to_string()).collect(),
+                )
+                .unwrap()
+            })
+            .collect();
+        // Mirror AliasMap::load: sort longest-first.
+        entries.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        AliasMap { entries }
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rewrite_single_segment_prefix() {
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(
+            rewrite(&args(&["bl", "list"]), &map),
+            args(&["backlog", "list"])
+        );
+    }
+
+    #[test]
+    fn rewrite_longest_match_wins_over_shorter() {
+        let map = make_map(&[(&["my"], &["x"]), (&["my", "new"], &["foo", "bar"])]);
+        assert_eq!(
+            rewrite(&args(&["my", "new", "sub"]), &map),
+            args(&["foo", "bar", "sub"])
+        );
+    }
+
+    #[test]
+    fn rewrite_shorter_match_when_longer_does_not_apply() {
+        let map = make_map(&[(&["my"], &["x"]), (&["my", "new"], &["foo", "bar"])]);
+        assert_eq!(
+            rewrite(&args(&["my", "other"]), &map),
+            args(&["x", "other"])
+        );
+    }
+
+    #[test]
+    fn rewrite_with_no_remainder_produces_to_only() {
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(rewrite(&args(&["bl"]), &map), args(&["backlog"]));
+    }
+
+    #[test]
+    fn rewrite_non_matching_args_unchanged() {
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(
+            rewrite(&args(&["other", "args"]), &map),
+            args(&["other", "args"])
+        );
+    }
+
+    #[test]
+    fn rewrite_empty_args_unchanged() {
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(rewrite(&[], &map), Vec::<String>::new());
+    }
+
+    #[test]
+    fn rewrite_creft_internal_prefix_never_rewritten() {
+        // Even if an alias for _creft is somehow in the map, it must not fire.
+        let map = make_map(&[(&["_creft"], &["something"])]);
+        assert_eq!(
+            rewrite(&args(&["_creft", "anything"]), &map),
+            args(&["_creft", "anything"])
+        );
+    }
+
+    #[test]
+    fn rewrite_help_prefix_is_not_at_index_zero_for_alias() {
+        // args[0] is "help", not "bl", so the bl → backlog alias does not fire.
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(rewrite(&args(&["help", "bl"]), &map), args(&["help", "bl"]));
+    }
+
+    #[test]
+    fn rewrite_list_prefix_is_not_at_index_zero_for_alias() {
+        let map = make_map(&[(&["bl"], &["backlog"])]);
+        assert_eq!(rewrite(&args(&["list", "bl"]), &map), args(&["list", "bl"]));
+    }
+
+    #[test]
+    fn rewrite_is_single_hop_not_transitive() {
+        // bl → backlog, backlog → tasks: rewrite("bl") must produce ["backlog"],
+        // not ["tasks"]. The second alias must not be applied.
+        let map = make_map(&[(&["bl"], &["backlog"]), (&["backlog"], &["tasks"])]);
+        assert_eq!(rewrite(&args(&["bl"]), &map), args(&["backlog"]));
+    }
+
+    #[test]
+    fn alias_map_local_overrides_global() {
+        let dir = tempdir().unwrap();
+        let home_dir = dir.path().join("home");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(home_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(project_dir.join(".creft")).unwrap();
+
+        // Write global alias: bl → backlog
+        std::fs::write(
+            home_dir.join(".creft").join("aliases.yaml"),
+            b"- from: bl\n  to: backlog\n",
+        )
+        .unwrap();
+        // Write local alias: bl → tasks (shadows global)
+        std::fs::write(
+            project_dir.join(".creft").join("aliases.yaml"),
+            b"- from: bl\n  to: tasks\n",
+        )
+        .unwrap();
+
+        // ctx with HOME = home_dir, CWD = project_dir (has local .creft/)
+        let ctx = crate::model::AppContext::for_test(home_dir, project_dir);
+        let map = AliasMap::load(&ctx).expect("AliasMap::load must succeed");
+
+        let result = map.find_prefix(&args(&["bl"]));
+        assert!(
+            result.is_some(),
+            "find_prefix must return an alias for 'bl'"
+        );
+        assert_eq!(
+            result.unwrap().to,
+            vec!["tasks".to_string()],
+            "local alias must shadow global alias"
+        );
     }
 }

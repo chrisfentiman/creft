@@ -52,14 +52,20 @@ fn main() {
 }
 
 fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError> {
-    // Hidden internal commands dispatched before skill resolution.
-    // The `_creft` prefix is reserved for built-in infrastructure; no user skill
-    // can shadow these because native dispatch wins before the skill runner runs.
-    // Unknown `_creft` subcommands fall through to skill resolution below.
+    // Hidden internal commands are dispatched before alias rewrite. The `_creft`
+    // prefix is reserved for built-in infrastructure and must never be rewritten —
+    // a misconfigured alias file must not be able to redirect internal control flow.
     if args.len() >= 2 && args[0] == "_creft" && args[1] == "welcome" {
         let force = args.iter().any(|a| a == "--force");
         return cmd::welcome::cmd_welcome(ctx, force);
     }
+
+    // Apply alias rewrite once, ahead of every direct-dispatch branch. Rewrite
+    // happens before the `help` short-circuit so that `creft bl --help` (where
+    // `bl → backlog`) reaches cli::parse with `["backlog", "--help"]`. The
+    // prefix match starts at args[0], so `creft help bl` is unaffected: the arg
+    // vector `["help", "bl"]` does not match an alias whose `from` is `["bl"]`.
+    let args = aliases::rewrite_args(ctx, args);
 
     // `creft help <args...>`: user skills take priority over built-in subcommand
     // names. Resolve as skill first; fall back to namespace help; then show root.
