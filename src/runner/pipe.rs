@@ -531,13 +531,12 @@ pub(super) fn sponge_stage(
 
         if let Some(ref tx) = cancel_tx_downstream {
             // An upstream sponge has no side channel (sponges run inside creft,
-            // not as child processes that can write fd 3). Its cancel arm already
-            // sends `true`; the normal-completion arm sends `false` (proceed) so
-            // the downstream sponge can run. If the provider exited non-zero, the
-            // downstream sponge's input is empty or partial — send `true` so it
-            // does not run with meaningless input.
-            let provider_failed = status.as_ref().ok().map(|s| !s.success()).unwrap_or(true);
-            let _ = tx.send(provider_failed);
+            // not as child processes that can write fd 3). The normal-completion
+            // arm unconditionally sends `false` (proceed); only the cancel arm
+            // above sends `true`. A non-zero provider exit is a failure, but the
+            // downstream sponge's cancellation comes from the reaper detecting the
+            // root-cause failure, not from this channel.
+            let _ = tx.send(false);
         }
 
         let _ = reaper_tx.send(ReaperResult {

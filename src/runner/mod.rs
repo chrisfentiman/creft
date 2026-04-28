@@ -903,9 +903,8 @@ fn execute_block(
             .expect("side-channel prompt handler thread panicked");
     }
 
-    // Check the creft_exit side-channel signal before the exit-99 check.
-    // creft_exit causes the block to exit 0, so exit_code_of returns Some(0),
-    // not Some(99). There is no ambiguity between the two paths.
+    // Check the creft_exit side-channel signal. The reader thread was joined
+    // above, so the signal slot is final.
     #[cfg(unix)]
     {
         let signal_code = exit_signal

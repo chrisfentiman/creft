@@ -809,13 +809,11 @@ fn pipe_creft_exit_three_block_sponge_captures() {
     );
 }
 
-/// A sponge whose own LLM provider exits 99 propagates that as a failure to
-/// the downstream sponge.
+/// An LLM sponge whose provider exits 99 propagates that as a normal failure.
 ///
-/// `bash | llm(provider exits 99) | llm(sentinel)` — the first sponge's child
-/// exits with code 99. After this change, code 99 from a provider is a normal
-/// failure: it propagates as `ExecutionFailed { code: 99 }` and the downstream
-/// sponge does not run.
+/// `bash | llm(provider exits 99) | llm(passthrough)` — the first sponge's
+/// provider exits with code 99. Code 99 is no longer a recognized early-exit
+/// signal; it propagates as `ExecutionFailed { code: 99 }` and creft exits 99.
 #[test]
 #[cfg(unix)]
 fn pipe_sponge_provider_99_propagates_as_failure() {
@@ -825,10 +823,9 @@ fn pipe_sponge_provider_99_propagates_as_failure() {
     let script_dir = tempfile::TempDir::new().unwrap();
 
     let fail_path = script_dir.path().join("provider-fail.sh");
-    let sentinel = script_dir.path().join("sentinel.txt");
-    let sentinel_provider_path = script_dir.path().join("sentinel-provider.sh");
+    let passthrough_path = script_dir.path().join("passthrough.sh");
 
-    // First provider: reads stdin to satisfy the sponge's read_to_end, then exits 99.
+    // First provider: reads stdin, then exits 99 (a normal failure after this change).
     {
         let content = "#!/bin/sh\ncat > /dev/null\nexit 99\n";
         let mut f = std::fs::File::create(&fail_path).unwrap();
@@ -838,18 +835,18 @@ fn pipe_sponge_provider_99_propagates_as_failure() {
         std::fs::set_permissions(&fail_path, perms).unwrap();
     }
 
-    // Second provider (sentinel): creates a file when spawned, proving it ran.
+    // Second provider: passes stdin to stdout (a minimal valid provider).
     {
-        let content = format!("#!/bin/sh\ntouch {}\ncat\n", sentinel.to_string_lossy());
-        let mut f = std::fs::File::create(&sentinel_provider_path).unwrap();
+        let content = "#!/bin/sh\ncat\n";
+        let mut f = std::fs::File::create(&passthrough_path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         let mut perms = f.metadata().unwrap().permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&sentinel_provider_path, perms).unwrap();
+        std::fs::set_permissions(&passthrough_path, perms).unwrap();
     }
 
     let p1 = fail_path.to_string_lossy();
-    let p2 = sentinel_provider_path.to_string_lossy();
+    let p2 = passthrough_path.to_string_lossy();
 
     let skill = format!(
         "---\nname: sponge-provider-99-fail\ndescription: sponge provider 99 propagates as failure\n---\n\n\
@@ -864,13 +861,16 @@ fn pipe_sponge_provider_99_propagates_as_failure() {
         .assert()
         .success();
 
-    creft_with(&dir)
+    let output = creft_with(&dir)
         .args(["sponge-provider-99-fail"])
         .assert()
-        .failure();
+        .failure()
+        .get_output()
+        .clone();
 
-    assert!(
-        !sentinel.exists(),
-        "downstream sponge provider must not have been spawned (sentinel file found)",
+    assert_eq!(
+        output.status.code(),
+        Some(99),
+        "creft must exit with code 99 when the sponge's provider exits 99"
     );
 }
