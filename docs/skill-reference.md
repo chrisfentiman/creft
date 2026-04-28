@@ -192,9 +192,7 @@ Summarize these warnings in one paragraph: {{prev}}
 | Code | Meaning |
 |---|---|
 | `0` | Success. Continue to the next block. |
-| `1`–`98` | Error. Stop the pipeline and propagate the exit code. |
-| `99` | **Deprecated.** Early return. Use `creft_exit` instead. |
-| `100+` | Error. Stop the pipeline and propagate the exit code. |
+| `1`+ | Error. Stop the pipeline and propagate the exit code. |
 
 ### Early Exit
 
@@ -214,8 +212,6 @@ if deployed_already; then
   creft_exit
 fi
 ```
-
-**Exit 99** is deprecated. It still works but prints a warning. Migrate to `creft_exit` for new skills.
 
 ---
 

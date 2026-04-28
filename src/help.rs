@@ -79,8 +79,7 @@ Code Blocks:
 
   Exit codes:
     0     Success, continue to the next block
-    1-98  Error, stop the pipeline and propagate the exit code
-    100+  Error, stop the pipeline and propagate the exit code
+    1+    Error, stop the pipeline and propagate the exit code
 
   Early exit:
     Call creft_exit to stop the pipeline from inside a block:
