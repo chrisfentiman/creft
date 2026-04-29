@@ -106,10 +106,18 @@ async function resolveLatest(env) {
     });
   }
 
-  // Parse before caching. A body that fails to parse must not be stored — a
-  // poisoned cache entry would serve the same malformed body for the full TTL.
+  // Parse and validate before caching. A body that fails to parse or that is
+  // JSON-valid but schema-invalid (e.g. a GitHub rate-limit envelope with no
+  // tag_name) must not be stored — a poisoned cache entry would serve the same
+  // malformed body for the full TTL.
   const bodyText = await upstream.text();
   const parsed = parseLatestBody(bodyText);
+  if (typeof parsed.tag_name !== "string") {
+    throw new Response("upstream error", {
+      status: 502,
+      headers: { "cache-control": "no-store" },
+    });
+  }
   const cachedResponse = new Response(bodyText, {
     status: 200,
     headers: {

@@ -184,3 +184,29 @@ test("parseLatestBody throws a 502 Response for a truncated JSON body", () => {
   assert.ok(thrown instanceof Response, "must throw a Response, not a SyntaxError");
   assert.equal(thrown.status, 502);
 });
+
+// ---------------------------------------------------------------------------
+// resolveLatest schema validation (via parseLatestBody + tag_name check)
+// ---------------------------------------------------------------------------
+
+test("parseLatestBody returns parsed object for a GitHub rate-limit envelope", () => {
+  // A rate-limit envelope is JSON-valid but schema-invalid — it has no tag_name.
+  // parseLatestBody itself succeeds (it only defends against syntax errors);
+  // the caller (resolveLatest) is responsible for rejecting the schema-invalid
+  // body before caching. This test verifies the seam: parseLatestBody returns
+  // the object so resolveLatest can inspect it, rather than swallowing the
+  // distinction between syntax errors and schema errors.
+  const body = JSON.stringify({ message: "API rate limit exceeded" });
+  const result = parseLatestBody(body);
+  assert.equal(typeof result.tag_name, "undefined");
+  assert.equal(result.message, "API rate limit exceeded");
+});
+
+test("parseLatestBody returns parsed object for a null tag_name", () => {
+  // Explicit null is distinct from missing — both should be rejected by the
+  // schema check in resolveLatest (typeof null !== "string").
+  const body = JSON.stringify({ tag_name: null });
+  const result = parseLatestBody(body);
+  assert.equal(result.tag_name, null);
+  assert.equal(typeof result.tag_name, "object"); // null typeof is "object"
+});
