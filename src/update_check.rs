@@ -90,20 +90,21 @@ pub(crate) fn os_string() -> &'static str {
     }
 }
 
-/// Fetch the latest version from the configured endpoint.
+/// Fetch the latest version from the configured endpoint with the given timeout.
 ///
-/// Constructs a new `ureq::Agent` with a 5-second global timeout, sets the
-/// `User-Agent` header explicitly (the header value is the volume signal), and
-/// parses the response body as JSON into [`LatestResponse`].
+/// This is the single HTTP path used by both the interactive command and the
+/// background check child — keeping all agent construction, header setting, and
+/// error mapping here ensures both callers stay in sync when the wire format
+/// changes.
 ///
 /// # Errors
 ///
 /// - `CreftError::Network` — any ureq transport error, HTTP status code outside
 ///   2xx, or JSON parse failure.
-pub(crate) fn fetch_latest() -> Result<LatestResponse, CreftError> {
+fn fetch_latest_with_timeout(timeout_secs: u64) -> Result<LatestResponse, CreftError> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
-            .timeout_global(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(timeout_secs)))
             .build(),
     );
 
@@ -128,6 +129,20 @@ pub(crate) fn fetch_latest() -> Result<LatestResponse, CreftError> {
 
     serde_json::from_str::<LatestResponse>(&body)
         .map_err(|e| CreftError::Network(format!("malformed response from {url}: {e}")))
+}
+
+/// Fetch the latest version from the configured endpoint.
+///
+/// Uses a 5-second global timeout, appropriate for interactive commands where
+/// the user is waiting. The background check child uses a shorter timeout via
+/// [`fetch_latest_with_timeout`] directly.
+///
+/// # Errors
+///
+/// - `CreftError::Network` — any ureq transport error, HTTP status code outside
+///   2xx, or JSON parse failure.
+pub(crate) fn fetch_latest() -> Result<LatestResponse, CreftError> {
+    fetch_latest_with_timeout(5)
 }
 
 // ── Persisted update status ────────────────────────────────────────────────
@@ -313,29 +328,12 @@ pub(crate) fn maybe_fire_daily(ctx: &AppContext) {
 /// records a result or does not"; a non-zero exit code would surface internal
 /// error state to consumers that can do nothing useful with it.
 pub(crate) fn cmd_check(ctx: &AppContext) -> Result<(), CreftError> {
-    // Use a shorter timeout for the background child — 3 seconds, matching validate.rs.
+    // The background child uses a 3-second timeout — shorter than the interactive
+    // path (5s) to match the validate.rs convention and bound the child's lifetime.
     let result: Result<(), ()> = (|| {
-        let agent = ureq::Agent::new_with_config(
-            ureq::config::Config::builder()
-                .timeout_global(Some(Duration::from_secs(3)))
-                .build(),
-        );
-
-        let url = endpoint();
-        let ua = user_agent();
-
-        let mut response = agent
-            .get(&url)
-            .header("user-agent", &ua)
-            .call()
-            .map_err(|_| ())?;
-
-        let body = response.body_mut().read_to_string().map_err(|_| ())?;
-        let latest: LatestResponse = serde_json::from_str(&body).map_err(|_| ())?;
-
+        let latest = fetch_latest_with_timeout(3).map_err(|_| ())?;
         let path = status_path(ctx).map_err(|_| ())?;
         write_status_atomic(&path, &latest.version).map_err(|_| ())?;
-
         Ok(())
     })();
     let _ = result;
