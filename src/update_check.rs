@@ -244,6 +244,47 @@ fn write_last_check(path: &Path, today: &str) -> Result<(), CreftError> {
 
 // ── Daily-check dispatch hook ──────────────────────────────────────────────
 
+/// Returns `true` when the daily background check and deferred notice should
+/// be suppressed because of the CI environment.
+///
+/// The policy is:
+///
+/// - If `$CI` is truthy (`"true"` or `"1"`, trimmed, lowercase) AND
+/// - `$CREFT_FORCE_CHECK` is *not* truthy (same parsing),
+///
+/// then return `true`. Otherwise return `false`.
+///
+/// `$CREFT_FORCE_CHECK` is an internal test seam used by the project's own
+/// integration tests, which run under `cargo nextest` on GitHub Actions
+/// (where the runner sets `CI=true`). Tests that exercise the daily-check
+/// or deferred-notice path opt in by setting `CREFT_FORCE_CHECK=1` on the
+/// spawned command. Tests that verify the CI guard itself do *not* set the
+/// override and exercise the real CI path.
+///
+/// Used by [`maybe_fire_daily`] and by [`crate::update_notice::print_if_pending`].
+pub(crate) fn ci_skip_active() -> bool {
+    is_ci() && !is_force_check()
+}
+
+/// Read `$CI` and return `true` for truthy values (`"true"`, `"1"`, trimmed).
+fn is_ci() -> bool {
+    matches!(
+        std::env::var("CI").ok().as_deref().map(str::trim),
+        Some("true" | "1")
+    )
+}
+
+/// Read `$CREFT_FORCE_CHECK` and return `true` for truthy values (same parsing).
+fn is_force_check() -> bool {
+    matches!(
+        std::env::var("CREFT_FORCE_CHECK")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("true" | "1")
+    )
+}
+
 /// Check whether to fire the daily background check and, if so, spawn it.
 ///
 /// Fires at most once per UTC day per install. Returns immediately — the
@@ -252,12 +293,14 @@ fn write_last_check(path: &Path, today: &str) -> Result<(), CreftError> {
 /// Precondition chain (first failure is a silent no-op):
 ///
 /// 1. Welcome marker must exist — the user has seen the telemetry disclosure.
-/// 2. `telemetry` must not be `"off"`.
-/// 3. `.last-check` must not already equal today's UTC date.
-/// 4. Write today's date to `.last-check` (records the attempt before spawning).
-/// 5. `CREFT_HOME` must not be set — suppresses the spawn in test environments.
-/// 6. `std::env::current_exe()` must succeed.
-/// 7. Spawn `creft _creft check` with all stdio handles redirected to `/dev/null`.
+/// 2. `$CI` must not be truthy (unless overridden by `$CREFT_FORCE_CHECK`) —
+///    suppresses the check in CI environments to avoid bot traffic.
+/// 3. `telemetry` must not be `"off"`.
+/// 4. `.last-check` must not already equal today's UTC date.
+/// 5. Write today's date to `.last-check` (records the attempt before spawning).
+/// 6. `CREFT_HOME` must not be set — suppresses the spawn in test environments.
+/// 7. `std::env::current_exe()` must succeed.
+/// 8. Spawn `creft _creft check` with all stdio handles redirected to `/dev/null`.
 pub(crate) fn maybe_fire_daily(ctx: &AppContext) {
     // Step 1: welcome marker guard.
     //
@@ -272,7 +315,14 @@ pub(crate) fn maybe_fire_daily(ctx: &AppContext) {
         return;
     }
 
-    // Step 2: telemetry setting guard.
+    // Step 2: CI guard — skip before writing .last-check so CI produces zero
+    // side effects on ~/.creft/ (important for self-hosted runners that mount
+    // the developer's $HOME).
+    if ci_skip_active() {
+        return;
+    }
+
+    // Step 3: telemetry setting guard.
     if let Ok(path) = ctx.settings_path()
         && let Ok(settings) = crate::settings::Settings::load(&path)
         && settings.get("telemetry") == Some("off")
@@ -280,7 +330,7 @@ pub(crate) fn maybe_fire_daily(ctx: &AppContext) {
         return;
     }
 
-    // Step 3: daily debounce.
+    // Step 4: daily debounce.
     let today = today_utc();
     let check_path = match last_check_path(ctx) {
         Ok(p) => p,
@@ -290,23 +340,23 @@ pub(crate) fn maybe_fire_daily(ctx: &AppContext) {
         return;
     }
 
-    // Step 4: write today's date — records the attempt regardless of spawn outcome.
+    // Step 5: write today's date — records the attempt regardless of spawn outcome.
     if write_last_check(&check_path, &today).is_err() {
         return;
     }
 
-    // Step 5: CREFT_HOME guard — suppress spawn in test environments.
+    // Step 6: CREFT_HOME guard — suppress spawn in test environments.
     if ctx.creft_home.is_some() {
         return;
     }
 
-    // Step 6: resolve the current executable.
+    // Step 7: resolve the current executable.
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
 
-    // Step 7: fire-and-forget. The `let _ =` discards the spawn Result on purpose:
+    // Step 8: fire-and-forget. The `let _ =` discards the spawn Result on purpose:
     // a failed spawn means no child runs, and the user's command proceeds normally.
     let _ = std::process::Command::new(&exe)
         .args(["_creft", "check"])
@@ -370,6 +420,7 @@ fn write_status_atomic(path: &Path, latest_version: &str) -> Result<(), CreftErr
 mod tests {
     use pretty_assertions::assert_eq;
     use rstest::rstest;
+    use serial_test::serial;
 
     use super::*;
 
@@ -567,10 +618,7 @@ mod tests {
         assert!(path.exists());
     }
 
-    // ── maybe_fire_daily precondition behavior ────────────────────────────────
-    //
-    // All cases set CREFT_HOME (via for_test_with_creft_home) which suppresses
-    // the spawn but allows the .last-check write to be observable.
+    // ── Shared helpers for maybe_fire_daily tests ─────────────────────────────
 
     fn make_creft_home_ctx(dir: &tempfile::TempDir) -> AppContext {
         AppContext::for_test_with_creft_home(dir.path().to_path_buf(), dir.path().to_path_buf())
@@ -589,10 +637,179 @@ mod tests {
         std::fs::write(path, r#"{"telemetry":"off"}"#).unwrap();
     }
 
+    // ── is_ci ─────────────────────────────────────────────────────────────────
+
+    #[rstest]
+    #[case::ci_true("true", true)]
+    #[case::ci_one("1", true)]
+    #[case::ci_false("false", false)]
+    #[case::ci_zero("0", false)]
+    #[case::ci_empty("", false)]
+    #[case::ci_uppercase_true("True", false)]
+    #[case::ci_all_caps("TRUE", false)]
+    #[serial(env_ci_skip)]
+    fn is_ci_parses_truthy_values(#[case] value: &str, #[case] expected: bool) {
+        let prior = std::env::var("CI").ok();
+        // SAFETY: single-threaded test context; no other thread reads this var.
+        unsafe { std::env::set_var("CI", value) };
+        let result = is_ci();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        assert_eq!(
+            result, expected,
+            "is_ci() with CI={value:?} must be {expected}"
+        );
+    }
+
+    #[test]
+    #[serial(env_ci_skip)]
+    fn is_ci_returns_false_when_unset() {
+        let prior = std::env::var("CI").ok();
+        // SAFETY: single-threaded test context; no other thread reads this var.
+        unsafe { std::env::remove_var("CI") };
+        let result = is_ci();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        assert!(!result, "is_ci() must be false when CI is unset");
+    }
+
+    #[test]
+    #[serial(env_ci_skip)]
+    fn is_ci_ignores_vendor_specific_vars() {
+        // Only $CI should trigger the guard; vendor-specific vars like
+        // GITHUB_ACTIONS or BUILDKITE must not.
+        let prior_ci = std::env::var("CI").ok();
+        let prior_ga = std::env::var("GITHUB_ACTIONS").ok();
+        // SAFETY: single-threaded test context; no other thread reads this var.
+        unsafe { std::env::remove_var("CI") };
+        unsafe { std::env::set_var("GITHUB_ACTIONS", "true") };
+        let result = is_ci();
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_ga {
+            Some(v) => unsafe { std::env::set_var("GITHUB_ACTIONS", v) },
+            None => unsafe { std::env::remove_var("GITHUB_ACTIONS") },
+        }
+        assert!(!result, "is_ci() must not fire on GITHUB_ACTIONS alone");
+    }
+
+    // ── is_force_check ────────────────────────────────────────────────────────
+
+    #[rstest]
+    #[case::force_true("true", true)]
+    #[case::force_one("1", true)]
+    #[case::force_false("false", false)]
+    #[case::force_empty("", false)]
+    #[serial(env_force_check)]
+    fn is_force_check_parses_truthy_values(#[case] value: &str, #[case] expected: bool) {
+        let prior = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads this var.
+        unsafe { std::env::set_var("CREFT_FORCE_CHECK", value) };
+        let result = is_force_check();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+        assert_eq!(
+            result, expected,
+            "is_force_check() with CREFT_FORCE_CHECK={value:?} must be {expected}"
+        );
+    }
+
+    #[test]
+    #[serial(env_force_check)]
+    fn is_force_check_returns_false_when_unset() {
+        let prior = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads this var.
+        unsafe { std::env::remove_var("CREFT_FORCE_CHECK") };
+        let result = is_force_check();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+        assert!(
+            !result,
+            "is_force_check() must be false when CREFT_FORCE_CHECK is unset"
+        );
+    }
+
+    // ── ci_skip_active truth table ────────────────────────────────────────────
+
+    #[rstest]
+    // CI=unset, FORCE=unset → false
+    #[case::both_unset(None, None, false)]
+    // CI=true, FORCE=unset → true (CI guard fires)
+    #[case::ci_true_no_force(Some("true"), None, true)]
+    // CI=1, FORCE=unset → true
+    #[case::ci_one_no_force(Some("1"), None, true)]
+    // CI=false, FORCE=unset → false (escape hatch honored)
+    #[case::ci_false_no_force(Some("false"), None, false)]
+    // CI=true, FORCE=1 → false (override suppresses guard)
+    #[case::ci_true_force_one(Some("true"), Some("1"), false)]
+    // CI=true, FORCE=true → false
+    #[case::ci_true_force_true(Some("true"), Some("true"), false)]
+    // CI=true, FORCE=0 → true (non-truthy override does not disable guard)
+    #[case::ci_true_force_zero(Some("true"), Some("0"), true)]
+    // CI=true, FORCE=false → true
+    #[case::ci_true_force_false(Some("true"), Some("false"), true)]
+    // CI=true, FORCE="" → true (empty override does not disable guard)
+    #[case::ci_true_force_empty(Some("true"), Some(""), true)]
+    // CI=unset, FORCE=1 → false (force-check without CI is a no-op)
+    #[case::ci_unset_force_one(None, Some("1"), false)]
+    #[serial(env_ci_skip)]
+    fn ci_skip_active_truth_table(
+        #[case] ci: Option<&str>,
+        #[case] force: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        let prior_ci = std::env::var("CI").ok();
+        let prior_force = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads these vars.
+        match ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+        let result = ci_skip_active();
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+        assert_eq!(
+            result, expected,
+            "ci_skip_active() with CI={ci:?}, CREFT_FORCE_CHECK={force:?} must be {expected}"
+        );
+    }
+
+    // ── maybe_fire_daily precondition behavior ────────────────────────────────
+    //
+    // All cases set CREFT_HOME (via for_test_with_creft_home) which suppresses
+    // the spawn but allows the .last-check write to be observable.
+    //
+    // Every case except CiTrue sets CREFT_FORCE_CHECK=1 to neutralize the CI
+    // guard — this test runs under cargo nextest on GitHub Actions where
+    // CI=true is set by the runner, and we want each arm to test its own
+    // precondition rather than the CI guard.
+
     /// Setup actions applied before calling `maybe_fire_daily` in each case.
     enum DailyCheckSetup {
         /// No marker, no settings — welcome guard fires, .last-check must not be written.
         WelcomeAbsent,
+        /// Marker present, CI=true, no CREFT_FORCE_CHECK — CI guard fires, .last-check must not be written.
+        CiTrue,
         /// Marker present, telemetry=off — telemetry guard fires, .last-check must not be written.
         TelemetryOff,
         /// Marker present, .last-check already contains today — debounce fires, file must not change.
@@ -605,18 +822,44 @@ mod tests {
 
     #[rstest]
     #[case::welcome_absent(DailyCheckSetup::WelcomeAbsent)]
+    #[case::ci_true(DailyCheckSetup::CiTrue)]
     #[case::telemetry_off(DailyCheckSetup::TelemetryOff)]
     #[case::already_checked_today(DailyCheckSetup::AlreadyCheckedToday)]
     #[case::stale_last_check(DailyCheckSetup::StaleLastCheck)]
     #[case::last_check_absent(DailyCheckSetup::LastCheckAbsent)]
+    #[serial(env_ci_skip)]
     fn maybe_fire_daily_precondition_chain(#[case] setup: DailyCheckSetup) {
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_creft_home_ctx(&dir);
         let check_path = dir.path().join(".last-check");
 
+        // Save both env vars for restore.
+        let prior_ci = std::env::var("CI").ok();
+        let prior_force = std::env::var("CREFT_FORCE_CHECK").ok();
+
+        // Default: neutralize the CI guard so each arm tests its own precondition.
+        // The CiTrue arm overrides this to exercise the real CI path.
+        let (set_ci, set_force) = match &setup {
+            DailyCheckSetup::CiTrue => (Some("true"), None),
+            _ => (None, Some("1")),
+        };
+        // SAFETY: single-threaded test context; no other thread reads these vars.
+        match set_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match set_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+
         match &setup {
             DailyCheckSetup::WelcomeAbsent => {
                 // No marker — function must short-circuit before writing .last-check.
+            }
+            DailyCheckSetup::CiTrue => {
+                write_welcome_marker(&dir);
+                // CI=true is set above; CREFT_FORCE_CHECK is removed above.
             }
             DailyCheckSetup::TelemetryOff => {
                 write_welcome_marker(&dir);
@@ -645,11 +888,27 @@ mod tests {
 
         maybe_fire_daily(&ctx);
 
+        // Restore env vars.
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+
         match setup {
             DailyCheckSetup::WelcomeAbsent => {
                 assert!(
                     !check_path.exists(),
                     ".last-check must not be created when welcome marker is absent"
+                );
+            }
+            DailyCheckSetup::CiTrue => {
+                assert!(
+                    !check_path.exists(),
+                    ".last-check must not be created when CI=true (CI guard fires before write)"
                 );
             }
             DailyCheckSetup::TelemetryOff => {

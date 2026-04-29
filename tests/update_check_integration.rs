@@ -345,7 +345,14 @@ fn non_command_arms_produce_no_daily_check_side_effects() {
     .unwrap();
 
     // --version
-    creft_with(&dir).arg("--version").assert().success();
+    // CREFT_FORCE_CHECK=1 ensures the CI guard does not produce a spurious pass
+    // on GitHub Actions — we want to assert the non-Command-arm short-circuit,
+    // not the CI guard.
+    creft_with(&dir)
+        .arg("--version")
+        .env("CREFT_FORCE_CHECK", "1")
+        .assert()
+        .success();
     assert!(
         !dir.path().join(".last-check").exists(),
         "--version must not write .last-check"
@@ -360,7 +367,11 @@ fn non_command_arms_produce_no_daily_check_side_effects() {
     }
 
     // list --help (Parsed::Help(_))
-    creft_with(&dir).args(["list", "--help"]).assert().success();
+    creft_with(&dir)
+        .args(["list", "--help"])
+        .env("CREFT_FORCE_CHECK", "1")
+        .assert()
+        .success();
     assert!(
         !dir.path().join(".last-check").exists(),
         "list --help must not write .last-check"
@@ -376,7 +387,11 @@ fn non_command_arms_produce_no_daily_check_side_effects() {
 
     // --docs add (Parsed::DocsSearchAll(_))
     // This may print "no documentation matches" but must not write either file.
-    let _ = creft_with(&dir).args(["--docs", "add"]).output().unwrap();
+    let _ = creft_with(&dir)
+        .args(["--docs", "add"])
+        .env("CREFT_FORCE_CHECK", "1")
+        .output()
+        .unwrap();
     assert!(
         !dir.path().join(".last-check").exists(),
         "--docs add must not write .last-check"
@@ -549,7 +564,13 @@ fn dispatch_prints_update_notice_when_pending() {
     // Run any interactive command. --version is NOT a Command arm, so use `list`.
     // The notice goes to stderr; `list` output goes to stdout.
     // We use a minimal CREFT_HOME so `list` returns quickly.
-    let output = creft_with(&dir).args(["list"]).output().unwrap();
+    // CREFT_FORCE_CHECK=1 ensures the CI guard does not swallow the notice on
+    // GitHub Actions (where CI=true is set by the runner).
+    let output = creft_with(&dir)
+        .args(["list"])
+        .env("CREFT_FORCE_CHECK", "1")
+        .output()
+        .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -557,7 +578,9 @@ fn dispatch_prints_update_notice_when_pending() {
         "stderr must contain the newer version; got: {stderr:?}"
     );
     assert!(
-        stderr.contains("creft update") || stderr.contains("brew upgrade"),
+        stderr.contains("creft update")
+            || stderr.contains("brew upgrade")
+            || stderr.contains("cargo install"),
         "stderr must contain the upgrade command; got: {stderr:?}"
     );
 }
@@ -579,7 +602,13 @@ fn dispatch_does_not_repeat_notice_after_shown() {
     )
     .unwrap();
 
-    let output = creft_with(&dir).args(["list"]).output().unwrap();
+    // CREFT_FORCE_CHECK=1 forces the code past the CI guard so we test the
+    // notice_shown branch, not the CI guard.
+    let output = creft_with(&dir)
+        .args(["list"])
+        .env("CREFT_FORCE_CHECK", "1")
+        .output()
+        .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("99.99.99"),
@@ -608,10 +637,141 @@ fn dispatch_no_notice_when_telemetry_off() {
         .assert()
         .success();
 
-    let output = creft_with(&dir).args(["list"]).output().unwrap();
+    // CREFT_FORCE_CHECK=1 forces past the CI guard so we test the telemetry
+    // guard, which is what this test's name asserts.
+    let output = creft_with(&dir)
+        .args(["list"])
+        .env("CREFT_FORCE_CHECK", "1")
+        .output()
+        .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("99.99.99"),
         "no notice should print when telemetry=off; got: {stderr:?}"
+    );
+}
+
+// ── CI carve-out integration tests ────────────────────────────────────────────
+
+/// When `CI=true` is set, the daily background check is suppressed: `.last-check`
+/// is not created and no notice prints even when a newer version is pending.
+#[test]
+fn daily_check_suppressed_in_ci() {
+    let dir = creft_env();
+
+    // Welcome marker present so the welcome guard passes.
+    std::fs::write(dir.path().join(".welcome-done"), "0.4.0").unwrap();
+
+    // Seed a pending update notice.
+    let pending_status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": false
+    });
+    std::fs::write(
+        dir.path().join(".update-status"),
+        serde_json::to_string(&pending_status).unwrap(),
+    )
+    .unwrap();
+
+    // Run a command with CI=true and no CREFT_FORCE_CHECK override.
+    let output = creft_with(&dir)
+        .args(["list"])
+        .env("CI", "true")
+        .env_remove("CREFT_FORCE_CHECK")
+        .output()
+        .unwrap();
+
+    // The CI guard must have fired: .last-check must not be created.
+    assert!(
+        !dir.path().join(".last-check").exists(),
+        ".last-check must not be created when CI=true"
+    );
+
+    // The deferred notice must not print.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("99.99.99"),
+        "no notice should print when CI=true; got: {stderr:?}"
+    );
+
+    // notice_shown must remain false so a subsequent non-CI run still sees the notice.
+    let content = std::fs::read_to_string(dir.path().join(".update-status")).unwrap();
+    let s: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        s["notice_shown"], false,
+        "notice_shown must remain false when CI guard fires"
+    );
+}
+
+/// When `CI=false` is set, the documented escape hatch is honored: the daily
+/// check fires normally (writing `.last-check`).
+#[test]
+fn daily_check_fires_when_ci_false() {
+    let dir = creft_env();
+
+    // Welcome marker present.
+    std::fs::write(dir.path().join(".welcome-done"), "0.4.0").unwrap();
+
+    // Run a command with CI=false and no override.
+    creft_with(&dir)
+        .args(["list"])
+        .env("CI", "false")
+        .env_remove("CREFT_FORCE_CHECK")
+        .output()
+        .unwrap();
+
+    // The CI guard must NOT have fired: .last-check must be written (CREFT_HOME
+    // suppresses the spawn but not the .last-check write).
+    assert!(
+        dir.path().join(".last-check").exists(),
+        ".last-check must be written when CI=false (escape hatch honored)"
+    );
+}
+
+/// When both `CI=true` and `CREFT_FORCE_CHECK=1` are set, the override wins:
+/// the deferred notice fires and `notice_shown` flips to `true`.
+#[test]
+fn cargo_notice_tail_when_force_check_overrides_ci() {
+    let dir = creft_env();
+
+    // Seed a pending update notice.
+    let status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": false
+    });
+    std::fs::write(
+        dir.path().join(".update-status"),
+        serde_json::to_string(&status).unwrap(),
+    )
+    .unwrap();
+
+    let output = creft_with(&dir)
+        .args(["list"])
+        .env("CI", "true")
+        .env("CREFT_FORCE_CHECK", "1")
+        .output()
+        .unwrap();
+
+    // The override must let the notice through.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("99.99.99"),
+        "notice must print when CREFT_FORCE_CHECK=1 overrides CI=true; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("creft update")
+            || stderr.contains("brew upgrade")
+            || stderr.contains("cargo install"),
+        "notice must contain an upgrade command; got: {stderr:?}"
+    );
+
+    // notice_shown must have been flipped.
+    let content = std::fs::read_to_string(dir.path().join(".update-status")).unwrap();
+    let s: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        s["notice_shown"], true,
+        "notice_shown must flip to true when CREFT_FORCE_CHECK overrides CI"
     );
 }

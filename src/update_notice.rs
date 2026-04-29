@@ -9,7 +9,7 @@ use std::path::Path;
 
 use yansi::Paint as _;
 
-use crate::install_method::is_homebrew_install;
+use crate::install_method::{self, InstallMethod};
 use crate::model::AppContext;
 use crate::settings::Settings;
 use crate::update_check::{UpdateStatus, status_path};
@@ -22,12 +22,23 @@ use crate::update_check::{UpdateStatus, status_path};
 ///
 /// The notice tail is determined by install method:
 /// - Homebrew install: `run 'brew upgrade creft' to upgrade`
+/// - Cargo install: `run 'cargo install creft' to upgrade`
 /// - All others (including when `current_exe` is `None`): `run 'creft update' to upgrade`
+///
+/// Skipped when `$CI` is set to a truthy value (no read, no write); the
+/// suppression can be overridden for testing via `$CREFT_FORCE_CHECK`.
 ///
 /// All errors — telemetry off, missing/malformed status file, stderr write failure,
 /// file rewrite failure — are silently swallowed. The user's actual command is
 /// never affected.
 pub(crate) fn print_if_pending(ctx: &AppContext, current_exe: Option<&Path>) {
+    // CI guard — before any read or write. CI environments run bot traffic that
+    // should not surface notices or flip the notice_shown flag, so a developer
+    // running the same binary locally after a CI run still sees the notice.
+    if crate::update_check::ci_skip_active() {
+        return;
+    }
+
     // Respect telemetry setting.
     if let Ok(path) = ctx.settings_path()
         && let Ok(settings) = Settings::load(&path)
@@ -62,12 +73,10 @@ pub(crate) fn print_if_pending(ctx: &AppContext, current_exe: Option<&Path>) {
     }
 
     // Choose the upgrade command based on install method.
-    let use_homebrew = current_exe.is_some_and(is_homebrew_install);
-    let upgrade_cmd = if use_homebrew {
-        "brew upgrade creft"
-    } else {
-        "creft update"
-    };
+    let method = current_exe
+        .map(install_method::detect)
+        .unwrap_or(InstallMethod::InstallScript);
+    let upgrade_cmd = method.upgrade_command();
 
     // Print the notice to stderr — one line, muted gray.
     let msg = format!(
@@ -109,6 +118,7 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 mod tests {
     use pretty_assertions::assert_eq;
     use rstest::rstest;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     use super::*;
@@ -202,6 +212,7 @@ mod tests {
     )]
     // current_exe is None — falls back to 'creft update' tail; flag must flip.
     #[case::current_exe_none(StatusSetup::Present { latest: "99.99.99", notice_shown: false }, false, ExpectedNoticeShown::True)]
+    #[serial(env_ci_skip)]
     fn print_if_pending_cases(
         #[case] status_setup: StatusSetup,
         #[case] telemetry_off: bool,
@@ -209,6 +220,13 @@ mod tests {
     ) {
         let dir = TempDir::new().unwrap();
         let ctx = make_ctx(&dir);
+
+        // Neutralize the CI guard so each case tests its own branch.
+        let prior_ci = std::env::var("CI").ok();
+        let prior_force = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads these vars.
+        unsafe { std::env::remove_var("CI") };
+        unsafe { std::env::set_var("CREFT_FORCE_CHECK", "1") };
 
         if telemetry_off {
             std::fs::write(dir.path().join("settings.json"), r#"{"telemetry":"off"}"#).unwrap();
@@ -231,6 +249,16 @@ mod tests {
         // `homebrew_path_selects_brew_upgrade_command` below.
         print_if_pending(&ctx, None);
 
+        // Restore env vars.
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+
         match expected {
             ExpectedNoticeShown::True => {
                 let s = read_status(&dir);
@@ -248,6 +276,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial(env_ci_skip)]
     fn homebrew_path_selects_brew_upgrade_command() {
         use std::path::PathBuf;
 
@@ -269,13 +298,64 @@ mod tests {
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
+        // Neutralize the CI guard.
+        let prior_ci = std::env::var("CI").ok();
+        let prior_force = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads these vars.
+        unsafe { std::env::remove_var("CI") };
+        unsafe { std::env::set_var("CREFT_FORCE_CHECK", "1") };
+
         // After the call the notice_shown flag should be flipped, indicating the
         // function ran to completion with the Homebrew detection path.
         print_if_pending(&ctx, Some(&link));
+
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+
         let status = read_status(&dir);
         assert!(
             status.notice_shown,
             "notice_shown must be true after printing with homebrew path"
+        );
+    }
+
+    #[test]
+    #[serial(env_ci_skip)]
+    fn ci_guard_suppresses_notice_and_leaves_flag_unflipped() {
+        let dir = TempDir::new().unwrap();
+        let ctx = make_ctx(&dir);
+        // Status file has a pending notice.
+        write_status(&dir, "99.99.99", false);
+
+        let prior_ci = std::env::var("CI").ok();
+        let prior_force = std::env::var("CREFT_FORCE_CHECK").ok();
+        // SAFETY: single-threaded test context; no other thread reads these vars.
+        unsafe { std::env::set_var("CI", "true") };
+        unsafe { std::env::remove_var("CREFT_FORCE_CHECK") };
+
+        print_if_pending(&ctx, None);
+
+        match prior_ci {
+            Some(v) => unsafe { std::env::set_var("CI", v) },
+            None => unsafe { std::env::remove_var("CI") },
+        }
+        match prior_force {
+            Some(v) => unsafe { std::env::set_var("CREFT_FORCE_CHECK", v) },
+            None => unsafe { std::env::remove_var("CREFT_FORCE_CHECK") },
+        }
+
+        // The CI guard must have fired; notice_shown must remain false so a
+        // subsequent non-CI run still surfaces the notice.
+        let s = read_status(&dir);
+        assert!(
+            !s.notice_shown,
+            "notice_shown must remain false when CI guard fires; a subsequent non-CI run should still see the notice"
         );
     }
 }

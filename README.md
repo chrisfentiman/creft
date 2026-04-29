@@ -78,6 +78,10 @@ The disclosure is shown on the welcome screen the first time creft runs after in
 
 `creft update` (run manually) calls the same endpoint and is **not** gated by the telemetry setting — it is the explicit purpose of the command.
 
+The daily background check is suppressed when `$CI` is set to `true` or `1`. CI environments run bot traffic that does not represent active installs and would inflate the volume signal; the carve-out keeps the count meaningful. To force the check on or off independent of `$CI`, use `creft settings set telemetry on|off`. The manual `creft update` command is not affected by the CI carve-out — running it inside a CI workflow upgrades creft as it does anywhere else.
+
+If creft was installed via `cargo install creft`, run `cargo install creft` to upgrade. The `creft update` command refuses with a redirect message, the same way it does for Homebrew installs — package-manager-installed binaries should be upgraded through the package manager that owns them.
+
 ---
 
 ## Why I built this
