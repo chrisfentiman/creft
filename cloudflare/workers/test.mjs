@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseUserAgent, targetTriple, buildLatestPayload } from "./creft-run.js";
+import { parseUserAgent, targetTriple, buildLatestPayload, parseLatestBody } from "./creft-run.js";
 
 // ---------------------------------------------------------------------------
 // parseUserAgent
@@ -138,4 +138,49 @@ test("buildLatestPayload returns only version and tag for unsupported platform",
   assert.equal(payload.tag, "creft-v0.5.1");
   assert.equal(Object.hasOwn(payload, "tarball_url"), false);
   assert.equal(Object.hasOwn(payload, "checksum_url"), false);
+});
+
+// ---------------------------------------------------------------------------
+// parseLatestBody
+// ---------------------------------------------------------------------------
+
+test("parseLatestBody returns parsed object for valid JSON", () => {
+  const body = JSON.stringify({ tag_name: "creft-v0.5.1", name: "creft 0.5.1" });
+  const result = parseLatestBody(body);
+  assert.equal(result.tag_name, "creft-v0.5.1");
+});
+
+test("parseLatestBody throws a 502 Response for malformed JSON", () => {
+  let thrown;
+  try {
+    parseLatestBody("<!DOCTYPE html><html>maintenance</html>");
+  } catch (err) {
+    thrown = err;
+  }
+  assert.ok(thrown instanceof Response, "must throw a Response, not a SyntaxError");
+  assert.equal(thrown.status, 502);
+  assert.equal(thrown.headers.get("cache-control"), "no-store");
+});
+
+test("parseLatestBody throws a 502 Response for an empty body", () => {
+  let thrown;
+  try {
+    parseLatestBody("");
+  } catch (err) {
+    thrown = err;
+  }
+  assert.ok(thrown instanceof Response, "must throw a Response, not a SyntaxError");
+  assert.equal(thrown.status, 502);
+  assert.equal(thrown.headers.get("cache-control"), "no-store");
+});
+
+test("parseLatestBody throws a 502 Response for a truncated JSON body", () => {
+  let thrown;
+  try {
+    parseLatestBody('{"tag_name":"creft-v0.5.1"');
+  } catch (err) {
+    thrown = err;
+  }
+  assert.ok(thrown instanceof Response, "must throw a Response, not a SyntaxError");
+  assert.equal(thrown.status, 502);
 });

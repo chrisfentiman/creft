@@ -58,9 +58,24 @@ function logEvent(env, kind, version, ua, path) {
   });
 }
 
+// Parse a GitHub Releases API response body. Returns the parsed object, or
+// throws a pre-built 502 Response when the body is not valid JSON. This is a
+// pure helper with no runtime dependencies — safe to import in Node.js tests.
+function parseLatestBody(bodyText) {
+  try {
+    return JSON.parse(bodyText);
+  } catch {
+    throw new Response("upstream error", {
+      status: 502,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+}
+
 // Resolve the latest version via the GitHub Releases API, with caches.default
 // fronting the upstream call. Authenticates via env.GITHUB_TOKEN when bound.
-// Returns the parsed JSON body, or throws a Response on upstream failure.
+// Returns the parsed JSON body, or throws a Response on upstream failure or
+// when the upstream body is not valid JSON.
 async function resolveLatest(env) {
   const cache = caches.default;
   const cacheKey = new Request("https://creft.internal/gh-releases-latest");
@@ -91,10 +106,10 @@ async function resolveLatest(env) {
     });
   }
 
-  // Read body to text once. Cache a Response built from the string so the put
-  // and the parse both consume the same already-materialized value — ordering
-  // between cache.put and JSON.parse is not load-bearing.
+  // Parse before caching. A body that fails to parse must not be stored — a
+  // poisoned cache entry would serve the same malformed body for the full TTL.
   const bodyText = await upstream.text();
+  const parsed = parseLatestBody(bodyText);
   const cachedResponse = new Response(bodyText, {
     status: 200,
     headers: {
@@ -103,7 +118,7 @@ async function resolveLatest(env) {
     },
   });
   await cache.put(cacheKey, cachedResponse.clone());
-  return JSON.parse(bodyText);
+  return parsed;
 }
 
 function resolveRoute(pathname) {
@@ -125,7 +140,7 @@ function resolveRoute(pathname) {
 
 // Named exports for unit testing — these helpers have no dependency on the
 // Cloudflare Workers runtime and are safe to import in Node.js test suites.
-export { parseUserAgent, targetTriple, buildLatestPayload };
+export { parseUserAgent, targetTriple, buildLatestPayload, parseLatestBody };
 
 export default {
   async fetch(request, env) {
@@ -148,9 +163,15 @@ export default {
       let data;
       try {
         data = await resolveLatest(env);
-      } catch (errResponse) {
-        // resolveLatest throws a pre-built Response on upstream failure.
-        return errResponse;
+      } catch (err) {
+        // resolveLatest throws a pre-built Response on upstream failure or
+        // unparseable body. Guard the type so the fetch handler always returns
+        // a Response regardless of what was thrown.
+        if (err instanceof Response) return err;
+        return new Response("upstream error", {
+          status: 502,
+          headers: { "cache-control": "no-store" },
+        });
       }
 
       const version = data.tag_name.replace(/^creft-v/, "");
