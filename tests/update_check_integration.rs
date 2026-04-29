@@ -377,7 +377,7 @@ fn creft_check_writes_update_status_on_success() {
     assert_eq!(parsed["latest_version"], "99.99.99");
     assert_eq!(parsed["notice_shown"], false);
     assert!(
-        parsed["checked_at"].as_str().map_or(false, |s| {
+        parsed["checked_at"].as_str().is_some_and(|s| {
             s.len() == 10 && s.chars().nth(4) == Some('-')
         }),
         "checked_at must be YYYY-MM-DD: {}",
