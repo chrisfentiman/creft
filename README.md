@@ -53,6 +53,33 @@ That's it. Works with Claude Code, Cursor, Copilot, Windsurf, Codex, Gemini CLI.
 
 ---
 
+## Telemetry
+
+creft checks for new releases once per UTC day. The check is a single GET request to `https://creft.run/latest`. The request carries one piece of information — a User-Agent header of the form `creft/<version> (<os>; <arch>)` — and nothing else. No per-machine identifier, no IP-derived ID, no install UUID.
+
+The same request serves two purposes:
+
+1. **Useful to you.** When a new version is available, the next interactive `creft` command surfaces a one-line "update available" notice. Run `creft update` (or `brew upgrade creft` for Homebrew installs) to upgrade.
+2. **Useful to the project.** The User-Agent tells creft.run that an install at version X on platform Y was active today. The project counts active days per `(version, OS, arch)` bucket; nothing else is queryable from it.
+
+The check runs in a fire-and-forget child process, so it cannot block your command. To opt out:
+
+```sh
+creft settings set telemetry off
+```
+
+To re-enable:
+
+```sh
+creft settings set telemetry on
+```
+
+The disclosure is shown on the welcome screen the first time creft runs after install, and is reflected in `creft settings show`.
+
+`creft update` (run manually) calls the same endpoint and is **not** gated by the telemetry setting — it is the explicit purpose of the command.
+
+---
+
 ## Why I built this
 
 MCPs were awesome until the token bloat really started to kill it. The workarounds help, but when you're working with local coding agents, the best interface I've seen them consistently work with is just a CLI. So I started building CLIs — one for Databricks queries, a Python step that analyzed the results, an LLM step that reasoned about them. Suddenly I had a workflow script gluing all these components together, and it was awesome.

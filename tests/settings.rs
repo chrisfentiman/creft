@@ -50,7 +50,8 @@ fn settings_show_prints_configured_value_for_set_key() {
         .assert()
         .success()
         .stdout(predicate::str::contains("shell = zsh"))
-        .stdout(predicate::str::contains("(default:").not());
+        // The shell line must show the configured value, not a default placeholder.
+        .stdout(predicate::str::contains("shell = (default:").not());
 }
 
 /// `creft settings` never prints "no settings configured".
