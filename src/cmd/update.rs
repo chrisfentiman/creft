@@ -63,7 +63,7 @@ pub(crate) fn cmd_update(
             println!("creft is up to date ({installed})");
         }
         Status::Ahead => {
-            println!("creft is up to date ({installed})");
+            println!("creft is ahead of the published release ({installed})");
         }
         Status::Behind => {
             run_install_script(exe, &latest)?;
@@ -92,9 +92,7 @@ fn run_install_script(exe: &Path, latest: &LatestResponse) -> Result<(), CreftEr
 
     if !status.success() {
         let code = status.code().unwrap_or(1);
-        return Err(CreftError::Setup(format!(
-            "install script exited with code {code}"
-        )));
+        return Err(CreftError::InstallScriptFailed { code });
     }
 
     Ok(())

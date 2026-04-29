@@ -4,6 +4,7 @@ mod helpers;
 
 use helpers::{create_multi_plugin_repo, create_test_package, creft_env, creft_with};
 use predicates::prelude::*;
+use pretty_assertions::assert_ne;
 use rstest::rstest;
 use tempfile::TempDir;
 
@@ -379,14 +380,28 @@ fn install_root_alias_removed() {
 }
 
 /// `creft update` is a recognized built-in — it must not exit with code 2
-/// ("command not found"). A network error (code 1) is acceptable because the
-/// test environment has no fixture server; what matters is that the command
-/// dispatches to the update handler rather than falling through to skill lookup.
+/// ("command not found"). The test injects a closed-port endpoint so dispatch
+/// reaches the update handler and fails with a network error (exit code 1)
+/// rather than falling through to skill lookup (exit code 2). No request
+/// reaches the production endpoint.
 #[test]
 fn update_is_recognized_builtin() {
-    let creft_home = creft_env();
+    use std::net::TcpListener;
 
-    let output = creft_with(&creft_home).args(["update"]).output().unwrap();
+    // Bind a listener, capture the port, then drop it. Nothing is listening
+    // on that port, so the binary will get a connection-refused network error
+    // (exit 1) rather than a command-not-found error (exit 2).
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let addr = listener.local_addr().expect("local_addr failed");
+    drop(listener);
+    let endpoint = format!("http://127.0.0.1:{}/latest", addr.port());
+
+    let creft_home = creft_env();
+    let output = creft_with(&creft_home)
+        .args(["update"])
+        .env("CREFT_UPDATE_ENDPOINT", &endpoint)
+        .output()
+        .unwrap();
 
     // Exit code 2 means "command not found" — that must not happen.
     assert_ne!(

@@ -8,13 +8,25 @@ use std::path::Path;
 /// Returns `true` when the running binary is managed by Homebrew.
 ///
 /// Canonicalizes `exe` (resolves symlinks) before pattern-matching, so a
-/// Homebrew-shim that points into the Cellar is correctly identified.
+/// Homebrew shim at `/opt/homebrew/bin/creft` or `/usr/local/bin/creft` that
+/// points into the Cellar is correctly identified even when the caller passes
+/// the shim path.
 ///
-/// Recognized Homebrew paths:
-/// - Any path starting with `/opt/homebrew/` (Apple Silicon default prefix)
-/// - Any path starting with `/usr/local/Homebrew/` (Intel macOS legacy prefix)
-/// - Any path starting with `/home/linuxbrew/` (Linux Homebrew prefix)
-/// - Any path containing `/Cellar/creft/` (catches non-default prefix installs)
+/// Detection rules and what each actually catches:
+///
+/// - `/opt/homebrew/` prefix — Apple Silicon default prefix. Shims live at
+///   `/opt/homebrew/bin/creft`; canonical paths after symlink resolution land
+///   inside `/opt/homebrew/Cellar/...`.
+/// - `/home/linuxbrew/` prefix — Linux Homebrew prefix.
+/// - `/Cellar/creft/` substring — catches Intel macOS installs (canonical path
+///   resolves to `/usr/local/Cellar/creft/<ver>/bin/creft`) and any install
+///   where Homebrew is at a non-default prefix. This is the primary rule that
+///   catches real Homebrew binaries after `canonicalize` resolves the shim.
+/// - `/usr/local/Homebrew/` prefix — the Homebrew git checkout directory on
+///   Intel macOS, not a runtime binary location. A canonicalized binary path
+///   will not normally start here, but it is kept as a conservative guard in
+///   case an unusual Homebrew configuration places a binary directly inside the
+///   checkout tree.
 ///
 /// Returns `false` when canonicalization fails (fail-open: prefer to allow a
 /// legitimate direct update over blocking a non-Homebrew install).
