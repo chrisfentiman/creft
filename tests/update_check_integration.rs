@@ -319,8 +319,8 @@ fn version_output_has_no_telemetry_footer() {
 // ── Daily check hooks: non-Command arms produce no side effects ───────────────
 
 /// `creft --version`, `creft list --help`, and `creft --docs add` must not
-/// write `.last-check` or `.update-status` — the daily-check hooks fire only
-/// on the `Parsed::Command(_)` arm.
+/// write `.last-check` or mutate `.update-status` — the daily-check hooks fire
+/// only on the `Parsed::Command(_)` arm.
 #[test]
 fn non_command_arms_produce_no_daily_check_side_effects() {
     // Provide a welcome marker so the guard inside maybe_fire_daily is satisfied.
@@ -330,12 +330,34 @@ fn non_command_arms_produce_no_daily_check_side_effects() {
     // Write the welcome marker directly into CREFT_HOME.
     std::fs::write(dir.path().join(".welcome-done"), "0.4.0").unwrap();
 
+    // Seed .update-status with a pending notice (notice_shown: false, newer version).
+    // If print_if_pending fires on a non-Command arm, it would flip notice_shown to true.
+    let pending_status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": false
+    });
+    let status_path = dir.path().join(".update-status");
+    std::fs::write(
+        &status_path,
+        serde_json::to_string(&pending_status).unwrap(),
+    )
+    .unwrap();
+
     // --version
     creft_with(&dir).arg("--version").assert().success();
     assert!(
         !dir.path().join(".last-check").exists(),
         "--version must not write .last-check"
     );
+    {
+        let content = std::fs::read_to_string(&status_path).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            s["notice_shown"], false,
+            "--version must not mutate notice_shown in .update-status"
+        );
+    }
 
     // list --help (Parsed::Help(_))
     creft_with(&dir).args(["list", "--help"]).assert().success();
@@ -343,24 +365,100 @@ fn non_command_arms_produce_no_daily_check_side_effects() {
         !dir.path().join(".last-check").exists(),
         "list --help must not write .last-check"
     );
+    {
+        let content = std::fs::read_to_string(&status_path).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            s["notice_shown"], false,
+            "list --help must not mutate notice_shown in .update-status"
+        );
+    }
 
     // --docs add (Parsed::DocsSearchAll(_))
-    // This may print "no documentation matches" but must still exit 0 and not write the file.
+    // This may print "no documentation matches" but must not write either file.
     let _ = creft_with(&dir).args(["--docs", "add"]).output().unwrap();
     assert!(
         !dir.path().join(".last-check").exists(),
         "--docs add must not write .last-check"
     );
+    {
+        let content = std::fs::read_to_string(&status_path).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            s["notice_shown"], false,
+            "--docs add must not mutate notice_shown in .update-status"
+        );
+    }
 }
 
 // ── _creft check: integration test against a local HTTP listener ──────────────
 
+/// Spawn a server that captures the request line and User-Agent header, then
+/// serves the given `body` with HTTP 200.  Returns the endpoint URL and two
+/// `Arc<Mutex<String>>` handles for the captured values.
+fn spawn_capturing_server(
+    body: &'static str,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<String>>,
+    std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    use std::io::{BufRead as _, BufReader};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let addr = listener.local_addr().expect("local_addr failed");
+
+    let request_line_cap = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let user_agent_cap = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let rl_clone = request_line_cap.clone();
+    let ua_clone = user_agent_cap.clone();
+
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept failed");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone failed"));
+
+        let mut first = true;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.trim().is_empty() {
+                break;
+            }
+            if first {
+                *rl_clone.lock().unwrap() = line.trim().to_string();
+                first = false;
+            }
+            if line.to_lowercase().starts_with("user-agent:") {
+                *ua_clone.lock().unwrap() = line.trim().to_string();
+            }
+        }
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            len = body.len()
+        );
+        let mut writer = reader.into_inner();
+        let _ = writer.write_all(response.as_bytes());
+    });
+
+    let endpoint = format!("http://{}:{}/latest", addr.ip(), addr.port());
+    (endpoint, request_line_cap, user_agent_cap)
+}
+
 /// `creft _creft check` performs a GET to `/latest`, writes `.update-status`
-/// with `notice_shown: false`, and exits 0.
+/// with `notice_shown: false`, and exits 0.  Asserts the request line and
+/// User-Agent header match the expected wire format.
 #[test]
 fn creft_check_writes_update_status_on_success() {
     let body = r#"{"version":"99.99.99","tag":"creft-v99.99.99"}"#;
-    let endpoint = spawn_fixture_server(200, body);
+    let (endpoint, request_line_cap, user_agent_cap) = spawn_capturing_server(body);
 
     let dir = creft_env();
     creft_with(&dir)
@@ -369,6 +467,7 @@ fn creft_check_writes_update_status_on_success() {
         .assert()
         .success();
 
+    // Assert the status file was written correctly.
     let status_path = dir.path().join(".update-status");
     assert!(status_path.exists(), ".update-status must be written");
 
@@ -377,11 +476,34 @@ fn creft_check_writes_update_status_on_success() {
     assert_eq!(parsed["latest_version"], "99.99.99");
     assert_eq!(parsed["notice_shown"], false);
     assert!(
-        parsed["checked_at"].as_str().is_some_and(|s| {
-            s.len() == 10 && s.chars().nth(4) == Some('-')
-        }),
+        parsed["checked_at"]
+            .as_str()
+            .is_some_and(|s| { s.len() == 10 && s.chars().nth(4) == Some('-') }),
         "checked_at must be YYYY-MM-DD: {}",
         parsed["checked_at"]
+    );
+
+    // Assert the request line is correct.
+    let request_line = request_line_cap.lock().unwrap().clone();
+    assert!(
+        request_line.starts_with("GET /latest HTTP/1.1"),
+        "request line must start with 'GET /latest HTTP/1.1': {request_line:?}"
+    );
+
+    // Assert the User-Agent header matches `creft/<version> (<os>; <arch>)`.
+    let user_agent = user_agent_cap.lock().unwrap().clone();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        user_agent.to_lowercase().contains("creft/"),
+        "User-Agent must contain 'creft/': {user_agent:?}"
+    );
+    assert!(
+        user_agent.contains(version),
+        "User-Agent must contain CARGO_PKG_VERSION {version:?}: {user_agent:?}"
+    );
+    assert!(
+        user_agent.contains('(') && user_agent.contains(')') && user_agent.contains(';'),
+        "User-Agent must contain '(<os>; <arch>)': {user_agent:?}"
     );
 }
 

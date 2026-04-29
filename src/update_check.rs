@@ -529,26 +529,17 @@ mod tests {
 
     // ── read_last_check / write_last_check ────────────────────────────────────
 
-    #[test]
-    fn read_last_check_returns_none_for_missing_file() {
+    /// `None` means do not pre-create the file; `Some(content)` writes `content`.
+    #[rstest]
+    #[case::missing(None)]
+    #[case::empty(Some(""))]
+    #[case::whitespace(Some("   \n"))]
+    fn read_last_check_returns_none_for_blank_or_absent(#[case] content: Option<&str>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".last-check");
-        assert!(read_last_check(&path).is_none());
-    }
-
-    #[test]
-    fn read_last_check_returns_none_for_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".last-check");
-        std::fs::write(&path, "").unwrap();
-        assert!(read_last_check(&path).is_none());
-    }
-
-    #[test]
-    fn read_last_check_returns_none_for_whitespace_only_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".last-check");
-        std::fs::write(&path, "   \n").unwrap();
+        if let Some(c) = content {
+            std::fs::write(&path, c).unwrap();
+        }
         assert!(read_last_check(&path).is_none());
     }
 
@@ -580,7 +571,7 @@ mod tests {
 
     // ── maybe_fire_daily precondition behavior ────────────────────────────────
     //
-    // All four cases set CREFT_HOME (via for_test_with_creft_home) which suppresses
+    // All cases set CREFT_HOME (via for_test_with_creft_home) which suppresses
     // the spawn but allows the .last-check write to be observable.
 
     fn make_creft_home_ctx(dir: &tempfile::TempDir) -> AppContext {
@@ -600,91 +591,93 @@ mod tests {
         std::fs::write(path, r#"{"telemetry":"off"}"#).unwrap();
     }
 
-    #[test]
-    fn maybe_fire_daily_no_last_check_when_welcome_marker_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = make_creft_home_ctx(&dir);
-        // No welcome marker — guard should short-circuit before writing .last-check.
-        maybe_fire_daily(&ctx);
-        let check_path = dir.path().join(".last-check");
-        assert!(
-            !check_path.exists(),
-            ".last-check must not be created when welcome marker is absent"
-        );
+    /// Setup actions applied before calling `maybe_fire_daily` in each case.
+    enum DailyCheckSetup {
+        /// No marker, no settings — welcome guard fires, .last-check must not be written.
+        WelcomeAbsent,
+        /// Marker present, telemetry=off — telemetry guard fires, .last-check must not be written.
+        TelemetryOff,
+        /// Marker present, .last-check already contains today — debounce fires, file must not change.
+        AlreadyCheckedToday,
+        /// Marker present, .last-check has a stale date — debounce passes, file must be updated.
+        StaleLastCheck,
+        /// Marker present, no .last-check file — first-run path, file must be created with today.
+        LastCheckAbsent,
     }
 
-    #[test]
-    fn maybe_fire_daily_no_last_check_when_telemetry_off() {
+    #[rstest]
+    #[case::welcome_absent(DailyCheckSetup::WelcomeAbsent)]
+    #[case::telemetry_off(DailyCheckSetup::TelemetryOff)]
+    #[case::already_checked_today(DailyCheckSetup::AlreadyCheckedToday)]
+    #[case::stale_last_check(DailyCheckSetup::StaleLastCheck)]
+    #[case::last_check_absent(DailyCheckSetup::LastCheckAbsent)]
+    fn maybe_fire_daily_precondition_chain(#[case] setup: DailyCheckSetup) {
         let dir = tempfile::tempdir().unwrap();
         let ctx = make_creft_home_ctx(&dir);
-        write_welcome_marker(&dir);
-        write_telemetry_off(&dir);
-
-        maybe_fire_daily(&ctx);
         let check_path = dir.path().join(".last-check");
-        assert!(
-            !check_path.exists(),
-            ".last-check must not be created when telemetry=off"
-        );
-    }
 
-    #[test]
-    fn maybe_fire_daily_no_rewrite_when_already_checked_today() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = make_creft_home_ctx(&dir);
-        write_welcome_marker(&dir);
+        match &setup {
+            DailyCheckSetup::WelcomeAbsent => {
+                // No marker — function must short-circuit before writing .last-check.
+            }
+            DailyCheckSetup::TelemetryOff => {
+                write_welcome_marker(&dir);
+                write_telemetry_off(&dir);
+            }
+            DailyCheckSetup::AlreadyCheckedToday => {
+                write_welcome_marker(&dir);
+                let today = today_utc();
+                std::fs::write(&check_path, &today).unwrap();
+            }
+            DailyCheckSetup::StaleLastCheck => {
+                write_welcome_marker(&dir);
+                std::fs::write(&check_path, "2000-01-01").unwrap();
+            }
+            DailyCheckSetup::LastCheckAbsent => {
+                write_welcome_marker(&dir);
+            }
+        }
 
-        let check_path = dir.path().join(".last-check");
-        let today = today_utc();
-        std::fs::write(&check_path, &today).unwrap();
-
-        let mtime_before = std::fs::metadata(&check_path).unwrap().modified().unwrap();
-
-        maybe_fire_daily(&ctx);
-
-        let mtime_after = std::fs::metadata(&check_path).unwrap().modified().unwrap();
-        assert_eq!(
-            mtime_before, mtime_after,
-            ".last-check must not be rewritten when already checked today"
-        );
-    }
-
-    #[test]
-    fn maybe_fire_daily_writes_last_check_on_new_day() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = make_creft_home_ctx(&dir);
-        write_welcome_marker(&dir);
-        // .last-check contains yesterday's date — debounce guard does not fire.
-        let check_path = dir.path().join(".last-check");
-        std::fs::write(&check_path, "2000-01-01").unwrap();
+        // For the debounce case, record mtime before the call.
+        let mtime_before = if matches!(setup, DailyCheckSetup::AlreadyCheckedToday) {
+            Some(std::fs::metadata(&check_path).unwrap().modified().unwrap())
+        } else {
+            None
+        };
 
         maybe_fire_daily(&ctx);
 
-        let written = read_last_check(&check_path);
-        let today = today_utc();
-        assert_eq!(
-            written,
-            Some(today.clone()),
-            ".last-check must be updated with today's date; got {written:?}, expected {today:?}"
-        );
-    }
-
-    #[test]
-    fn maybe_fire_daily_writes_last_check_when_file_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = make_creft_home_ctx(&dir);
-        write_welcome_marker(&dir);
-
-        maybe_fire_daily(&ctx);
-
-        let check_path = dir.path().join(".last-check");
-        let written = read_last_check(&check_path);
-        let today = today_utc();
-        assert_eq!(
-            written,
-            Some(today.clone()),
-            ".last-check must contain today's date after first check; got {written:?}"
-        );
+        match setup {
+            DailyCheckSetup::WelcomeAbsent => {
+                assert!(
+                    !check_path.exists(),
+                    ".last-check must not be created when welcome marker is absent"
+                );
+            }
+            DailyCheckSetup::TelemetryOff => {
+                assert!(
+                    !check_path.exists(),
+                    ".last-check must not be created when telemetry=off"
+                );
+            }
+            DailyCheckSetup::AlreadyCheckedToday => {
+                let mtime_after = std::fs::metadata(&check_path).unwrap().modified().unwrap();
+                assert_eq!(
+                    mtime_before.unwrap(),
+                    mtime_after,
+                    ".last-check must not be rewritten when already checked today"
+                );
+            }
+            DailyCheckSetup::StaleLastCheck | DailyCheckSetup::LastCheckAbsent => {
+                let written = read_last_check(&check_path);
+                let today = today_utc();
+                assert_eq!(
+                    written,
+                    Some(today.clone()),
+                    ".last-check must contain today's date; got {written:?}, expected {today:?}"
+                );
+            }
+        }
     }
 
     // ── write_status_atomic ───────────────────────────────────────────────────

@@ -159,96 +159,91 @@ mod tests {
         serde_json::from_str(&content).unwrap()
     }
 
-    #[test]
-    fn no_output_when_status_file_absent() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        // Should not panic or error; no file exists.
-        print_if_pending(&ctx, None);
+    /// Describes how to set up the `.update-status` file before calling `print_if_pending`.
+    enum StatusSetup {
+        /// No status file — `print_if_pending` must not panic or create the file.
+        Absent,
+        /// Status file present with valid JSON.
+        Present {
+            latest: &'static str,
+            notice_shown: bool,
+        },
+        /// Status file present but contains invalid JSON.
+        Malformed,
     }
 
-    #[test]
-    fn no_output_when_latest_equals_installed() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        let installed = env!("CARGO_PKG_VERSION");
-        write_status(&dir, installed, false);
-
-        print_if_pending(&ctx, None);
-
-        // notice_shown should remain false — nothing to flip.
-        let status = read_status(&dir);
-        assert!(!status.notice_shown);
+    /// The expected state of `notice_shown` after calling `print_if_pending`.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum ExpectedNoticeShown {
+        /// The status file should have `notice_shown = true`.
+        True,
+        /// The status file should have `notice_shown = false` (unchanged).
+        False,
+        /// No readable status file; nothing to assert on.
+        NotApplicable,
     }
 
-    #[test]
-    fn notice_shown_flag_flips_when_newer_version_is_pending() {
+    #[rstest]
+    // No status file — must not panic.
+    #[case::status_file_absent(StatusSetup::Absent, false, ExpectedNoticeShown::NotApplicable)]
+    // Same version as installed — no notice, flag stays false.
+    #[case::latest_equals_installed(StatusSetup::Present { latest: env!("CARGO_PKG_VERSION"), notice_shown: false }, false, ExpectedNoticeShown::False)]
+    // Newer version, notice not yet shown — flag must flip to true.
+    #[case::newer_version_pending(StatusSetup::Present { latest: "99.99.99", notice_shown: false }, false, ExpectedNoticeShown::True)]
+    // Notice already shown — no repeat; flag stays true.
+    #[case::notice_already_shown(StatusSetup::Present { latest: "99.99.99", notice_shown: true }, false, ExpectedNoticeShown::True)]
+    // Telemetry off — flag must not flip.
+    #[case::telemetry_off(StatusSetup::Present { latest: "99.99.99", notice_shown: false }, true, ExpectedNoticeShown::False)]
+    // Malformed status file — must not panic.
+    #[case::malformed_status_file(
+        StatusSetup::Malformed,
+        false,
+        ExpectedNoticeShown::NotApplicable
+    )]
+    // current_exe is None — falls back to 'creft update' tail; flag must flip.
+    #[case::current_exe_none(StatusSetup::Present { latest: "99.99.99", notice_shown: false }, false, ExpectedNoticeShown::True)]
+    fn print_if_pending_cases(
+        #[case] status_setup: StatusSetup,
+        #[case] telemetry_off: bool,
+        #[case] expected: ExpectedNoticeShown,
+    ) {
         let dir = TempDir::new().unwrap();
         let ctx = make_ctx(&dir);
-        write_status(&dir, "99.99.99", false);
 
+        if telemetry_off {
+            std::fs::write(dir.path().join("settings.json"), r#"{"telemetry":"off"}"#).unwrap();
+        }
+
+        match &status_setup {
+            StatusSetup::Absent => {}
+            StatusSetup::Present {
+                latest,
+                notice_shown,
+            } => {
+                write_status(&dir, latest, *notice_shown);
+            }
+            StatusSetup::Malformed => {
+                std::fs::write(dir.path().join(".update-status"), "{{not valid json}}").unwrap();
+            }
+        }
+
+        // All cases pass `None` for `current_exe` — the Homebrew path is covered by
+        // `homebrew_path_selects_brew_upgrade_command` below.
         print_if_pending(&ctx, None);
 
-        let status = read_status(&dir);
-        assert!(
-            status.notice_shown,
-            "notice_shown must be set to true after printing"
-        );
-    }
-
-    #[test]
-    fn no_output_when_notice_already_shown() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        write_status(&dir, "99.99.99", true);
-
-        // Capture: call should be a no-op because notice_shown is already true.
-        print_if_pending(&ctx, None);
-
-        // Status file must remain unchanged.
-        let status = read_status(&dir);
-        assert!(status.notice_shown, "notice_shown must remain true");
-        assert_eq!(status.latest_version, "99.99.99");
-    }
-
-    #[test]
-    fn no_output_when_telemetry_is_off() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        write_status(&dir, "99.99.99", false);
-
-        // Write telemetry=off into settings.
-        let settings_path = dir.path().join("settings.json");
-        std::fs::write(settings_path, r#"{"telemetry":"off"}"#).unwrap();
-
-        print_if_pending(&ctx, None);
-
-        // notice_shown must not be flipped — function returned early.
-        let status = read_status(&dir);
-        assert!(
-            !status.notice_shown,
-            "notice_shown must not be flipped when telemetry=off"
-        );
-    }
-
-    #[test]
-    fn no_error_when_status_file_is_malformed() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        std::fs::write(dir.path().join(".update-status"), "{{not valid json}}").unwrap();
-        // Must not panic.
-        print_if_pending(&ctx, None);
-    }
-
-    #[test]
-    fn no_error_when_current_exe_is_none() {
-        let dir = TempDir::new().unwrap();
-        let ctx = make_ctx(&dir);
-        write_status(&dir, "99.99.99", false);
-        // None falls back to non-Homebrew tail without panic.
-        print_if_pending(&ctx, None);
-        let status = read_status(&dir);
-        assert!(status.notice_shown);
+        match expected {
+            ExpectedNoticeShown::True => {
+                let s = read_status(&dir);
+                assert!(s.notice_shown, "notice_shown must be true after printing");
+            }
+            ExpectedNoticeShown::False => {
+                let s = read_status(&dir);
+                assert!(!s.notice_shown, "notice_shown must remain false");
+            }
+            ExpectedNoticeShown::NotApplicable => {
+                // Absent or malformed status file — function must be a no-op; no panic.
+            }
+        }
     }
 
     #[cfg(unix)]
