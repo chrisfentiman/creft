@@ -315,3 +315,181 @@ fn version_output_has_no_telemetry_footer() {
         "version must be exactly one line, got: {stdout:?}"
     );
 }
+
+// ── Daily check hooks: non-Command arms produce no side effects ───────────────
+
+/// `creft --version`, `creft list --help`, and `creft --docs add` must not
+/// write `.last-check` or `.update-status` — the daily-check hooks fire only
+/// on the `Parsed::Command(_)` arm.
+#[test]
+fn non_command_arms_produce_no_daily_check_side_effects() {
+    // Provide a welcome marker so the guard inside maybe_fire_daily is satisfied.
+    // If the hooks fired on non-Command arms, they would write .last-check.
+    let dir = creft_env();
+
+    // Write the welcome marker directly into CREFT_HOME.
+    std::fs::write(dir.path().join(".welcome-done"), "0.4.0").unwrap();
+
+    // --version
+    creft_with(&dir).arg("--version").assert().success();
+    assert!(
+        !dir.path().join(".last-check").exists(),
+        "--version must not write .last-check"
+    );
+
+    // list --help (Parsed::Help(_))
+    creft_with(&dir).args(["list", "--help"]).assert().success();
+    assert!(
+        !dir.path().join(".last-check").exists(),
+        "list --help must not write .last-check"
+    );
+
+    // --docs add (Parsed::DocsSearchAll(_))
+    // This may print "no documentation matches" but must still exit 0 and not write the file.
+    let _ = creft_with(&dir).args(["--docs", "add"]).output().unwrap();
+    assert!(
+        !dir.path().join(".last-check").exists(),
+        "--docs add must not write .last-check"
+    );
+}
+
+// ── _creft check: integration test against a local HTTP listener ──────────────
+
+/// `creft _creft check` performs a GET to `/latest`, writes `.update-status`
+/// with `notice_shown: false`, and exits 0.
+#[test]
+fn creft_check_writes_update_status_on_success() {
+    let body = r#"{"version":"99.99.99","tag":"creft-v99.99.99"}"#;
+    let endpoint = spawn_fixture_server(200, body);
+
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["_creft", "check"])
+        .env("CREFT_UPDATE_ENDPOINT", &endpoint)
+        .assert()
+        .success();
+
+    let status_path = dir.path().join(".update-status");
+    assert!(status_path.exists(), ".update-status must be written");
+
+    let content = std::fs::read_to_string(&status_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["latest_version"], "99.99.99");
+    assert_eq!(parsed["notice_shown"], false);
+    assert!(
+        parsed["checked_at"].as_str().map_or(false, |s| {
+            s.len() == 10 && s.chars().nth(4) == Some('-')
+        }),
+        "checked_at must be YYYY-MM-DD: {}",
+        parsed["checked_at"]
+    );
+}
+
+/// `creft _creft check` against a 502 exits 0 and does NOT write `.update-status`.
+#[test]
+fn creft_check_exits_zero_on_network_error() {
+    let body = "upstream error";
+    let endpoint = spawn_fixture_server(502, body);
+
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["_creft", "check"])
+        .env("CREFT_UPDATE_ENDPOINT", &endpoint)
+        .assert()
+        .success(); // always exits 0
+
+    assert!(
+        !dir.path().join(".update-status").exists(),
+        ".update-status must not be written on HTTP error"
+    );
+}
+
+// ── Deferred notice: print_if_pending wired through dispatch ─────────────────
+
+/// When `.update-status` records a newer version with `notice_shown: false`,
+/// the next interactive command prints one line to stderr.
+#[test]
+fn dispatch_prints_update_notice_when_pending() {
+    let dir = creft_env();
+
+    // Write a status file indicating a newer version is available.
+    let status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": false
+    });
+    std::fs::write(
+        dir.path().join(".update-status"),
+        serde_json::to_string(&status).unwrap(),
+    )
+    .unwrap();
+
+    // Run any interactive command. --version is NOT a Command arm, so use `list`.
+    // The notice goes to stderr; `list` output goes to stdout.
+    // We use a minimal CREFT_HOME so `list` returns quickly.
+    let output = creft_with(&dir).args(["list"]).output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("99.99.99"),
+        "stderr must contain the newer version; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("creft update") || stderr.contains("brew upgrade"),
+        "stderr must contain the upgrade command; got: {stderr:?}"
+    );
+}
+
+/// Once the notice has been shown (`notice_shown: true`), subsequent commands
+/// must not re-print it.
+#[test]
+fn dispatch_does_not_repeat_notice_after_shown() {
+    let dir = creft_env();
+
+    let status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": true
+    });
+    std::fs::write(
+        dir.path().join(".update-status"),
+        serde_json::to_string(&status).unwrap(),
+    )
+    .unwrap();
+
+    let output = creft_with(&dir).args(["list"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("99.99.99"),
+        "stderr must not contain the version after notice_shown=true; got: {stderr:?}"
+    );
+}
+
+/// When `telemetry=off`, no notice is printed even if `.update-status` is newer.
+#[test]
+fn dispatch_no_notice_when_telemetry_off() {
+    let dir = creft_env();
+
+    let status = serde_json::json!({
+        "latest_version": "99.99.99",
+        "checked_at": "2026-04-28",
+        "notice_shown": false
+    });
+    std::fs::write(
+        dir.path().join(".update-status"),
+        serde_json::to_string(&status).unwrap(),
+    )
+    .unwrap();
+
+    creft_with(&dir)
+        .args(["settings", "set", "telemetry", "off"])
+        .assert()
+        .success();
+
+    let output = creft_with(&dir).args(["list"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("99.99.99"),
+        "no notice should print when telemetry=off; got: {stderr:?}"
+    );
+}
