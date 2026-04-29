@@ -129,6 +129,9 @@ pub enum CreftError {
 
     #[error("alias target not found: {0}")]
     AliasTargetNotFound(String),
+
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 impl CreftError {

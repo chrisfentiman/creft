@@ -7,6 +7,7 @@ mod doctor;
 mod error;
 mod frontmatter;
 mod help;
+mod install_method;
 mod markdown;
 mod model;
 // Namespace module is not yet wired into binary entry points. The public API is
@@ -24,6 +25,7 @@ mod skill_test;
 mod store;
 mod store_kv;
 mod style;
+mod update_check;
 mod validate;
 mod wrap;
 mod yaml;
@@ -178,6 +180,13 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         },
 
         cli::Command::Up { system, local } => cmd::setup::cmd_up(ctx, system, local),
+
+        cli::Command::Update { check } => {
+            let current_exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok());
+            cmd::update::cmd_update(ctx, current_exe.as_deref(), check)
+        }
 
         cli::Command::Init => cmd::init::cmd_init(ctx),
 

@@ -378,18 +378,27 @@ fn install_root_alias_removed() {
         .stderr(predicate::str::contains("command not found"));
 }
 
-/// `creft update` is no longer a recognized command in v0.3.0 — it resolves
-/// as a user skill and fails with "command not found".
+/// `creft update` is a recognized built-in — it must not exit with code 2
+/// ("command not found"). A network error (code 1) is acceptable because the
+/// test environment has no fixture server; what matters is that the command
+/// dispatches to the update handler rather than falling through to skill lookup.
 #[test]
-fn update_root_alias_removed() {
+fn update_is_recognized_builtin() {
     let creft_home = creft_env();
 
-    creft_with(&creft_home)
-        .args(["update"])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("command not found"));
+    let output = creft_with(&creft_home).args(["update"]).output().unwrap();
+
+    // Exit code 2 means "command not found" — that must not happen.
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "`creft update` must not exit with code 2 (command not found)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("command not found"),
+        "`creft update` must not report 'command not found': {stderr:?}"
+    );
 }
 
 /// `creft uninstall <name>` is no longer a recognized command in v0.3.0 — it
@@ -408,11 +417,11 @@ fn uninstall_root_alias_removed() {
 
 // ── reserved name tests ────────────────────────────────────────────────────────
 
-/// `install`, `update`, and `uninstall` are no longer reserved — skill authors
-/// can use them now that plugin management lives under `creft plugin`.
+/// `install` and `uninstall` are not reserved — skill authors can use them
+/// now that plugin management lives under `creft plugin`. `update` is excluded
+/// here: it is now a reserved built-in command.
 #[rstest]
 #[case::install("install")]
-#[case::update("update")]
 #[case::uninstall("uninstall")]
 fn formerly_reserved_names_are_now_valid_skill_names(#[case] name: &str) {
     let creft_home = creft_env();
