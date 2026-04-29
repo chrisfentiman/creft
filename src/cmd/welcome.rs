@@ -81,9 +81,15 @@ pub(crate) fn cmd_welcome(ctx: &AppContext, force: bool) -> Result<(), CreftErro
 
 // ── Marker file ────────────────────────────────────────────────────────────
 
+/// Filename of the per-user welcome marker within `~/.creft/`.
+///
+/// Exported so `update_check::maybe_fire_daily` can read the marker path
+/// without duplicating the filename literal.
+pub(crate) const WELCOME_MARKER_FILENAME: &str = ".welcome-done";
+
 /// Path to the per-user welcome marker: `~/.creft/.welcome-done`.
 fn marker_path(ctx: &AppContext) -> Result<std::path::PathBuf, CreftError> {
-    Ok(ctx.global_root()?.join(".welcome-done"))
+    Ok(ctx.global_root()?.join(WELCOME_MARKER_FILENAME))
 }
 
 /// Returns `true` if the marker file already exists.
@@ -167,6 +173,28 @@ fn render_static_to_writer(w: &mut dyn std::io::Write, use_truecolor: bool) -> s
     )?;
     writeln!(w)?;
     writeln!(w, "  Run creft --help for the full command reference.")?;
+    writeln!(
+        w,
+        "  {}",
+        paint_fg(
+            "creft checks daily for new releases. The check carries no identifier \u{2014}",
+            160,
+            160,
+            160,
+            use_truecolor
+        )
+    )?;
+    writeln!(
+        w,
+        "  {}",
+        paint_fg(
+            "only `creft/<version> (<os>; <arch>)`. Opt out: creft settings set telemetry off",
+            160,
+            160,
+            160,
+            use_truecolor
+        )
+    )?;
     writeln!(w)?;
     Ok(())
 }
@@ -385,7 +413,7 @@ fn render_animated(term: &console::Term, use_truecolor: bool) -> Result<(), Cref
     // Reserve vertical space: 1 blank + logo + 1 underline row + static block.
     // The leading blank gives breathing room above the logo.
     let logo_height = LOGO.len();
-    let static_lines = 10; // blank + tagline + version + blank + header + 3 commands + blank + hint + blank
+    let static_lines = 12; // blank + tagline + version + blank + header + 3 commands + blank + hint + 2 telemetry lines + blank
     let total_lines = 1 + logo_height + 1 + static_lines;
 
     for _ in 0..total_lines {

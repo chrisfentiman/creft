@@ -7,6 +7,7 @@ mod doctor;
 mod error;
 mod frontmatter;
 mod help;
+mod install_method;
 mod markdown;
 mod model;
 // Namespace module is not yet wired into binary entry points. The public API is
@@ -24,6 +25,8 @@ mod skill_test;
 mod store;
 mod store_kv;
 mod style;
+mod update_check;
+mod update_notice;
 mod validate;
 mod wrap;
 mod yaml;
@@ -55,9 +58,14 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
     // Hidden internal commands are dispatched before alias rewrite. The `_creft`
     // prefix is reserved for built-in infrastructure and must never be rewritten —
     // a misconfigured alias file must not be able to redirect internal control flow.
-    if args.len() >= 2 && args[0] == "_creft" && args[1] == "welcome" {
-        let force = args.iter().any(|a| a == "--force");
-        return cmd::welcome::cmd_welcome(ctx, force);
+    if args.len() >= 2 && args[0] == "_creft" {
+        if args[1] == "welcome" {
+            let force = args.iter().any(|a| a == "--force");
+            return cmd::welcome::cmd_welcome(ctx, force);
+        }
+        if args[1] == "check" {
+            return update_check::cmd_check(ctx);
+        }
     }
 
     // Apply alias rewrite once, ahead of every direct-dispatch branch. Rewrite
@@ -77,7 +85,22 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
     let mut parser = lexopt::Parser::from_args(args.iter().map(String::as_str));
 
     match cli::parse(&mut parser)? {
-        Some(cli::Parsed::Command(cmd)) => execute(ctx, cmd),
+        Some(cli::Parsed::Command(cmd)) => {
+            // Compute the canonical executable path once. Both dispatch hooks and
+            // the Update command arm need it; computing it here avoids redundant
+            // calls to current_exe() and keeps both hooks unit-testable.
+            let current_exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok());
+
+            // Print any pending "update available" notice before running the command.
+            update_notice::print_if_pending(ctx, current_exe.as_deref());
+
+            // Kick off the daily background check (fire-and-forget).
+            update_check::maybe_fire_daily(ctx);
+
+            execute(ctx, cmd, current_exe.as_deref())
+        }
         Some(cli::Parsed::Help(which)) => {
             print!("{}", help::render_short(which));
             Ok(())
@@ -101,7 +124,14 @@ fn dispatch(ctx: &model::AppContext, args: Vec<String>) -> Result<(), CreftError
 }
 
 /// Execute a parsed built-in command.
-fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError> {
+///
+/// `current_exe` is the canonicalized path of the running binary, computed once
+/// in `dispatch()` and threaded through to commands that need it (e.g., `update`).
+fn execute(
+    ctx: &model::AppContext,
+    cmd: cli::Command,
+    current_exe: Option<&std::path::Path>,
+) -> Result<(), CreftError> {
     match cmd {
         cli::Command::Add {
             name,
@@ -178,6 +208,8 @@ fn execute(ctx: &model::AppContext, cmd: cli::Command) -> Result<(), CreftError>
         },
 
         cli::Command::Up { system, local } => cmd::setup::cmd_up(ctx, system, local),
+
+        cli::Command::Update { check } => cmd::update::cmd_update(ctx, current_exe, check),
 
         cli::Command::Init => cmd::init::cmd_init(ctx),
 

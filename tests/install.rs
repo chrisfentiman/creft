@@ -4,6 +4,7 @@ mod helpers;
 
 use helpers::{create_multi_plugin_repo, create_test_package, creft_env, creft_with};
 use predicates::prelude::*;
+use pretty_assertions::assert_ne;
 use rstest::rstest;
 use tempfile::TempDir;
 
@@ -378,18 +379,41 @@ fn install_root_alias_removed() {
         .stderr(predicate::str::contains("command not found"));
 }
 
-/// `creft update` is no longer a recognized command in v0.3.0 — it resolves
-/// as a user skill and fails with "command not found".
+/// `creft update` is a recognized built-in — it must not exit with code 2
+/// ("command not found"). The test injects a closed-port endpoint so dispatch
+/// reaches the update handler and fails with a network error (exit code 1)
+/// rather than falling through to skill lookup (exit code 2). No request
+/// reaches the production endpoint.
 #[test]
-fn update_root_alias_removed() {
-    let creft_home = creft_env();
+fn update_is_recognized_builtin() {
+    use std::net::TcpListener;
 
-    creft_with(&creft_home)
+    // Bind a listener, capture the port, then drop it. Nothing is listening
+    // on that port, so the binary will get a connection-refused network error
+    // (exit 1) rather than a command-not-found error (exit 2).
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let addr = listener.local_addr().expect("local_addr failed");
+    drop(listener);
+    let endpoint = format!("http://127.0.0.1:{}/latest", addr.port());
+
+    let creft_home = creft_env();
+    let output = creft_with(&creft_home)
         .args(["update"])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("command not found"));
+        .env("CREFT_UPDATE_ENDPOINT", &endpoint)
+        .output()
+        .unwrap();
+
+    // Exit code 2 means "command not found" — that must not happen.
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "`creft update` must not exit with code 2 (command not found)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("command not found"),
+        "`creft update` must not report 'command not found': {stderr:?}"
+    );
 }
 
 /// `creft uninstall <name>` is no longer a recognized command in v0.3.0 — it
@@ -408,11 +432,11 @@ fn uninstall_root_alias_removed() {
 
 // ── reserved name tests ────────────────────────────────────────────────────────
 
-/// `install`, `update`, and `uninstall` are no longer reserved — skill authors
-/// can use them now that plugin management lives under `creft plugin`.
+/// `install` and `uninstall` are not reserved — skill authors can use them
+/// now that plugin management lives under `creft plugin`. `update` is excluded
+/// here: it is now a reserved built-in command.
 #[rstest]
 #[case::install("install")]
-#[case::update("update")]
 #[case::uninstall("uninstall")]
 fn formerly_reserved_names_are_now_valid_skill_names(#[case] name: &str) {
     let creft_home = creft_env();

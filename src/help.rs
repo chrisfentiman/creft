@@ -691,6 +691,71 @@ Examples:
 
 Run 'creft completions --docs' for the full reference.";
 
+const UPDATE_SHORT_ABOUT: &str = "\
+Update creft to the latest released version.
+
+Options:
+  --check       Show installed and latest versions without updating
+  -h, --help    Print help
+
+Examples:
+  creft update          Update to the latest version
+  creft update --check  Check whether an update is available
+
+Notes:
+  When creft was installed via Homebrew, this command refuses and
+  recommends `brew upgrade creft`. The daily update check that powers
+  the \"update available\" notice is gated by the `telemetry` setting.
+
+Run 'creft update --docs' for the full reference.";
+
+const UPDATE_LONG_ABOUT: &str = "\
+DESCRIPTION
+  Updates creft in place by re-running the install script for the
+  latest published version. The binary is replaced at the same
+  install location ($CREFT_INSTALL_DIR or the directory of the
+  current executable).
+
+  When creft is installed via Homebrew, this command does not run.
+  Use `brew upgrade creft` instead.
+
+OPTIONS
+  --check
+      Resolve the latest version and report status without modifying
+      anything. Exits 0 in all cases (up-to-date, behind, ahead).
+
+PROCESS
+  1. The current binary's version is read from CARGO_PKG_VERSION at
+     build time.
+  2. https://creft.run/latest is queried for the latest published
+     version. The HTTP request includes a User-Agent of the form
+     'creft/<version> (<os>; <arch>)'.
+  3. If installed == latest, the command exits with a \"up to date\"
+     message.
+  4. Otherwise, the install script is invoked via `curl
+     creft.run/v<latest> | sh` with CREFT_INSTALL_DIR pointing at
+     the current binary's directory. The script downloads the new
+     tarball, verifies its SHA-256 checksum, and replaces the binary.
+
+EXIT CODES
+  0   Update succeeded, already up to date, or --check.
+  1   Network error, install script failure, or homebrew install.
+
+ENVIRONMENT
+  CREFT_INSTALL_DIR  Override install directory. Defaults to the
+                     parent directory of the running binary.
+
+DAILY CHECK
+  When telemetry is on (the default), creft checks for new releases
+  once per UTC day in a fire-and-forget background process. The next
+  interactive command after a check completes surfaces a one-line
+  notice if a newer version is available. Disable with:
+
+      creft settings set telemetry off
+
+SEE ALSO
+  creft settings set telemetry off  Disable network calls.";
+
 const ADD_TEST_LONG_ABOUT: &str = "\
 Author a new scenario from stdin, mirroring `creft add` for skills.
 
@@ -909,6 +974,10 @@ const BUILTIN_ENTRIES: &[BuiltinEntry] = &[
         name: "up",
         description: "Install creft for your coding AI",
     },
+    BuiltinEntry {
+        name: "update",
+        description: "Update creft to the latest version",
+    },
 ];
 
 /// Returns the list of top-level built-in commands for the root listing.
@@ -951,6 +1020,7 @@ pub(crate) enum BuiltinHelp {
     Skills,
     SkillsTest,
     Up,
+    Update,
     Init,
     Doctor,
     Completions,
@@ -988,6 +1058,7 @@ impl BuiltinHelp {
             Self::Skills => "skills",
             Self::SkillsTest => "skills test",
             Self::Up => "up",
+            Self::Update => "update",
             Self::Init => "init",
             Self::Doctor => "doctor",
             Self::Completions => "completions",
@@ -1034,6 +1105,7 @@ impl BuiltinHelp {
             Self::Skills,
             Self::SkillsTest,
             Self::Up,
+            Self::Update,
             Self::Init,
             Self::Doctor,
             Self::Completions,
@@ -1073,6 +1145,7 @@ pub(crate) fn render_short(which: BuiltinHelp) -> String {
         BuiltinHelp::Skills => renderer::render_skills_short(),
         BuiltinHelp::SkillsTest => renderer::render_skills_test_short(),
         BuiltinHelp::Up => renderer::render_up_short(),
+        BuiltinHelp::Update => renderer::render_update_short(),
         BuiltinHelp::Init => renderer::render_init_short(),
         BuiltinHelp::Doctor => renderer::render_doctor_short(),
         BuiltinHelp::Completions => renderer::render_completions_short(),
@@ -1109,6 +1182,7 @@ pub(crate) fn render_docs(which: BuiltinHelp) -> String {
         BuiltinHelp::Skills => renderer::render_skills(),
         BuiltinHelp::SkillsTest => renderer::render_skills_test(),
         BuiltinHelp::Up => renderer::render_up(),
+        BuiltinHelp::Update => renderer::render_update(),
         BuiltinHelp::Init => renderer::render_init(),
         BuiltinHelp::Doctor => renderer::render_doctor(),
         BuiltinHelp::Completions => renderer::render_completions(),
@@ -1146,7 +1220,7 @@ mod renderer {
         REMOVE_TEST_SHORT_ABOUT, SETTINGS_LONG_ABOUT, SETTINGS_SET_SHORT_ABOUT,
         SETTINGS_SHORT_ABOUT, SETTINGS_SHOW_SHORT_ABOUT, SHOW_LONG_ABOUT, SHOW_SHORT_ABOUT,
         SKILLS_LONG_ABOUT, SKILLS_SHORT_ABOUT, SKILLS_TEST_LONG_ABOUT, SKILLS_TEST_SHORT_ABOUT,
-        UP_LONG_ABOUT, UP_SHORT_ABOUT,
+        UP_LONG_ABOUT, UP_SHORT_ABOUT, UPDATE_LONG_ABOUT, UPDATE_SHORT_ABOUT,
     };
 
     /// Format a help page with a short description, usage line, and long about.
@@ -1712,6 +1786,22 @@ mod renderer {
         )
     }
 
+    pub fn render_update() -> String {
+        page(
+            "Update creft to the latest released version",
+            "creft update [--check]",
+            UPDATE_LONG_ABOUT,
+        )
+    }
+
+    pub fn render_update_short() -> String {
+        page(
+            "Update creft to the latest released version",
+            "creft update [--check]",
+            UPDATE_SHORT_ABOUT,
+        )
+    }
+
     pub fn render_init_short() -> String {
         page(
             "Initialize local skill storage",
@@ -1745,8 +1835,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_returns_twelve_entries() {
-        assert_eq!(builtins().len(), 12);
+    fn builtins_returns_thirteen_entries() {
+        assert_eq!(builtins().len(), 13);
     }
 
     #[test]
@@ -1799,6 +1889,7 @@ mod tests {
             "show",
             "skills",
             "up",
+            "update",
         ];
         for cmd in &expected {
             assert!(
@@ -1862,6 +1953,7 @@ mod tests {
         BuiltinHelp::SettingsShow,
         BuiltinHelp::SettingsSet,
         BuiltinHelp::Up,
+        BuiltinHelp::Update,
         BuiltinHelp::Init,
         BuiltinHelp::Doctor,
         BuiltinHelp::Completions,

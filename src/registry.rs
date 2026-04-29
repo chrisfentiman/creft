@@ -1321,17 +1321,27 @@ mod tests {
     }
 
     /// Former namespace names (`cmd`, `plugins`) are no longer reserved and can be
-    /// used as package names.
+    /// used as package names. Note: `update` is intentionally absent — it is now
+    /// a reserved built-in and must not be used as a package name.
     #[rstest]
     #[case::cmd("cmd")]
     #[case::plugins("plugins")]
     #[case::install("install")]
-    #[case::update("update")]
     #[case::uninstall("uninstall")]
     fn former_namespace_names_are_valid(#[case] name: &str) {
         assert!(
             validate_manifest_name(name).is_ok(),
             "{name} should be valid as a package name"
+        );
+    }
+
+    /// `update` is now a reserved built-in and must be rejected as a package name.
+    #[test]
+    fn update_package_name_is_reserved() {
+        let err = validate_manifest_name("update").unwrap_err();
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected 'reserved' in error for package name 'update': {err}"
         );
     }
 

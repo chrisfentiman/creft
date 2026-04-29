@@ -23,6 +23,7 @@ const RESERVED: &[&str] = &[
     "show",
     "skills",
     "up",
+    "update",
     "version",
 ];
 
@@ -1038,6 +1039,7 @@ mod tests {
         assert!(is_reserved("show"));
         assert!(is_reserved("skills"));
         assert!(is_reserved("up"));
+        assert!(is_reserved("update"));
         // Former namespace names are no longer reserved.
         assert!(!is_reserved("cmd"));
         assert!(!is_reserved("plugins"));

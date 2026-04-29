@@ -85,6 +85,16 @@ pub(crate) enum Command {
         system: Option<String>,
         local: bool,
     },
+    /// `creft update [--check]`
+    ///
+    /// Resolves the latest version via `https://creft.run/latest`. Without
+    /// `--check`, runs the install script to update the binary in place.
+    /// With `--check`, prints version comparison information and exits without
+    /// modifying anything.
+    Update {
+        /// Print installed/latest comparison without updating.
+        check: bool,
+    },
     Init,
     Doctor {
         name: Vec<String>,
@@ -209,6 +219,7 @@ pub(crate) fn parse(parser: &mut lexopt::Parser) -> Result<Option<Parsed>, CliEr
         "settings" => parse_settings(parser),
         "skills" => parse_skills(parser),
         "up" => parse_up(parser),
+        "update" => parse_update(parser),
         "init" => parse_init(parser),
         "doctor" => parse_doctor(parser),
         "completions" => parse_completions(parser),
@@ -980,6 +991,23 @@ fn parse_up(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
     }
 
     Ok(Parsed::Command(Command::Up { system, local }))
+}
+
+fn parse_update(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {
+    use lexopt::prelude::*;
+
+    let mut check = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("check") => check = true,
+            Long("help") | Short('h') => return Ok(Parsed::Help(BuiltinHelp::Update)),
+            Long("docs") => return docs_or_search(parser, BuiltinHelp::Update),
+            _ => return Err(CliError::Usage(arg.unexpected().to_string())),
+        }
+    }
+
+    Ok(Parsed::Command(Command::Update { check }))
 }
 
 fn parse_init(parser: &mut lexopt::Parser) -> Result<Parsed, CliError> {

@@ -16,10 +16,19 @@ pub struct Settings {
 }
 
 /// Known setting keys.
-const KNOWN_KEYS: &[&str] = &["shell"];
+const KNOWN_KEYS: &[&str] = &["shell", "telemetry"];
 
 /// Default behavior descriptions for each known key, parallel to `KNOWN_KEYS`.
-const KNOWN_DEFAULTS: &[(&str, &str)] = &[("shell", "$SHELL env var, or block language tag")];
+const KNOWN_DEFAULTS: &[(&str, &str)] = &[
+    ("shell", "$SHELL env var, or block language tag"),
+    (
+        "telemetry",
+        "on (daily update check; opt out with 'creft settings set telemetry off')",
+    ),
+];
+
+/// Allowed values for the `telemetry` key.
+const TELEMETRY_VALUES: &[&str] = &["on", "off"];
 
 /// The effective value for a setting key: explicitly configured or using its default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,13 +69,23 @@ impl Settings {
         self.values.get(key).map(|s| s.as_str())
     }
 
-    /// Set a setting value. Returns an error for unknown keys.
+    /// Set a setting value. Returns an error for unknown keys or unknown values
+    /// on keys that constrain their value set.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), CreftError> {
         if !KNOWN_KEYS.contains(&key) {
             return Err(CreftError::SettingsError(format!(
                 "unknown setting: '{key}'. Known settings: {}",
                 KNOWN_KEYS.join(", ")
             )));
+        }
+        match key {
+            "telemetry" if !TELEMETRY_VALUES.contains(&value) => {
+                return Err(CreftError::SettingsError(format!(
+                    "unknown value '{value}' for telemetry; expected one of: {}",
+                    TELEMETRY_VALUES.join(", ")
+                )));
+            }
+            _ => {}
         }
         self.values.insert(key.to_string(), value.to_string());
         Ok(())
@@ -163,6 +182,10 @@ mod tests {
 
     #[rstest]
     #[case::shell("shell", "zsh", true)]
+    #[case::telemetry_on("telemetry", "on", true)]
+    #[case::telemetry_off("telemetry", "off", true)]
+    #[case::telemetry_invalid("telemetry", "yes", false)]
+    #[case::telemetry_empty("telemetry", "", false)]
     #[case::unknown_key("unknown-key", "value", false)]
     #[case::empty_key("", "value", false)]
     fn set_accepts_known_keys_and_rejects_unknown(
@@ -173,6 +196,25 @@ mod tests {
         let mut settings = Settings::default();
         let result = settings.set(key, value);
         assert_eq!(result.is_ok(), should_succeed);
+    }
+
+    #[test]
+    fn set_telemetry_invalid_value_error_lists_valid_values() {
+        let mut settings = Settings::default();
+        let err = settings.set("telemetry", "yes").unwrap_err();
+        match err {
+            CreftError::SettingsError(msg) => {
+                assert!(
+                    msg.contains("yes"),
+                    "error should contain the invalid value: {msg}"
+                );
+                assert!(
+                    msg.contains("on, off"),
+                    "error should list valid values: {msg}"
+                );
+            }
+            other => panic!("expected SettingsError, got {other:?}"),
+        }
     }
 
     #[test]

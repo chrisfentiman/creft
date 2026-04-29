@@ -7,4 +7,5 @@ pub mod settings;
 pub mod setup;
 pub mod skill;
 pub mod skills;
+pub mod update;
 pub mod welcome;

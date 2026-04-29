@@ -129,6 +129,19 @@ pub enum CreftError {
 
     #[error("alias target not found: {0}")]
     AliasTargetNotFound(String),
+
+    #[error("network error: {0}")]
+    Network(String),
+
+    /// The install script exited with a non-zero status.
+    ///
+    /// The script writes its own stderr explaining the failure; this variant is
+    /// quiet so creft does not print a redundant wrapper message. The captured
+    /// exit code is propagated so callers (CI scripts, dotfile installers) can
+    /// distinguish network failures (curl exit 7 or 28) from checksum mismatches
+    /// or permission errors.
+    #[error("install script failed with exit code {code}")]
+    InstallScriptFailed { code: i32 },
 }
 
 impl CreftError {
@@ -154,6 +167,7 @@ impl CreftError {
             | Self::AliasCycle(_) => 3,
             Self::ExecutionFailed { code, .. } => *code,
             Self::ExecutionSignaled { signal, .. } => 128 + signal,
+            Self::InstallScriptFailed { code } => *code,
             _ => 1,
         }
     }
@@ -172,6 +186,8 @@ impl CreftError {
             // Don't print "block N (bash) was killed by signal 2" -- it's noise.
             // The exit code (130) still signals the death to the parent shell.
             Self::ExecutionSignaled { signal, .. } if *signal == 2 => true,
+            // The install script writes its own stderr; suppress creft's wrapper.
+            Self::InstallScriptFailed { .. } => true,
             _ => false,
         }
     }
@@ -390,6 +406,20 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let err = CreftError::Io(io_err);
         assert!(!err.is_quiet());
+    }
+
+    #[test]
+    fn install_script_failed_propagates_exit_code() {
+        let err = CreftError::InstallScriptFailed { code: 7 };
+        assert_eq!(err.exit_code(), 7);
+    }
+
+    #[test]
+    fn install_script_failed_is_quiet() {
+        // The install script writes its own stderr; creft's wrapper message
+        // would be redundant noise.
+        let err = CreftError::InstallScriptFailed { code: 22 };
+        assert!(err.is_quiet());
     }
 
     // --- enrich_io_error() tests ---
