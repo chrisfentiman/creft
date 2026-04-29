@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/chrisfentiman/creft/compare/creft-v0.4.0...creft-v0.4.1) (2026-04-29)
+
+
+### Features
+
+* **update:** in-binary updater + daily check as volume signal ([#83](https://github.com/chrisfentiman/creft/issues/83)) ([d6cefd7](https://github.com/chrisfentiman/creft/commit/d6cefd72531a9fd27fe8b7614ef5c90a0e621cef))
+
 ## [0.4.0](https://github.com/chrisfentiman/creft/compare/creft-v0.3.4...creft-v0.4.0) (2026-04-28)
 
 
