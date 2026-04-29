@@ -7,6 +7,7 @@ on:
     paths:
       - 'scripts/install.sh'
       - 'cloudflare/workers/creft-run.js'
+      - 'cloudflare/workers/test.mjs'
       - 'cloudflare/wrangler.jsonc'
 
 permissions:
@@ -24,8 +25,19 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Test worker helpers
+        run: node --test cloudflare/workers/test.mjs
+
       - name: Deploy install script
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: creft deploy install-script
+
+      - name: Smoke test deployed worker
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null https://creft.run/
+          curl -fsS -o /dev/null https://creft.run/v0.4.0
+          body=$(curl -fsS https://creft.run/latest)
+          node -e "const j = JSON.parse(process.argv[1]); if (!j.version || !j.tag) { process.exit(1); }" "$body"
