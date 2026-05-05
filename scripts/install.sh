@@ -232,8 +232,9 @@ install_creft() {
     tar -xzf "$tarball" -C "$_creft_tmp_dir" || error "failed to extract archive"
 
     mkdir -p "$install_dir"
-    cp "${_creft_tmp_dir}/creft" "${install_dir}/creft"
-    chmod +x "${install_dir}/creft"
+    cp "${_creft_tmp_dir}/creft" "${install_dir}/.creft.new.$$"
+    chmod +x "${install_dir}/.creft.new.$$"
+    mv -f "${install_dir}/.creft.new.$$" "${install_dir}/creft"
 
     info "creft ${version} installed to ${install_dir}/creft"
 
