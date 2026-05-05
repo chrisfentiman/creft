@@ -326,7 +326,7 @@ mod tests {
     /// Build a project root with `.creft/commands/` and a separate home dir.
     ///
     /// Returns `(home_tmp, project_tmp, ctx)`. The home dir is separate from the
-    /// project dir so `find_local_root()` does not mistake it for `~/.creft/`.
+    /// project dir so `nearest_local_root()` does not mistake it for `~/.creft/`.
     fn project_with_commands_dir() -> (tempfile::TempDir, tempfile::TempDir, AppContext) {
         let home_tmp = tempfile::TempDir::new().expect("home tmp");
         let project_tmp = tempfile::TempDir::new().expect("project tmp");
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn cmd_skills_test_no_local_root_returns_setup_error() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // home == cwd, so find_local_root() sees global root and returns None.
+        // home == cwd, so nearest_local_root() sees no local root and returns None.
         let ctx = AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
         let result = cmd_skills_test(&ctx, None, None, false, false, false);
         assert!(

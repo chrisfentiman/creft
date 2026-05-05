@@ -629,7 +629,7 @@ mod tests {
     }
 
     /// Build a minimal `AppContext` pointing at a temp directory without any
-    /// `.creft/` directory so `find_local_root()` returns `None`. This avoids
+    /// `.creft/` directory so `nearest_local_root()` returns `None`. This avoids
     /// accidentally mirroring the real project's skill tree into every test sandbox.
     fn bare_app() -> (tempfile::TempDir, AppContext) {
         let tmp = tempfile::TempDir::new().expect("tmp");

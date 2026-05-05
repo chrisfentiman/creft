@@ -673,10 +673,10 @@ mod tests {
     #[test]
     fn alias_map_loads_global_only_when_no_local_root() {
         // Verify the spec's "running outside any project" success criterion:
-        // when find_local_root() returns None, AliasMap::load still resolves
+        // when nearest_local_root() returns None, AliasMap::load still resolves
         // global aliases correctly and does not error.
         let home_dir = tempdir().unwrap();
-        let cwd_dir = tempdir().unwrap(); // no .creft/ — find_local_root() returns None
+        let cwd_dir = tempdir().unwrap(); // no .creft/ — nearest_local_root() returns None
 
         std::fs::create_dir_all(home_dir.path().join(".creft")).unwrap();
         std::fs::write(
