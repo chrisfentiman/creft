@@ -68,7 +68,7 @@ pub fn cmd_alias_remove(ctx: &AppContext, from: &str) -> Result<(), CreftError> 
     // is never opened twice with the same path (resolve_root redirects both
     // scopes to the same dir under CREFT_HOME).
     let mut search: Vec<Scope> = Vec::with_capacity(2);
-    if ctx.find_local_root().is_some() {
+    if ctx.nearest_local_root().is_some() {
         search.push(Scope::Local);
     }
     search.push(Scope::Global);
@@ -100,14 +100,14 @@ pub fn cmd_alias_list(ctx: &AppContext) -> Result<(), CreftError> {
     // Load both scopes explicitly so each entry carries its scope tag.
     // Missing files are empty; parse failures propagate immediately.
     let global = load_for_scope(ctx, Scope::Global)?;
-    let local = if ctx.find_local_root().is_some() {
+    let local = if ctx.nearest_local_root().is_some() {
         load_for_scope(ctx, Scope::Local)?
     } else {
         crate::aliases::AliasFile::default()
     };
 
     // Collect (from, to, scope) triples in a single pass. Under CREFT_HOME
-    // find_local_root() returns None, so the local branch is skipped and only
+    // nearest_local_root() returns None, so the local branch is skipped and only
     // global entries appear (tagged [global]).
     let mut entries: Vec<(String, String, Scope)> = global
         .aliases
@@ -148,7 +148,7 @@ fn scope_tag(scope: Scope) -> &'static str {
 /// with `AliasTargetNotFound` if neither scope contains the target as a
 /// skill, package skill, plugin skill, or namespace prefix.
 fn resolve_target_scope(ctx: &AppContext, to: &[String]) -> Result<Scope, CreftError> {
-    if ctx.find_local_root().is_some() && target_exists_in_scope(ctx, to, Scope::Local)? {
+    if ctx.nearest_local_root().is_some() && target_exists_in_scope(ctx, to, Scope::Local)? {
         return Ok(Scope::Local);
     }
     if target_exists_in_scope(ctx, to, Scope::Global)? {

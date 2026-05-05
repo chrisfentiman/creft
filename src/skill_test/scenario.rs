@@ -151,12 +151,12 @@ fn run_unix(scenario: &Scenario, app: &AppContext, opts: &RunOpts) -> ScenarioOu
 
     // Mirror the host project's skills into the sandbox so `creft <skill>`
     // invocations resolve real skill files.
-    let host_root = app.find_local_root().map(|creft_dir| {
-        // find_local_root returns the .creft/ directory; the project root is its parent.
+    let host_root = app.nearest_local_root().map(|creft_dir| {
+        // nearest_local_root returns the .creft/ directory; the project root is its parent.
         creft_dir
             .parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or(creft_dir)
+            .unwrap_or_else(|| creft_dir.to_path_buf())
     });
     if let Err(e) = sandbox.mirror_project_skills(host_root.as_deref()) {
         return ScenarioOutcome {
@@ -1273,9 +1273,11 @@ mod tests {
         // Allocate a sandbox for the test manually so we can call execute_scenario directly.
         let sandbox = crate::skill_test::sandbox::Sandbox::new().expect("sandbox");
 
-        let host_root = app
-            .find_local_root()
-            .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d));
+        let host_root = app.nearest_local_root().map(|d| {
+            d.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| d.to_path_buf())
+        });
         sandbox
             .mirror_project_skills(host_root.as_deref())
             .expect("mirror");

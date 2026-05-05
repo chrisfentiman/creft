@@ -358,7 +358,7 @@ pub fn skill_file_path(ctx: &AppContext, full_name: &str) -> Result<PathBuf, Cre
     }
 
     // Check local scope first.
-    if ctx.find_local_root().is_some()
+    if ctx.nearest_local_root().is_some()
         && let Some(path) = skill_file_path_in(ctx, pkg_name, rel_parts, Scope::Local)?
     {
         return Ok(path);
@@ -993,7 +993,7 @@ pub fn deactivate(ctx: &AppContext, target: &str, global_only: bool) -> Result<(
     } else {
         // Always check global; check local only when a local root exists.
         let mut scopes = Vec::new();
-        if ctx.find_local_root().is_some() {
+        if ctx.nearest_local_root().is_some() {
             scopes.push(Scope::Local);
         }
         scopes.push(Scope::Global);

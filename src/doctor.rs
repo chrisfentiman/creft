@@ -250,7 +250,7 @@ fn check_global_dir(ctx: &AppContext) -> CheckResult {
 
 /// Report whether a local `.creft/` directory was found.
 fn check_local_dir(ctx: &AppContext) -> CheckResult {
-    match ctx.find_local_root() {
+    match ctx.nearest_local_root() {
         Some(p) => CheckResult {
             label: ".creft/".to_string(),
             status: CheckStatus::Info,
@@ -362,7 +362,7 @@ pub(crate) fn check_flat_files(ctx: &AppContext) -> Vec<CheckResult> {
 
     let mut results: Vec<CheckResult> = Vec::new();
 
-    let scopes: Vec<Scope> = if ctx.find_local_root().is_some() {
+    let scopes: Vec<Scope> = if ctx.nearest_local_root().is_some() {
         vec![Scope::Local, Scope::Global]
     } else {
         vec![Scope::Global]
@@ -431,7 +431,7 @@ fn check_activations(ctx: &AppContext) -> Vec<CheckResult> {
 
     let scopes = {
         let mut v = vec![Scope::Global];
-        if ctx.find_local_root().is_some() {
+        if ctx.nearest_local_root().is_some() {
             v.push(Scope::Local);
         }
         v
@@ -1590,6 +1590,7 @@ mod tests {
             home_dir: None,
             creft_home: None,
             cwd: std::path::PathBuf::from("/tmp"),
+            local_roots: Vec::new(),
         };
         let result = check_global_dir(&ctx);
         assert_eq!(result.status, CheckStatus::Fail);

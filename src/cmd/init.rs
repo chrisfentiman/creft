@@ -10,7 +10,7 @@ pub fn cmd_init(ctx: &AppContext) -> Result<(), CreftError> {
         return Ok(());
     }
 
-    if let Some(parent_root) = store::find_parent_local_root(&cwd) {
+    if let Some(parent_root) = store::walk_parent_local_roots(&cwd).first().cloned() {
         eprintln!(
             "note: parent directory already has local skills at {}",
             parent_root.display()

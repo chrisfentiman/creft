@@ -65,7 +65,7 @@ fn cmd_skills_test_unix(
     where_: bool,
 ) -> Result<(), CreftError> {
     // Require a local root — fixtures only exist in project skill trees.
-    let local_root = ctx.find_local_root().ok_or_else(|| {
+    let local_root = ctx.nearest_local_root().ok_or_else(|| {
         CreftError::Setup(
             "no .creft/ directory found in this or any parent directory; \
              run from a project root or after `creft init`"

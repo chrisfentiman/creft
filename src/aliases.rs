@@ -225,7 +225,7 @@ impl AliasMap {
     /// error only when a present, non-empty file fails to parse.
     pub fn load(ctx: &AppContext) -> Result<Self, CreftError> {
         let global = load_for_scope(ctx, Scope::Global)?;
-        let local = if ctx.find_local_root().is_some() {
+        let local = if ctx.nearest_local_root().is_some() {
             load_for_scope(ctx, Scope::Local)?
         } else {
             AliasFile::default()
@@ -686,13 +686,13 @@ mod tests {
         .unwrap();
 
         // home_dir and cwd_dir are independent temp dirs; cwd_dir has no .creft/
-        // ancestor, so find_local_root() returns None for this context.
+        // ancestor, so nearest_local_root() returns None for this context.
         let ctx = crate::model::AppContext::for_test(
             home_dir.path().to_path_buf(),
             cwd_dir.path().to_path_buf(),
         );
         assert!(
-            ctx.find_local_root().is_none(),
+            ctx.nearest_local_root().is_none(),
             "test setup: cwd must have no local root"
         );
 

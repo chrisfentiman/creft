@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::error::CreftError;
 use crate::frontmatter;
 use crate::markdown;
-pub use crate::model::find_local_root_from;
+pub use crate::model::walk_local_roots_from;
 use crate::model::{AppContext, CommandDef, NamespaceEntry, ParsedCommand, Scope, SkillSource};
 use crate::namespace::skill_namespace;
 use crate::registry::{self, ActivationEntry};
@@ -44,16 +44,16 @@ pub(crate) fn has_local_root(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Walk up from `start`'s parent directory looking for `.creft/`.
+/// Walk up from `start`'s parent directory collecting all `.creft/` directories.
 ///
-/// Skips `start` itself -- only checks ancestors. Returns `None` if no
+/// Skips `start` itself -- only checks ancestors. Returns an empty `Vec` if no
 /// ancestor has a `.creft/` directory.
-pub(crate) fn find_parent_local_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn walk_parent_local_roots(start: &Path) -> Vec<PathBuf> {
     let mut dir = start.to_path_buf();
     if !dir.pop() {
-        return None;
+        return Vec::new();
     }
-    find_local_root_from(&dir)
+    walk_local_roots_from(&dir)
 }
 
 /// Convert a command name to its filesystem path within the given scope.
@@ -602,7 +602,7 @@ pub fn list_all_with_source(
     let mut result = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if ctx.find_local_root().is_some() {
+    if ctx.nearest_local_root().is_some() {
         for item in list_scope_with_packages(ctx, Scope::Local)? {
             seen_names.insert(item.0.name.clone());
             result.push(item);
@@ -703,7 +703,7 @@ fn append_activated_plugin_skills(
         vec![Scope::Global]
     } else {
         let mut v = Vec::new();
-        if ctx.find_local_root().is_some() {
+        if ctx.nearest_local_root().is_some() {
             v.push(Scope::Local);
         }
         v.push(Scope::Global);
@@ -1008,7 +1008,7 @@ pub fn resolve_command(
         return resolve_in_scope(ctx, args, Scope::Global);
     }
 
-    if ctx.find_local_root().is_some()
+    if ctx.nearest_local_root().is_some()
         && let Ok(result) = resolve_in_scope(ctx, args, Scope::Local)
     {
         return Ok(result);
@@ -1272,21 +1272,21 @@ mod tests {
         );
     }
 
-    // --- find_local_root_from tests ---
+    // --- walk_local_roots_from tests ---
 
     #[test]
-    fn test_find_local_root_from_finds_creft_at_start() {
-        // .creft/ exists directly in the start directory — should be returned immediately.
+    fn test_walk_local_roots_from_finds_creft_at_start() {
+        // .creft/ exists directly in the start directory — returned as single entry.
         let dir = tempfile::TempDir::new().unwrap();
         let creft_dir = dir.path().join(".creft");
         std::fs::create_dir_all(&creft_dir).unwrap();
 
-        let result = find_local_root_from(dir.path());
-        assert_eq!(result, Some(creft_dir));
+        let result = walk_local_roots_from(dir.path());
+        assert_eq!(result, vec![creft_dir]);
     }
 
     #[test]
-    fn test_find_local_root_from_finds_creft_in_parent() {
+    fn test_walk_local_roots_from_finds_creft_in_parent() {
         // .creft/ exists in the parent of start — walk-up must find it.
         let parent = tempfile::TempDir::new().unwrap();
         let creft_dir = parent.path().join(".creft");
@@ -1296,39 +1296,73 @@ mod tests {
         let child = parent.path().join("subdir");
         std::fs::create_dir_all(&child).unwrap();
 
-        let result = find_local_root_from(&child);
-        assert_eq!(result, Some(creft_dir));
+        let result = walk_local_roots_from(&child);
+        assert_eq!(result, vec![creft_dir]);
     }
 
     #[test]
-    fn test_find_local_root_from_returns_none_when_absent() {
-        // No .creft/ anywhere in the temp dir tree — must return None.
+    fn test_walk_local_roots_from_returns_empty_when_absent() {
+        // No .creft/ anywhere in the temp dir tree — must return empty Vec.
         // TempDir is created under /tmp which is outside any real .creft/ tree.
         let dir = tempfile::TempDir::new().unwrap();
         let child = dir.path().join("a").join("b").join("c");
         std::fs::create_dir_all(&child).unwrap();
 
-        let result = find_local_root_from(&child);
+        let result = walk_local_roots_from(&child);
         assert!(
-            result.is_none(),
-            "expected None when no .creft/ exists, got {:?}",
+            result.is_empty(),
+            "expected empty Vec when no .creft/ exists, got {:?}",
             result
         );
     }
 
     #[test]
-    fn test_find_local_root_from_skips_creft_file() {
-        // .creft exists as a file (not a directory) — must be skipped, returning None.
+    fn test_walk_local_roots_from_skips_creft_file() {
+        // .creft exists as a file (not a directory) — must be skipped, returning empty.
         let dir = tempfile::TempDir::new().unwrap();
         let creft_file = dir.path().join(".creft");
         std::fs::write(&creft_file, "not a directory").unwrap();
 
-        let result = find_local_root_from(dir.path());
+        let result = walk_local_roots_from(dir.path());
         assert!(
-            result.is_none(),
-            "expected None when .creft is a file, got {:?}",
+            result.is_empty(),
+            "expected empty Vec when .creft is a file, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_walk_local_roots_from_two_entries_nearest_first() {
+        // Intermediate .creft/ and ancestor .creft/ — both returned, nearest first.
+        let root = tempfile::TempDir::new().unwrap();
+        let ancestor_creft = root.path().join(".creft");
+        std::fs::create_dir_all(&ancestor_creft).unwrap();
+        let infra = root.path().join("infra").join("rackroom");
+        let infra_creft = infra.join(".creft");
+        std::fs::create_dir_all(&infra_creft).unwrap();
+        let cwd = infra.join("deploy");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let result = walk_local_roots_from(&cwd);
+        assert_eq!(result.len(), 2, "expected two entries, got {:?}", result);
+        assert_eq!(result[0], infra_creft, "nearest root must come first");
+        assert_eq!(result[1], ancestor_creft, "ancestor root must come second");
+    }
+
+    #[test]
+    fn test_walk_local_roots_from_skips_creft_file_at_intermediate_depth() {
+        // .creft at the start is a file (not a directory) — skip it.
+        // .creft at the parent is a real directory — must be included.
+        let parent = tempfile::TempDir::new().unwrap();
+        let parent_creft = parent.path().join(".creft");
+        std::fs::create_dir_all(&parent_creft).unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let child_creft = child.join(".creft");
+        std::fs::write(&child_creft, "file not dir").unwrap();
+
+        let result = walk_local_roots_from(&child);
+        assert_eq!(result, vec![parent_creft]);
     }
 
     #[test]
@@ -1698,34 +1732,34 @@ mod tests {
         assert!(has_local_root(tmp.path()).is_none());
     }
 
-    // --- find_parent_local_root unit tests ---
+    // --- walk_parent_local_roots unit tests ---
 
     #[test]
-    fn test_find_parent_local_root_found() {
+    fn test_walk_parent_local_roots_found() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".creft")).unwrap();
         let child = tmp.path().join("child");
         std::fs::create_dir(&child).unwrap();
-        let result = find_parent_local_root(&child);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), tmp.path().join(".creft"));
+        let result = walk_parent_local_roots(&child);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], tmp.path().join(".creft"));
     }
 
     #[test]
-    fn test_find_parent_local_root_not_found() {
+    fn test_walk_parent_local_roots_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let child = tmp.path().join("child");
         std::fs::create_dir(&child).unwrap();
         // No .creft/ anywhere in the tempdir hierarchy
-        assert!(find_parent_local_root(&child).is_none());
+        assert!(walk_parent_local_roots(&child).is_empty());
     }
 
     #[test]
-    fn test_find_parent_local_root_skips_start() {
+    fn test_walk_parent_local_roots_skips_start() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".creft")).unwrap();
-        // Start is the dir that HAS .creft/ -- should not find it
-        assert!(find_parent_local_root(tmp.path()).is_none());
+        // Start is the dir that HAS .creft/ -- walk_parent skips start itself
+        assert!(walk_parent_local_roots(tmp.path()).is_empty());
     }
 
     #[test]
