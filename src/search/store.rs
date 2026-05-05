@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::CreftError;
 use crate::help::{self, BuiltinHelp};
@@ -16,13 +16,22 @@ use super::index::SearchIndex;
 ///
 /// The `plugin_prefix` parameter carries the plugin name when the namespace
 /// belongs to a plugin. Pass `None` for owned and package skills.
+///
+/// When `root_override` is `Some(root)`, the index lives at
+/// `<root>/indexes/<filename>` regardless of `scope`. Used by `rebuild_all_indexes`
+/// to write per-local-root index files when skills come from multiple roots in
+/// the chain. Pass `None` to route through `ctx.index_dir_for(scope)` as usual.
 pub(crate) fn index_path(
     ctx: &AppContext,
     namespace: &str,
     scope: Scope,
     plugin_prefix: Option<&str>,
+    root_override: Option<&Path>,
 ) -> Result<PathBuf, CreftError> {
-    let dir = ctx.index_dir_for(scope)?;
+    let dir = match root_override {
+        Some(root) => root.join("indexes"),
+        None => ctx.index_dir_for(scope)?,
+    };
     let filename = match (plugin_prefix, namespace) {
         (Some(plugin), ns) if !ns.is_empty() => format!("{}.{}.idx", plugin, ns),
         (Some(plugin), _) => format!("{}.idx", plugin),
@@ -78,7 +87,7 @@ pub(crate) fn rebuild_namespace_index(
         .collect();
     let index = SearchIndex::build(&refs);
 
-    write_index(ctx, namespace, scope, None, &index)
+    write_index(ctx, namespace, scope, None, None, &index)
 }
 
 /// Load a search index from disk.
@@ -91,7 +100,7 @@ pub(crate) fn load_index(
     namespace: &str,
     scope: Scope,
 ) -> Result<Option<SearchIndex>, CreftError> {
-    let path = index_path(ctx, namespace, scope, None)?;
+    let path = index_path(ctx, namespace, scope, None, None)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -102,17 +111,23 @@ pub(crate) fn load_index(
 /// Rebuild all indexes across all scopes, including built-in command docs.
 ///
 /// Iterates all skills from all sources (owned, package, and plugin) using
-/// `list_all_with_source`, groups them by `(namespace, plugin_prefix, scope)`,
-/// and writes one index file per group. Plugin skills are indexed under their
-/// plugin-prefixed path (e.g., `acme.deploy.idx`). Also rebuilds the built-in
-/// command index (`_builtin.idx`).
+/// `list_all_with_source`, groups them by `(namespace, plugin_prefix, scope, owning_root)`,
+/// and writes one index file per group. For local-scoped skills, each owning root
+/// produces its own index file; global and plugin skills behave as before.
+///
+/// A two-root project that defines skills in namespace `foo` in both roots produces
+/// two `foo.idx` files — one in each root's `indexes/`. A single-root project
+/// produces exactly the same set of index files it produces today.
 pub(crate) fn rebuild_all_indexes(ctx: &AppContext) -> Result<(), CreftError> {
     use std::collections::HashMap;
 
     use crate::model::CommandDef;
 
-    // Groups skills for indexing. Key: (namespace, Option<plugin_name>, scope).
-    type IndexGroup = HashMap<(String, Option<String>, Scope), Vec<(CommandDef, SkillSource)>>;
+    // Groups skills for indexing.
+    // Key: (namespace, Option<plugin_name>, scope, Option<owning_local_root>).
+    // The fourth element is Some(root) for local-scoped skills, None for global/plugin.
+    type IndexKey = (String, Option<String>, Scope, Option<PathBuf>);
+    type IndexGroup = HashMap<IndexKey, Vec<(CommandDef, SkillSource)>>;
 
     let mut groups: IndexGroup = HashMap::new();
 
@@ -120,15 +135,18 @@ pub(crate) fn rebuild_all_indexes(ctx: &AppContext) -> Result<(), CreftError> {
 
     for (def, source) in all {
         let ns = skill_namespace(&def.name).to_owned();
+        let owning_root = source.local_root().map(|p| p.to_path_buf());
         let key = match &source {
-            SkillSource::Plugin(plugin_name) => (ns, Some(plugin_name.clone()), Scope::Global),
-            SkillSource::Owned(scope) => (ns, None, *scope),
-            SkillSource::Package(_, scope) => (ns, None, *scope),
+            SkillSource::Plugin(plugin_name) => {
+                (ns, Some(plugin_name.clone()), Scope::Global, None)
+            }
+            SkillSource::Owned { scope, .. } => (ns, None, *scope, owning_root),
+            SkillSource::Package { scope, .. } => (ns, None, *scope, owning_root),
         };
         groups.entry(key).or_default().push((def, source));
     }
 
-    for ((ns, plugin_prefix, scope), skills) in &groups {
+    for ((ns, plugin_prefix, scope, owning_root), skills) in &groups {
         let mut documents: Vec<(String, String, String)> = Vec::new();
 
         for (def, source) in skills {
@@ -150,7 +168,8 @@ pub(crate) fn rebuild_all_indexes(ctx: &AppContext) -> Result<(), CreftError> {
         let index = SearchIndex::build(&refs);
 
         let plugin_prefix_ref = plugin_prefix.as_deref();
-        if let Err(e) = write_index(ctx, ns, *scope, plugin_prefix_ref, &index) {
+        let root_override = owning_root.as_deref();
+        if let Err(e) = write_index(ctx, ns, *scope, plugin_prefix_ref, root_override, &index) {
             eprintln!(
                 "warning: could not write index for namespace '{}': {}",
                 ns, e
@@ -203,14 +222,18 @@ pub(crate) fn rebuild_builtin_index(ctx: &AppContext) -> Result<(), CreftError> 
 /// Write an index to disk for a namespace, creating the directory if needed.
 ///
 /// Uses a write-then-rename strategy so readers never see a partial file.
+///
+/// `root_override` is forwarded to `index_path` — see its documentation for
+/// the per-root write semantics.
 fn write_index(
     ctx: &AppContext,
     namespace: &str,
     scope: Scope,
     plugin_prefix: Option<&str>,
+    root_override: Option<&Path>,
     index: &SearchIndex,
 ) -> Result<(), CreftError> {
-    let path = index_path(ctx, namespace, scope, plugin_prefix)?;
+    let path = index_path(ctx, namespace, scope, plugin_prefix, root_override)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -340,21 +363,21 @@ mod tests {
     #[test]
     fn index_path_named_namespace_returns_dotted_idx() {
         let (ctx, _tmp) = make_ctx();
-        let path = index_path(&ctx, "deploy", Scope::Global, None).unwrap();
+        let path = index_path(&ctx, "deploy", Scope::Global, None, None).unwrap();
         assert!(path.ends_with("indexes/deploy.idx"));
     }
 
     #[test]
     fn index_path_root_namespace_returns_root_idx() {
         let (ctx, _tmp) = make_ctx();
-        let path = index_path(&ctx, "", Scope::Global, None).unwrap();
+        let path = index_path(&ctx, "", Scope::Global, None, None).unwrap();
         assert!(path.ends_with("indexes/_root.idx"));
     }
 
     #[test]
     fn index_path_with_plugin_prefix_returns_dotted_idx() {
         let (ctx, _tmp) = make_ctx();
-        let path = index_path(&ctx, "deploy", Scope::Global, Some("acme")).unwrap();
+        let path = index_path(&ctx, "deploy", Scope::Global, Some("acme"), None).unwrap();
         assert!(path.ends_with("indexes/acme.deploy.idx"));
     }
 
@@ -392,7 +415,7 @@ mod tests {
 
         rebuild_namespace_index(&ctx, "deploy", Scope::Global).unwrap();
 
-        let path = index_path(&ctx, "deploy", Scope::Global, None).unwrap();
+        let path = index_path(&ctx, "deploy", Scope::Global, None, None).unwrap();
         assert!(path.exists(), "index file must be created after rebuild");
     }
 

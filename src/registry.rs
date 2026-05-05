@@ -357,11 +357,12 @@ pub fn skill_file_path(ctx: &AppContext, full_name: &str) -> Result<PathBuf, Cre
             .ok_or_else(|| CreftError::PackageNotFound(full_name.to_string()));
     }
 
-    // Check local scope first.
-    if ctx.nearest_local_root().is_some()
-        && let Some(path) = skill_file_path_in(ctx, pkg_name, rel_parts, Scope::Local)?
-    {
-        return Ok(path);
+    // Walk every local root nearest-first via chain pinning.
+    for local_root in ctx.local_roots() {
+        let pinned = store::pin_ctx_to_root(ctx, local_root);
+        if let Some(path) = skill_file_path_in(&pinned, pkg_name, rel_parts, Scope::Local)? {
+            return Ok(path);
+        }
     }
 
     // Fall back to global scope.

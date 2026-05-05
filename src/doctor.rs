@@ -1218,8 +1218,12 @@ pub(crate) fn report_has_failures(report: &DoctorReport) -> bool {
 
 fn describe_source(source: &SkillSource) -> String {
     match source {
-        SkillSource::Owned(scope) => format!("{} owned", scope_name(*scope)),
-        SkillSource::Package(pkg, scope) => format!("package {} ({})", pkg, scope_name(*scope)),
+        SkillSource::Owned { scope, .. } => format!("{} owned", scope_name(*scope)),
+        SkillSource::Package {
+            name: pkg, scope, ..
+        } => {
+            format!("package {} ({})", pkg, scope_name(*scope))
+        }
         SkillSource::Plugin(name) => format!("plugin {}", name),
     }
 }
@@ -1920,22 +1924,23 @@ mod tests {
 
     #[test]
     fn test_describe_source_owned_global() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Owned(Scope::Global));
+        use crate::model::SkillSource;
+        let s = describe_source(&SkillSource::owned_global());
         assert_eq!(s, "global owned");
     }
 
     #[test]
     fn test_describe_source_owned_local() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Owned(Scope::Local));
+        use crate::model::SkillSource;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = describe_source(&SkillSource::owned_local(tmp.path().to_path_buf()));
         assert_eq!(s, "local owned");
     }
 
     #[test]
     fn test_describe_source_package() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Package("mypkg".into(), Scope::Global));
+        use crate::model::SkillSource;
+        let s = describe_source(&SkillSource::package_global("mypkg".into()));
         assert_eq!(s, "package mypkg (global)");
     }
 
@@ -2119,9 +2124,17 @@ mod tests {
         std::fs::create_dir_all(&creft_dir).unwrap();
         let skill_path = creft_dir.join("test-skill.md");
         std::fs::write(&skill_path, markdown).unwrap();
-        let ctx =
-            crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        let source = crate::model::SkillSource::Owned(crate::model::Scope::Local);
+        // Use a separate home_dir tempdir so the exclusion filter does not strip
+        // the project .creft/ (which would happen when home_dir == cwd).
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+        );
+        // The .creft/ directory is staged above — for_test walks the filesystem and
+        // populates local_roots. Use the nearest local root as the owning root.
+        let local_root = ctx.nearest_local_root().unwrap().to_path_buf();
+        let source = crate::model::SkillSource::owned_local(local_root);
         (tmp, ctx, "test-skill".to_string(), source)
     }
 

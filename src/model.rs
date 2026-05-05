@@ -299,21 +299,22 @@ impl AppContext {
 
     /// Derive CWD for subprocess execution based on skill source.
     ///
-    /// - Local skills: project root (parent of `.creft/`)
+    /// - Local skills: project root (parent of the owning `.creft/`)
     /// - Global skills and plugin skills: captured CWD
     /// - `CREFT_HOME` mode: captured CWD (no project root concept)
     pub fn derive_cwd(&self, source: &SkillSource) -> PathBuf {
         if self.creft_home.is_some() {
             return self.cwd.clone();
         }
-        match source {
-            SkillSource::Owned(Scope::Local) | SkillSource::Package(_, Scope::Local) => self
-                .nearest_local_root()
-                .and_then(|creft_dir| creft_dir.parent().map(|p| p.to_path_buf()))
-                .unwrap_or_else(|| self.cwd.clone()),
-            SkillSource::Owned(Scope::Global)
-            | SkillSource::Package(_, Scope::Global)
-            | SkillSource::Plugin(_) => self.cwd.clone(),
+        // The owning root is carried on the source by constructor invariant.
+        // No chain walk here: source.local_root() is the authoritative answer.
+        if let Some(creft_dir) = source.local_root() {
+            creft_dir
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.cwd.clone())
+        } else {
+            self.cwd.clone()
         }
     }
 }
@@ -368,14 +369,111 @@ pub enum Scope {
 }
 
 /// Where a resolved skill came from.
+///
+/// Construction is via the four constructors below — direct literal
+/// construction would let callers bypass the `root.is_some() ⇔ scope == Local`
+/// invariant. The fields are visible for read-side destructuring (`match`
+/// arms remain idiomatic) but the variants must be built through the
+/// constructors so the invariant is enforced at every construction site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
-    /// A user-created skill, with its storage scope.
-    Owned(Scope),
-    /// An installed package skill, with its storage scope.
-    Package(String, Scope),
+    /// A user-created skill.
+    ///
+    /// **Invariant:** `root.is_some()` if and only if `scope == Scope::Local`.
+    /// Construct via [`SkillSource::owned_local`] or [`SkillSource::owned_global`].
+    Owned { scope: Scope, root: Option<PathBuf> },
+    /// An installed package skill.
+    ///
+    /// **Invariant:** `root.is_some()` if and only if `scope == Scope::Local`.
+    /// Construct via [`SkillSource::package_local`] or [`SkillSource::package_global`].
+    Package {
+        name: String,
+        scope: Scope,
+        root: Option<PathBuf>,
+    },
     /// A skill from an activated plugin in the global plugin cache.
+    ///
+    /// Plugins live in `~/.creft/plugins/`; no local root applies.
     Plugin(String),
+}
+
+impl SkillSource {
+    /// Construct a local-scope owned source. The owning local root is required.
+    pub fn owned_local(root: PathBuf) -> Self {
+        SkillSource::Owned {
+            scope: Scope::Local,
+            root: Some(root),
+        }
+    }
+
+    /// Construct a global-scope owned source.
+    pub fn owned_global() -> Self {
+        SkillSource::Owned {
+            scope: Scope::Global,
+            root: None,
+        }
+    }
+
+    /// Construct a local-scope package source. The owning local root is required.
+    pub fn package_local(name: String, root: PathBuf) -> Self {
+        SkillSource::Package {
+            name,
+            scope: Scope::Local,
+            root: Some(root),
+        }
+    }
+
+    /// Construct a global-scope package source.
+    pub fn package_global(name: String) -> Self {
+        SkillSource::Package {
+            name,
+            scope: Scope::Global,
+            root: None,
+        }
+    }
+
+    /// The local root that owns this skill, when the skill is local-scoped.
+    ///
+    /// Returns `Some(root)` for `Owned { scope: Scope::Local, .. }` and
+    /// `Package { scope: Scope::Local, .. }`. Returns `None` for global and
+    /// plugin sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a local-tagged variant has `root == None`. Such a value can
+    /// only exist if a caller bypassed the constructors and built the variant
+    /// by literal expression. The panic surfaces a real bug rather than
+    /// producing the silent wrong behavior that motivated this fix.
+    pub fn local_root(&self) -> Option<&Path> {
+        match self {
+            SkillSource::Owned {
+                scope: Scope::Local,
+                root,
+            }
+            | SkillSource::Package {
+                scope: Scope::Local,
+                root,
+                ..
+            } => Some(root.as_deref().expect(
+                "local-tagged SkillSource missing root: invariant violation; \
+                     use SkillSource::owned_local / package_local",
+            )),
+            SkillSource::Owned { .. } | SkillSource::Package { .. } | SkillSource::Plugin(_) => {
+                None
+            }
+        }
+    }
+
+    /// The storage scope. `Plugin(_)` is always treated as `Scope::Global`.
+    // Used by Stage 2 tests and Stage 3 callers (cmd::alias, doctor). Not yet
+    // referenced in production binary code at this stage.
+    #[allow(dead_code)]
+    pub fn scope(&self) -> Scope {
+        match self {
+            SkillSource::Owned { scope, .. } | SkillSource::Package { scope, .. } => *scope,
+            SkillSource::Plugin(_) => Scope::Global,
+        }
+    }
 }
 
 /// Skill definition parsed from YAML frontmatter.

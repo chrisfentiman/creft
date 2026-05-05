@@ -195,6 +195,123 @@ pub fn save(
     Ok(def.name)
 }
 
+/// Compute the path to an owned skill file inside a specific local root.
+///
+/// Mirrors `name_to_path_in` but operates on an explicit root directory
+/// rather than resolving through `ctx`. Used by `read_raw_from` and
+/// `load_from` when the owning root is already known from the `SkillSource`.
+fn path_in_root(root: &Path, name: &str) -> PathBuf {
+    let parts: Vec<&str> = name.split_whitespace().collect();
+    let mut path = root.join("commands");
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        path = path.join(part);
+    }
+    if let Some(leaf) = parts.last() {
+        path = path.join(format!("{}.md", leaf));
+    }
+    path
+}
+
+/// Compute the path to a package skill file inside a specific local root.
+///
+/// `full_name` is the fully-qualified skill name including the package prefix,
+/// e.g. `"mypkg deploy rollback"`. The package directory is `<root>/packages/<pkg>/`,
+/// and the relative skill path mirrors the token structure.
+fn package_skill_path_in_root(root: &Path, full_name: &str) -> Result<PathBuf, CreftError> {
+    let tokens: Vec<&str> = full_name.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return Err(CreftError::PackageNotFound(full_name.to_string()));
+    }
+    let pkg_name = tokens[0];
+    let rel_parts = &tokens[1..];
+    for part in rel_parts {
+        validate_path_token(part)?;
+    }
+    let mut path = root.join("packages").join(pkg_name);
+    for (i, part) in rel_parts.iter().enumerate() {
+        if i == rel_parts.len() - 1 {
+            path = path.join(format!("{}.md", part));
+        } else {
+            path = path.join(part);
+        }
+    }
+    Ok(path)
+}
+
+/// Load and parse a skill from a file path, replacing the frontmatter name
+/// with `name` (to give the caller a consistent fully-qualified identifier).
+fn load_from_path(path: &Path, name: &str) -> Result<ParsedCommand, CreftError> {
+    if !path.exists() {
+        return Err(CreftError::CommandNotFound(name.to_string()));
+    }
+    let content = std::fs::read_to_string(path)?;
+    let (def, body) = frontmatter::parse(&content)?;
+    let (docs, blocks) = markdown::extract_blocks(&body);
+    Ok(ParsedCommand { def, docs, blocks })
+}
+
+/// Load and parse a package skill from a file path.
+///
+/// Replaces the frontmatter name with `full_name` so callers get the
+/// fully-qualified namespaced identifier.
+fn load_package_skill_from_path(path: &Path, full_name: &str) -> Result<ParsedCommand, CreftError> {
+    let content = std::fs::read_to_string(path).map_err(CreftError::Io)?;
+    let (mut def, body) = frontmatter::parse(&content)?;
+    let (docs, blocks) = markdown::extract_blocks(&body);
+    def.name = full_name.to_string();
+    Ok(ParsedCommand { def, docs, blocks })
+}
+
+/// Return a clone of `ctx` whose `local_roots` is replaced by the single supplied root.
+///
+/// Used by `resolve_command`, `list_all_with_source`, the indexer's per-root grouping,
+/// and `cmd_rm` to run a per-scope helper against one local root from the chain without
+/// changing those helpers' signatures. Path-derivation helpers route through
+/// `resolve_root(Scope::Local)` → `nearest_local_root()`, which on a pinned context
+/// returns the single supplied root.
+///
+/// Callees must treat the pinned context as scope-narrowed to that root. They must
+/// not iterate the chain via `local_roots()` or `iter_local_roots()` — pinning
+/// communicates "operate on this one root," not "the chain has shrunk."
+pub(crate) fn pin_ctx_to_root(ctx: &AppContext, root: &Path) -> AppContext {
+    let mut pinned = ctx.clone();
+    pinned.local_roots = vec![root.to_path_buf()];
+    pinned
+}
+
+/// Module-private alias used internally. See `pin_ctx_to_root`.
+fn pin_local_root(ctx: &AppContext, root: &Path) -> AppContext {
+    pin_ctx_to_root(ctx, root)
+}
+
+/// Build an owned `SkillSource` for the given scope, reading the owning root
+/// from `ctx.nearest_local_root()` for `Scope::Local`. On a pinned context
+/// that root is the pinned root.
+fn make_owned_source(scope: Scope, ctx: &AppContext) -> SkillSource {
+    match scope {
+        Scope::Local => SkillSource::owned_local(
+            ctx.nearest_local_root()
+                .expect("resolve_in_scope called with Local scope requires a local root")
+                .to_path_buf(),
+        ),
+        Scope::Global => SkillSource::owned_global(),
+    }
+}
+
+/// Build a package `SkillSource` for the given scope, reading the owning root
+/// from `ctx.nearest_local_root()` for `Scope::Local`.
+fn make_package_source(name: String, scope: Scope, ctx: &AppContext) -> SkillSource {
+    match scope {
+        Scope::Local => SkillSource::package_local(
+            name,
+            ctx.nearest_local_root()
+                .expect("resolve_in_scope called with Local scope requires a local root")
+                .to_path_buf(),
+        ),
+        Scope::Global => SkillSource::package_global(name),
+    }
+}
+
 /// Load and parse a command by name from the given scope.
 pub fn load_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<ParsedCommand, CreftError> {
     let path = name_to_path_in(ctx, name, scope)?;
@@ -330,7 +447,7 @@ fn detect_single_package(skills: &[(CommandDef, SkillSource)]) -> Option<String>
     let mut pkg_name: Option<&str> = None;
     for (_, source) in skills {
         match source {
-            SkillSource::Package(name, _) => {
+            SkillSource::Package { name, .. } => {
                 match pkg_name {
                     None => pkg_name = Some(name.as_str()),
                     Some(existing) => {
@@ -341,7 +458,7 @@ fn detect_single_package(skills: &[(CommandDef, SkillSource)]) -> Option<String>
                     }
                 }
             }
-            SkillSource::Owned(_) | SkillSource::Plugin(_) => {
+            SkillSource::Owned { .. } | SkillSource::Plugin(_) => {
                 // Contains an owned or plugin skill -- not a pure package namespace.
                 return None;
             }
@@ -505,19 +622,37 @@ pub fn read_raw_in(ctx: &AppContext, name: &str, scope: Scope) -> Result<String,
 
 /// Get the raw content of a command file, from either an owned skill or an installed package.
 ///
-/// - `SkillSource::Owned(scope)` -> reads from the given scope's commands directory.
-/// - `SkillSource::Package(_, scope)` -> reads the raw `.md` file directly from the package
-///   directory, preserving all content including code blocks.
+/// For local-scoped sources, reads directly from the owning root carried on `source`
+/// (no chain walk — the resolver already recorded the authoritative root).
+/// For global-scoped sources and plugins, delegates to the per-scope helpers.
 pub fn read_raw_from(
     ctx: &AppContext,
     name: &str,
     source: &SkillSource,
 ) -> Result<String, CreftError> {
     match source {
-        SkillSource::Owned(scope) => read_raw_in(ctx, name, *scope),
-        SkillSource::Package(_, _) => {
+        SkillSource::Owned {
+            scope: Scope::Local,
+            ..
+        } => {
+            // local_root() is guaranteed Some(_) for local-tagged variants by constructor invariant.
+            let root = source.local_root().expect("local Owned source has root");
+            let path = path_in_root(root, name);
+            Ok(std::fs::read_to_string(&path)?)
+        }
+        SkillSource::Owned { scope, .. } => read_raw_in(ctx, name, *scope),
+        SkillSource::Package {
+            scope: Scope::Local,
+            ..
+        } => {
             // Read the file directly rather than parse-and-reserialize, which would
-            // drop code block contents.
+            // drop code block contents. Use the owning root from the source.
+            let root = source.local_root().expect("local Package source has root");
+            let file_path = package_skill_path_in_root(root, name)?;
+            Ok(std::fs::read_to_string(&file_path)?)
+        }
+        SkillSource::Package { .. } => {
+            // Global package: fall through to the registry helper.
             let file_path = registry::skill_file_path(ctx, name)?;
             Ok(std::fs::read_to_string(&file_path)?)
         }
@@ -530,16 +665,34 @@ pub fn read_raw_from(
 
 /// Load and parse a command by name and source.
 ///
-/// - `SkillSource::Owned(scope)` -> reads from the given scope's commands directory.
-/// - `SkillSource::Package(_, scope)` -> delegates to `registry::load_package_skill`.
+/// For local-scoped sources, reads directly from the owning root carried on `source`
+/// (no chain walk — the resolver already recorded the authoritative root).
+/// For global-scoped sources and plugins, delegates to the per-scope helpers.
 pub fn load_from(
     ctx: &AppContext,
     name: &str,
     source: &SkillSource,
 ) -> Result<ParsedCommand, CreftError> {
     match source {
-        SkillSource::Owned(scope) => load_in(ctx, name, *scope),
-        SkillSource::Package(_, _) => registry::load_package_skill(ctx, name),
+        SkillSource::Owned {
+            scope: Scope::Local,
+            ..
+        } => {
+            let root = source.local_root().expect("local Owned source has root");
+            let path = path_in_root(root, name);
+            load_from_path(&path, name)
+        }
+        SkillSource::Owned { scope, .. } => load_in(ctx, name, *scope),
+        SkillSource::Package {
+            scope: Scope::Local,
+            ..
+        } => {
+            // Use the owning root from the source directly.
+            let root = source.local_root().expect("local Package source has root");
+            let file_path = package_skill_path_in_root(root, name)?;
+            load_package_skill_from_path(&file_path, name)
+        }
+        SkillSource::Package { .. } => registry::load_package_skill(ctx, name),
         SkillSource::Plugin(plugin_name) => registry::load_plugin_skill(ctx, plugin_name, name),
     }
 }
@@ -556,9 +709,24 @@ pub(crate) fn list_scope_with_packages(
     let owned_names: std::collections::HashSet<String> =
         owned.iter().map(|d| d.name.clone()).collect();
 
+    // For local scope, the owning root is the nearest local root on ctx. Under chain
+    // pinning (called from list_all_with_source), nearest_local_root() returns the
+    // pinned root, so each emitted source carries the correct owning root.
+    let local_root_buf: Option<PathBuf> = if scope == Scope::Local {
+        ctx.nearest_local_root().map(|p| p.to_path_buf())
+    } else {
+        None
+    };
+
     let mut result: Vec<(CommandDef, SkillSource)> = owned
         .into_iter()
-        .map(|d| (d, SkillSource::Owned(scope)))
+        .map(|d| {
+            let source = match &local_root_buf {
+                Some(root) => SkillSource::owned_local(root.clone()),
+                None => SkillSource::owned_global(),
+            };
+            (d, source)
+        })
         .collect();
 
     let packages = registry::list_packages_in(ctx, scope)?;
@@ -567,10 +735,13 @@ pub(crate) fn list_scope_with_packages(
             Ok(skills) => {
                 for skill in skills {
                     if !owned_names.contains(&skill.name) {
-                        result.push((
-                            skill,
-                            SkillSource::Package(pkg.manifest.name.clone(), scope),
-                        ));
+                        let source = match &local_root_buf {
+                            Some(root) => {
+                                SkillSource::package_local(pkg.manifest.name.clone(), root.clone())
+                            }
+                            None => SkillSource::package_global(pkg.manifest.name.clone()),
+                        };
+                        result.push((skill, source));
                     }
                 }
             }
@@ -587,8 +758,11 @@ pub(crate) fn list_scope_with_packages(
 /// List all available skills (owned + installed + activated plugins), sorted by name.
 ///
 /// When `creft_home` is set, lists only from that single location.
-/// Otherwise, lists from both local and global scopes; local shadows global on name collision.
-/// Activated plugin skills are appended after owned and package skills.
+/// Otherwise, iterates every local root nearest-first, then global, then activated
+/// plugins. The first occurrence of a given skill name wins (nearest-root-wins for
+/// local entries; local shadows global).
+///
+/// Each returned `SkillSource` carries the owning local root for local-scoped skills.
 pub fn list_all_with_source(
     ctx: &AppContext,
 ) -> Result<Vec<(CommandDef, SkillSource)>, CreftError> {
@@ -602,10 +776,16 @@ pub fn list_all_with_source(
     let mut result = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if ctx.nearest_local_root().is_some() {
-        for item in list_scope_with_packages(ctx, Scope::Local)? {
-            seen_names.insert(item.0.name.clone());
-            result.push(item);
+    // Walk every local root nearest-first. Pin the context to each root so that
+    // list_scope_with_packages reads the right directory and emits sources with the
+    // correct owning root.
+    for local_root in ctx.local_roots() {
+        let pinned = pin_local_root(ctx, local_root);
+        for item in list_scope_with_packages(&pinned, Scope::Local)? {
+            if !seen_names.contains(&item.0.name) {
+                seen_names.insert(item.0.name.clone());
+                result.push(item);
+            }
         }
     }
 
@@ -616,7 +796,7 @@ pub fn list_all_with_source(
         }
     }
 
-    // Append activated plugin skills (global and local activations merged).
+    // Append activated plugin skills (all local roots + global activations merged).
     let mut plugin_items = Vec::new();
     append_activated_plugin_skills(ctx, &mut plugin_items)?;
     for item in plugin_items {
@@ -689,9 +869,10 @@ fn append_activated_plugin_skills_for_scope_dedup(
 
 /// Collect skills from all activated plugins and append them to `result`.
 ///
-/// Reads activation settings from both local and global scopes when available.
-/// Local activations take precedence — if a plugin command is activated locally,
-/// it is not added again from global.
+/// Reads activation settings from every local root nearest-first, then global.
+/// A plugin command activated in any local root takes precedence over the same
+/// command from global (or a farther local root) — the shared dedup set prevents
+/// duplicate entries.
 fn append_activated_plugin_skills(
     ctx: &AppContext,
     result: &mut Vec<(CommandDef, SkillSource)>,
@@ -699,27 +880,33 @@ fn append_activated_plugin_skills(
     let mut seen_plugin_skills: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
-    let scopes = if ctx.creft_home.is_some() {
-        vec![Scope::Global]
-    } else {
-        let mut v = Vec::new();
-        if ctx.nearest_local_root().is_some() {
-            v.push(Scope::Local);
-        }
-        v.push(Scope::Global);
-        v
-    };
-
-    for scope in scopes {
-        append_activated_plugin_skills_for_scope_dedup(
+    if ctx.creft_home.is_some() {
+        return append_activated_plugin_skills_for_scope_dedup(
             ctx,
-            scope,
+            Scope::Global,
+            result,
+            &mut seen_plugin_skills,
+        );
+    }
+
+    // Walk every local root nearest-first; pin the context so load_settings reads
+    // the right settings.json for each root.
+    for local_root in ctx.local_roots() {
+        let pinned = pin_local_root(ctx, local_root);
+        append_activated_plugin_skills_for_scope_dedup(
+            &pinned,
+            Scope::Local,
             result,
             &mut seen_plugin_skills,
         )?;
     }
 
-    Ok(())
+    append_activated_plugin_skills_for_scope_dedup(
+        ctx,
+        Scope::Global,
+        result,
+        &mut seen_plugin_skills,
+    )
 }
 
 /// Construct the flat-file path for a namespaced command name.
@@ -836,7 +1023,8 @@ pub(crate) fn resolve_in_scope(
                     eprintln!("note: \"{flat_name}\" ignored — directory version takes priority");
                 }
             }
-            return Ok((candidate, args[len..].to_vec(), SkillSource::Owned(scope)));
+            let source = make_owned_source(scope, ctx);
+            return Ok((candidate, args[len..].to_vec(), source));
         }
     }
 
@@ -850,7 +1038,8 @@ pub(crate) fn resolve_in_scope(
         if candidate.contains(' ') && migrate_flat_file(ctx, &candidate, scope)? {
             let path = name_to_path_in(ctx, &candidate, scope)?;
             if path.exists() {
-                return Ok((candidate, args[len..].to_vec(), SkillSource::Owned(scope)));
+                let source = make_owned_source(scope, ctx);
+                return Ok((candidate, args[len..].to_vec(), source));
             }
         }
     }
@@ -890,11 +1079,8 @@ pub(crate) fn resolve_in_scope(
             }
             if file_path.exists() {
                 let extra_args = args[1 + skill_len..].to_vec();
-                return Ok((
-                    full_name,
-                    extra_args,
-                    SkillSource::Package(first.to_string(), scope),
-                ));
+                let source = make_package_source(first.to_string(), scope, ctx);
+                return Ok((full_name, extra_args, source));
             }
         }
         if args.len() > 1 {
@@ -984,7 +1170,13 @@ fn resolve_from_activated_plugins(
 pub(crate) fn is_local_source(source: &SkillSource) -> bool {
     matches!(
         source,
-        SkillSource::Owned(Scope::Local) | SkillSource::Package(_, Scope::Local)
+        SkillSource::Owned {
+            scope: Scope::Local,
+            ..
+        } | SkillSource::Package {
+            scope: Scope::Local,
+            ..
+        }
     )
 }
 
@@ -992,8 +1184,10 @@ pub(crate) fn is_local_source(source: &SkillSource) -> bool {
 ///
 /// Resolution order:
 /// 1. If `creft_home` is set: use only that single location.
-/// 2. Try local scope (owned commands, then packages).
-/// 3. Try global scope (owned commands, then packages).
+/// 2. Try every local root nearest-first (owned commands, then packages, then
+///    activated plugins for that root). The first hit wins and records the
+///    owning root on the returned `SkillSource`.
+/// 3. Try global scope.
 ///
 /// Returns `(command_name, remaining_args, SkillSource)`.
 pub fn resolve_command(
@@ -1008,10 +1202,14 @@ pub fn resolve_command(
         return resolve_in_scope(ctx, args, Scope::Global);
     }
 
-    if ctx.nearest_local_root().is_some()
-        && let Ok(result) = resolve_in_scope(ctx, args, Scope::Local)
-    {
-        return Ok(result);
+    // Walk every local root nearest-first. Pin the context to each root so
+    // resolve_in_scope operates on that single root and emits sources whose
+    // root field reflects the pinned root.
+    for local_root in ctx.local_roots() {
+        let pinned = pin_local_root(ctx, local_root);
+        if let Ok(result) = resolve_in_scope(&pinned, args, Scope::Local) {
+            return Ok(result);
+        }
     }
 
     resolve_in_scope(ctx, args, Scope::Global)
@@ -1089,27 +1287,30 @@ mod tests {
 
     #[test]
     fn test_is_local_source_owned_local() {
-        assert!(is_local_source(&SkillSource::Owned(Scope::Local)));
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(is_local_source(&SkillSource::owned_local(
+            tmp.path().to_path_buf()
+        )));
     }
 
     #[test]
     fn test_is_local_source_owned_global() {
-        assert!(!is_local_source(&SkillSource::Owned(Scope::Global)));
+        assert!(!is_local_source(&SkillSource::owned_global()));
     }
 
     #[test]
     fn test_is_local_source_package_local() {
-        assert!(is_local_source(&SkillSource::Package(
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(is_local_source(&SkillSource::package_local(
             "mypkg".to_string(),
-            Scope::Local
+            tmp.path().to_path_buf()
         )));
     }
 
     #[test]
     fn test_is_local_source_package_global() {
-        assert!(!is_local_source(&SkillSource::Package(
-            "mypkg".to_string(),
-            Scope::Global
+        assert!(!is_local_source(&SkillSource::package_global(
+            "mypkg".to_string()
         )));
     }
 
@@ -1529,8 +1730,34 @@ mod tests {
     }
 
     /// Writes a skill file to `<root>/commands/<name>.md`, creating directories as needed.
+    ///
+    /// For simple names (no spaces), the file is at `commands/<name>.md`.
+    /// For namespaced names (with spaces), the file is at the flat path
+    /// `commands/<name with spaces>.md`, which `list_all_in` discovers via
+    /// filesystem walk. Use `write_skill_dir` when directory-structured paths
+    /// are required (e.g., for `read_raw_from` or `load_from` tests).
     fn write_skill_to_root(root: &std::path::Path, name: &str, desc: &str) {
         let path = root.join("commands").join(format!("{}.md", name));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, make_skill(name, desc)).unwrap();
+    }
+
+    /// Writes a skill file using directory structure for namespaced names.
+    ///
+    /// `"deploy rollback"` → `<root>/commands/deploy/rollback.md`
+    ///
+    /// This matches the path that `read_raw_from`, `load_from`, and `path_in_root`
+    /// expect for local-scoped skills. Use this when the test needs to read or
+    /// load the skill after resolving it.
+    fn write_skill_dir(root: &std::path::Path, name: &str, desc: &str) {
+        let parts: Vec<&str> = name.split_whitespace().collect();
+        let mut path = root.join("commands");
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            path = path.join(part);
+        }
+        if let Some(leaf) = parts.last() {
+            path = path.join(format!("{}.md", leaf));
+        }
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, make_skill(name, desc)).unwrap();
     }
@@ -1694,19 +1921,30 @@ mod tests {
         );
 
         assert_eq!(
-            by_name.get("hello"),
-            Some(&&SkillSource::Owned(Scope::Local)),
+            by_name.get("hello").map(|s| s.scope()),
+            Some(Scope::Local),
             "local hello must shadow global hello"
         );
         assert_eq!(
-            by_name.get("local-only"),
-            Some(&&SkillSource::Owned(Scope::Local)),
+            by_name.get("local-only").map(|s| s.scope()),
+            Some(Scope::Local),
             "local-only must appear with Local scope"
         );
         assert_eq!(
-            by_name.get("global-only"),
-            Some(&&SkillSource::Owned(Scope::Global)),
+            by_name.get("global-only").map(|s| s.scope()),
+            Some(Scope::Global),
             "global-only must appear with Global scope"
+        );
+        // Local sources must carry the owning root.
+        assert_eq!(
+            by_name.get("hello").and_then(|s| s.local_root()),
+            Some(local_root.as_path()),
+            "local hello must carry the owning local root"
+        );
+        assert_eq!(
+            by_name.get("global-only").and_then(|s| s.local_root()),
+            None,
+            "global-only must have no owning root"
         );
     }
 
@@ -1779,7 +2017,7 @@ mod tests {
             tags: vec![],
             supports: vec![],
         };
-        (def, SkillSource::Owned(Scope::Global))
+        (def, SkillSource::owned_global())
     }
 
     fn make_pkg_skill(name: &str, desc: &str, pkg: &str) -> (CommandDef, SkillSource) {
@@ -1792,7 +2030,7 @@ mod tests {
             tags: vec![],
             supports: vec![],
         };
-        (def, SkillSource::Package(pkg.to_string(), Scope::Global))
+        (def, SkillSource::package_global(pkg.to_string()))
     }
 
     #[test]
@@ -2127,6 +2365,281 @@ mod tests {
                 CreftError::InvalidName(_) | CreftError::ReservedName(_)
             ),
             "expected InvalidName or ReservedName for empty input, got: {err}"
+        );
+    }
+
+    // ── Stage 2: hierarchical resolution ─────────────────────────────────────
+
+    /// BL-4 repro: an empty intermediate `.creft/` must not block resolution
+    /// to an ancestor root's skill. The returned source must carry the ancestor
+    /// root and have Local scope.
+    #[test]
+    fn resolve_command_falls_through_empty_intermediate_creft() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        // Hierarchy: project_dir / infra / rackroom
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let infra_dir = project_dir.path().join("infra").join("rackroom");
+        std::fs::create_dir_all(&infra_dir).unwrap();
+
+        // Ancestor root: populated with a skill.
+        let ancestor_root = project_dir.path().join(".creft");
+        write_skill_to_root(&ancestor_root, "remote", "remote desc");
+
+        // Intermediate root: empty (no skills).
+        let intermediate_root = infra_dir.join(".creft");
+        std::fs::create_dir_all(intermediate_root.join("commands")).unwrap();
+
+        // CWD is inside the intermediate (deepest) directory.
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), infra_dir.clone());
+
+        let args: Vec<String> = vec!["remote".to_string()];
+        let (name, remaining, source) = resolve_command(&ctx, &args)
+            .expect("resolve_command must succeed through empty intermediate root");
+
+        assert_eq!(name, "remote");
+        assert!(remaining.is_empty());
+        assert_eq!(
+            source.scope(),
+            Scope::Local,
+            "skill from ancestor root must be Local-scoped"
+        );
+        assert_eq!(
+            source.local_root(),
+            Some(ancestor_root.as_path()),
+            "owning root must be the ancestor .creft/, not the intermediate"
+        );
+
+        // Verify the resolved body can be read.
+        let raw = read_raw_from(&ctx, "remote", &source).expect("read_raw_from must succeed");
+        assert!(raw.contains("remote desc"));
+    }
+
+    /// When both ancestor and intermediate roots define the same skill, the
+    /// intermediate (most-local) wins and its file is read.
+    #[test]
+    fn resolve_command_most_local_root_wins_on_conflict() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let ancestor_root = project_dir.path().join(".creft");
+        write_skill_to_root(&ancestor_root, "remote", "ancestor remote");
+
+        let sub_root = sub_dir.join(".creft");
+        write_skill_to_root(&sub_root, "remote", "sub remote");
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        let args: Vec<String> = vec!["remote".to_string()];
+        let (name, _, source) = resolve_command(&ctx, &args).expect("resolve_command must succeed");
+
+        assert_eq!(name, "remote");
+        assert_eq!(
+            source.local_root(),
+            Some(sub_root.as_path()),
+            "most-local root must win"
+        );
+        let raw = read_raw_from(&ctx, "remote", &source).expect("read_raw_from must succeed");
+        assert!(
+            raw.contains("sub remote"),
+            "body must come from the sub root"
+        );
+    }
+
+    /// `list_all_with_source` from a deep CWD returns skills from every ancestor
+    /// root, deduplicated by name (nearest-wins), each carrying its owning root.
+    #[test]
+    fn list_all_with_source_returns_union_with_nearest_wins() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let ancestor_root = project_dir.path().join(".creft");
+        write_skill_to_root(&ancestor_root, "shared", "ancestor shared");
+        write_skill_to_root(&ancestor_root, "ancestor-only", "ancestor only");
+
+        let sub_root = sub_dir.join(".creft");
+        write_skill_to_root(&sub_root, "shared", "sub shared");
+        write_skill_to_root(&sub_root, "sub-only", "sub only");
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        let items = list_all_with_source(&ctx).expect("list_all_with_source must succeed");
+        let by_name: std::collections::HashMap<&str, &SkillSource> =
+            items.iter().map(|(d, s)| (d.name.as_str(), s)).collect();
+
+        assert_eq!(
+            by_name.len(),
+            3,
+            "expected 3 unique skills: shared, ancestor-only, sub-only"
+        );
+
+        // "shared" resolves to the sub (nearest) root.
+        assert_eq!(
+            by_name["shared"].local_root(),
+            Some(sub_root.as_path()),
+            "shared skill must resolve to nearest (sub) root"
+        );
+        // "ancestor-only" resolves to the ancestor root.
+        assert_eq!(
+            by_name["ancestor-only"].local_root(),
+            Some(ancestor_root.as_path()),
+            "ancestor-only skill must resolve to ancestor root"
+        );
+        // "sub-only" resolves to the sub root.
+        assert_eq!(
+            by_name["sub-only"].local_root(),
+            Some(sub_root.as_path()),
+            "sub-only skill must resolve to sub root"
+        );
+    }
+
+    /// `derive_cwd` sets the subprocess CWD to the parent of the owning root,
+    /// not the parent of the nearest root.
+    #[test]
+    fn derive_cwd_uses_owning_root_not_nearest() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let ancestor_root = project_dir.path().join(".creft");
+        write_skill_to_root(&ancestor_root, "remote", "remote in ancestor");
+        // Empty sub root — resolution falls through to ancestor.
+        let sub_root = sub_dir.join(".creft");
+        std::fs::create_dir_all(sub_root.join("commands")).unwrap();
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        let args: Vec<String> = vec!["remote".to_string()];
+        let (_, _, source) = resolve_command(&ctx, &args).expect("must resolve");
+
+        // The owning root is the ancestor — derive_cwd must point there.
+        let expected_cwd = project_dir.path().to_path_buf();
+        let actual_cwd = ctx.derive_cwd(&source);
+        assert_eq!(
+            actual_cwd, expected_cwd,
+            "derive_cwd must use the ancestor root's parent, not the sub root's parent"
+        );
+    }
+
+    /// `local_root()` returns `Some` for local-scoped sources and `None` for global.
+    #[test]
+    fn skill_source_local_root_accessor_contract() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join(".creft");
+
+        let local_owned = SkillSource::owned_local(root.clone());
+        let global_owned = SkillSource::owned_global();
+        let local_pkg = SkillSource::package_local("pkg".to_string(), root.clone());
+        let global_pkg = SkillSource::package_global("pkg".to_string());
+        let plugin = SkillSource::Plugin("plug".to_string());
+
+        assert_eq!(local_owned.local_root(), Some(root.as_path()));
+        assert_eq!(global_owned.local_root(), None);
+        assert_eq!(local_pkg.local_root(), Some(root.as_path()));
+        assert_eq!(global_pkg.local_root(), None);
+        assert_eq!(plugin.local_root(), None);
+    }
+
+    /// `rebuild_all_indexes` on a two-root project writes one index file per
+    /// root (not collapsed into a single nearest-root file).
+    #[test]
+    fn rebuild_all_indexes_writes_per_root_index_files() {
+        use crate::search::store as search_store;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let ancestor_root = project_dir.path().join(".creft");
+        write_skill_dir(&ancestor_root, "deploy rollback", "rollback a deployment");
+
+        let sub_root = sub_dir.join(".creft");
+        write_skill_dir(&sub_root, "deploy push", "push a build");
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        search_store::rebuild_all_indexes(&ctx).expect("rebuild_all_indexes must succeed");
+
+        // Both roots must have a "deploy" index file.
+        let ancestor_idx = ancestor_root.join("indexes").join("deploy.idx");
+        let sub_idx = sub_root.join("indexes").join("deploy.idx");
+
+        assert!(
+            ancestor_idx.exists(),
+            "ancestor root must have its own deploy.idx at {ancestor_idx:?}"
+        );
+        assert!(
+            sub_idx.exists(),
+            "sub root must have its own deploy.idx at {sub_idx:?}"
+        );
+
+        // Each index file must contain only the skill that lives in that root.
+        let ancestor_index =
+            crate::search::index::SearchIndex::from_bytes(&std::fs::read(&ancestor_idx).unwrap())
+                .expect("ancestor index must be valid");
+        let sub_index =
+            crate::search::index::SearchIndex::from_bytes(&std::fs::read(&sub_idx).unwrap())
+                .expect("sub index must be valid");
+
+        assert_eq!(
+            ancestor_index.len(),
+            1,
+            "ancestor index must have exactly 1 skill"
+        );
+        assert_eq!(sub_index.len(), 1, "sub index must have exactly 1 skill");
+
+        let ancestor_results = ancestor_index.search("rollback");
+        assert_eq!(ancestor_results.len(), 1);
+        assert_eq!(ancestor_results[0].name, "deploy rollback");
+
+        let sub_results = sub_index.search("push");
+        assert_eq!(sub_results.len(), 1);
+        assert_eq!(sub_results[0].name, "deploy push");
+    }
+
+    /// Single-root project: `rebuild_all_indexes` produces the same set of
+    /// index files as before Stage 2 (regression guard).
+    #[test]
+    fn rebuild_all_indexes_single_root_unchanged() {
+        use crate::search::store as search_store;
+        use crate::search::store::index_path;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let local_root = project_dir.path().join(".creft");
+        write_skill_dir(&local_root, "deploy rollback", "Roll back a deploy");
+
+        let ctx = AppContext::for_test(
+            home_dir.path().to_path_buf(),
+            project_dir.path().to_path_buf(),
+        );
+
+        search_store::rebuild_all_indexes(&ctx).expect("rebuild_all_indexes must succeed");
+
+        let idx_path = index_path(
+            &ctx,
+            "deploy",
+            Scope::Local,
+            None,
+            Some(local_root.as_path()),
+        )
+        .unwrap();
+        assert!(
+            idx_path.exists(),
+            "single-root project must produce a local deploy.idx"
         );
     }
 }

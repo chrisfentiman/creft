@@ -564,7 +564,7 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
     let (_, _, source) = store::resolve_command(ctx, &args)?;
 
     match &source {
-        model::SkillSource::Package(_, _) => {
+        model::SkillSource::Package { .. } => {
             return Err(CreftError::Setup(
                 "cannot remove individual skills from an installed package -- use 'creft plugin uninstall <package>' instead".into(),
             ));
@@ -574,20 +574,28 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
                 "cannot remove individual skills from a plugin -- use 'creft plugin deactivate <plugin>' or 'creft plugin uninstall <plugin>' instead".into(),
             ));
         }
-        model::SkillSource::Owned(_) => {}
+        model::SkillSource::Owned { .. } => {}
     }
 
-    let scope = if global {
-        model::Scope::Global
+    if global {
+        store::remove_in(ctx, name, model::Scope::Global)?;
     } else {
-        match &source {
-            model::SkillSource::Owned(s) => *s,
-            model::SkillSource::Package(_, s) => *s,
-            // Unreachable: Plugin is rejected above, but required for exhaustiveness.
-            model::SkillSource::Plugin(_) => model::Scope::Global,
+        // Use the owning root from the resolver's authoritative answer. For local skills
+        // in a chain, this removes from wherever the skill actually lives — not necessarily
+        // the nearest root. For single-root projects, behavior is identical to before.
+        match source.local_root() {
+            Some(owning_root) => {
+                // Pin the context to the owning root so remove_in targets the right
+                // directory, then reuse the full remove_in logic (index rebuild, empty
+                // directory cleanup).
+                let pinned = store::pin_ctx_to_root(ctx, owning_root);
+                store::remove_in(&pinned, name, model::Scope::Local)?;
+            }
+            None => {
+                store::remove_in(ctx, name, model::Scope::Global)?;
+            }
         }
-    };
-    store::remove_in(ctx, name, scope)?;
+    }
     eprintln!("removed: {}", name);
     Ok(())
 }
@@ -873,8 +881,10 @@ fn check_body_no_name_key(body: &str) -> Result<(), CreftError> {
 /// it is actionable (users can uninstall or inspect package skills separately).
 pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -> String {
     match source {
-        model::SkillSource::Owned(_) => def.description.clone(),
-        model::SkillSource::Package(pkg, _) => format!("{}  (pkg: {pkg})", def.description),
+        model::SkillSource::Owned { .. } => def.description.clone(),
+        model::SkillSource::Package { name: pkg, .. } => {
+            format!("{}  (pkg: {pkg})", def.description)
+        }
         model::SkillSource::Plugin(name) => format!("{}  (plugin: {name})", def.description),
     }
 }
@@ -1534,7 +1544,7 @@ mod tests {
                     tags: vec![],
                     supports: vec![],
                 },
-                model::SkillSource::Owned(model::Scope::Local),
+                model::SkillSource::owned_global(),
             )
         };
 
