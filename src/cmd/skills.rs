@@ -835,6 +835,101 @@ mod tests {
         );
     }
 
+    // ── Stage 3: discover_fixtures_chain across roots ─────────────────────────
+
+    /// A fixture that lives only in an ancestor root is discovered when running
+    /// from a descendant CWD that has its own empty `.creft/commands/` directory.
+    ///
+    /// Spec test expectation: `creft skills test` discovers a fixture in an
+    /// ancestor root from a descendant CWD and runs it.
+    #[test]
+    fn discover_fixtures_chain_finds_fixture_in_ancestor_root() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let parent_tmp = tempfile::TempDir::new().unwrap();
+        let child_dir = parent_tmp.path().join("child");
+
+        // Ancestor root: has a fixture.
+        std::fs::create_dir_all(parent_tmp.path().join(".creft/commands")).unwrap();
+        let fixture_path = parent_tmp.path().join(".creft/commands/deploy.test.yaml");
+        std::fs::write(
+            &fixture_path,
+            "- name: runs-from-ancestor\n  when:\n    argv: [\"sh\", \"-c\", \"exit 0\"]\n  then:\n    exit_code: 0\n",
+        )
+        .unwrap();
+
+        // Descendant root: empty commands dir — no fixtures here.
+        std::fs::create_dir_all(child_dir.join(".creft/commands")).unwrap();
+
+        // Build context with CWD = child_dir, so local_roots has [child, parent].
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), child_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect chain of 2 roots"
+        );
+
+        let discovered = discover_fixtures_chain(&ctx, None).expect("discovery must succeed");
+
+        assert_eq!(
+            discovered.len(),
+            1,
+            "ancestor fixture must be discovered from the descendant CWD; got: {discovered:?}"
+        );
+        assert_eq!(
+            discovered[0].file_name().and_then(|n| n.to_str()),
+            Some("deploy.test.yaml"),
+            "discovered fixture must be deploy.test.yaml; got: {:?}",
+            discovered[0]
+        );
+    }
+
+    /// When two local roots define a fixture with the same skill basename, only
+    /// the nearest root's fixture is returned. The farther fixture is reported
+    /// on stderr in the format specified by the spec:
+    /// `note: shadowed fixture: <farther-path> (overridden by <nearer-path>)`.
+    ///
+    /// Spec test expectations: spec line 769, 899.
+    #[test]
+    fn discover_fixtures_chain_conflict_nearest_wins_and_farther_is_shadowed() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let parent_tmp = tempfile::TempDir::new().unwrap();
+        let child_dir = parent_tmp.path().join("child");
+
+        // Both roots define a fixture with the same basename ("remote").
+        std::fs::create_dir_all(parent_tmp.path().join(".creft/commands")).unwrap();
+        std::fs::create_dir_all(child_dir.join(".creft/commands")).unwrap();
+
+        let fixture_yaml = "- name: check\n  when:\n    argv: [\"sh\", \"-c\", \"exit 0\"]\n  then:\n    exit_code: 0\n";
+        let nearer_path = child_dir.join(".creft/commands/remote.test.yaml");
+        let farther_path = parent_tmp.path().join(".creft/commands/remote.test.yaml");
+        std::fs::write(&nearer_path, fixture_yaml).unwrap();
+        std::fs::write(&farther_path, fixture_yaml).unwrap();
+
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), child_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect chain of 2 roots"
+        );
+
+        let discovered = discover_fixtures_chain(&ctx, None).expect("discovery must succeed");
+
+        // Only one fixture should be returned (nearest wins).
+        assert_eq!(
+            discovered.len(),
+            1,
+            "only the nearest fixture must be returned when two roots conflict; got: {discovered:?}"
+        );
+        // The returned fixture must be from the nearest (child) root, not the parent.
+        assert_eq!(
+            discovered[0], nearer_path,
+            "nearest fixture must win over farther; expected {:?}, got {:?}",
+            nearer_path, discovered[0]
+        );
+        // Note: the shadow note is emitted to stderr via eprintln! — this is verified
+        // by the integration test `cmd_skills_test_chain_shadow_note_in_stderr`.
+    }
+
     #[test]
     fn cmd_skills_test_skill_exact_does_not_match_substring_in_other_basename() {
         let (_home, project, ctx) = project_with_commands_dir();

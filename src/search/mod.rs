@@ -94,10 +94,13 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
         }
     };
 
-    // Local roots nearest-first: nearest local entry wins on namespace collision.
-    // Global last: the global root provides _builtin.idx and any namespace not
-    // covered by a local root; local namespaces shadow the corresponding global
-    // index via the seen_stems dedup above.
+    // Local roots nearest-first, global last. This ordering is required for
+    // nearest-wins semantics under first-wins dedup: the first occurrence of a
+    // namespace stem in `seen_stems` is kept, so loading local roots before the
+    // global root ensures a local namespace shadows the corresponding global index,
+    // not the other way around. The spec text describing the order as
+    // "[Global, local-nearest, ...]" was incorrect — that ordering would produce
+    // global-wins, the opposite of the intended behavior.
     for local_root in ctx.local_roots() {
         let local_dir = local_root.join("indexes");
         load_dir(&local_dir);
@@ -542,6 +545,79 @@ mod tests {
         assert!(
             results.iter().any(|r| r.name == "sort bravo"),
             "sort bravo must appear in fuzzy results"
+        );
+    }
+
+    // ── Stage 3: chain iteration with nearest-wins dedup ──────────────────────
+
+    /// `search_all_indexes` with two local roots that both define an index for
+    /// the same namespace produces one result per skill name (no duplicate hits),
+    /// and the snippet content comes from the nearest root's index.
+    ///
+    /// Spec test expectation: spec line 778.
+    #[test]
+    fn search_all_indexes_local_chain_nearest_root_wins() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let parent_tmp = tempfile::TempDir::new().unwrap();
+        let child_dir = parent_tmp.path().join("child");
+
+        // Set up two local roots in the filesystem.
+        std::fs::create_dir_all(parent_tmp.path().join(".creft/commands")).unwrap();
+        std::fs::create_dir_all(child_dir.join(".creft/commands")).unwrap();
+
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), child_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect chain of 2 local roots"
+        );
+
+        // Write a "deploy.idx" to the NEAREST (child) root with one skill entry
+        // whose body text contains "rollback".
+        let nearest_root = ctx.local_roots()[0].clone();
+        let nearest_idx = SearchIndex::build(&[(
+            "deploy rollback",
+            "Roll back from nearest",
+            "rollback from nearest root",
+        )]);
+        let nearest_index_dir = nearest_root.join("indexes");
+        std::fs::create_dir_all(&nearest_index_dir).unwrap();
+        std::fs::write(nearest_index_dir.join("deploy.idx"), nearest_idx.to_bytes()).unwrap();
+
+        // Write a different "deploy.idx" to the FARTHEST (parent) root whose
+        // entry text also matches "rollback" but with different content. If
+        // both were loaded, the result count would be 2 — dedup prevents this.
+        let farthest_root = ctx.local_roots()[1].clone();
+        let farthest_idx = SearchIndex::build(&[(
+            "deploy rollback",
+            "Roll back from farthest",
+            "rollback from farthest root",
+        )]);
+        let farthest_index_dir = farthest_root.join("indexes");
+        std::fs::create_dir_all(&farthest_index_dir).unwrap();
+        std::fs::write(
+            farthest_index_dir.join("deploy.idx"),
+            farthest_idx.to_bytes(),
+        )
+        .unwrap();
+
+        let results = search_all_indexes(&ctx, "rollback");
+
+        // Exactly one result: nearest-wins dedup collapses the two indexes.
+        assert_eq!(
+            results.len(),
+            1,
+            "nearest-wins dedup must produce exactly one result for the same namespace; got {} results",
+            results.len()
+        );
+        // The result must come from the nearest root's index (description differs).
+        assert_eq!(results[0].name, "deploy rollback");
+        // Description from nearest index.
+        assert_eq!(
+            results[0].description, "Roll back from nearest",
+            "description must come from the nearest root's index, not the farthest; \
+             got: {:?}",
+            results[0].description
         );
     }
 }

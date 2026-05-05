@@ -2170,6 +2170,84 @@ mod tests {
         settings.activated.get(plugin).cloned()
     }
 
+    /// Read the local-scope activation entry for `plugin` from a pinned context.
+    fn local_activated_entry(
+        ctx: &AppContext,
+        root: &std::path::Path,
+        plugin: &str,
+    ) -> Option<ActivationEntry> {
+        use crate::store::pin_ctx_to_root;
+        let pinned = pin_ctx_to_root(ctx, root);
+        let settings = load_settings(&pinned, Scope::Local).unwrap();
+        settings.activated.get(plugin).cloned()
+    }
+
+    /// Write activation settings JSON for a local root directly to disk.
+    ///
+    /// Used by tests that need to pre-populate a local scope with an activation
+    /// without going through the activate command (which would require a real
+    /// installed plugin directory).
+    fn write_local_settings(root: &std::path::Path, json: &str) {
+        let plugins_dir = root.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("settings.json"), json).unwrap();
+    }
+
+    /// `deactivate` with `global_only = false` clears the activation from every
+    /// local root in the chain, not just the nearest one.
+    ///
+    /// Spec test expectation: `creft plugin deactivate <name>` clears entries in
+    /// every local root + global (spec line 770).
+    #[test]
+    fn deactivate_clears_activation_in_both_local_roots_and_global() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let parent_tmp = tempfile::TempDir::new().unwrap();
+        let child_dir = parent_tmp.path().join("child");
+
+        // Set up two local .creft/ directories.
+        std::fs::create_dir_all(parent_tmp.path().join(".creft/commands")).unwrap();
+        std::fs::create_dir_all(child_dir.join(".creft/commands")).unwrap();
+
+        // Write activation settings into both local roots and global.
+        // ActivationEntry is untagged: All(true) serializes as JSON `true`.
+        let activation_json = r#"{"activated":{"my-tools":true}}"#;
+        write_local_settings(&child_dir.join(".creft"), activation_json);
+        write_local_settings(&parent_tmp.path().join(".creft"), activation_json);
+        // Global root is home_tmp/.creft (global_root() = home_dir.join(".creft")).
+        write_local_settings(&home_tmp.path().join(".creft"), activation_json);
+
+        // Build a context that walks the filesystem: CWD = child_dir.
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), child_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect chain of 2 local roots"
+        );
+
+        // Deactivate without --global: must clear all local roots AND global.
+        deactivate(&ctx, "my-tools", false).expect("deactivate must succeed");
+
+        // Nearest local root must have the activation removed.
+        let nearest = child_dir.join(".creft");
+        assert!(
+            local_activated_entry(&ctx, &nearest, "my-tools").is_none(),
+            "deactivate must clear activation in nearest local root"
+        );
+
+        // Farthest local root must also have the activation removed.
+        let farthest = parent_tmp.path().join(".creft");
+        assert!(
+            local_activated_entry(&ctx, &farthest, "my-tools").is_none(),
+            "deactivate must clear activation in farthest local root"
+        );
+
+        // Global scope must also have the activation removed.
+        assert!(
+            activated_entry(&ctx, "my-tools").is_none(),
+            "deactivate must clear activation in global scope"
+        );
+    }
+
     #[test]
     fn activate_bare_plugin_name_activates_all_commands() {
         let dir = tempfile::TempDir::new().unwrap();

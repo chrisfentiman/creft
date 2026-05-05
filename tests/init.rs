@@ -84,6 +84,46 @@ fn test_init_warns_parent() {
     );
 }
 
+/// `creft init` from a CWD with multiple ancestor `.creft/` directories prints
+/// the multi-ancestor message: "ancestor .creft/ directories exist at:" followed
+/// by each path, then "this .creft/ will overlay them; closer scopes win on conflicts".
+///
+/// Spec test expectation: spec line 777.
+#[test]
+fn test_init_warns_multiple_parents() {
+    let home = creft_env();
+
+    // Create two ancestor roots: grandparent and parent.
+    let grandparent = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(grandparent.path().join(".creft").join("commands")).unwrap();
+
+    let parent = grandparent.path().join("parent");
+    std::fs::create_dir_all(parent.join(".creft").join("commands")).unwrap();
+
+    // Child directory has neither `.creft/` yet — this is where init runs.
+    let child = parent.join("child");
+    std::fs::create_dir(&child).unwrap();
+
+    Command::cargo_bin("creft")
+        .unwrap()
+        .env("CREFT_HOME", home.path())
+        .current_dir(&child)
+        .args(["init"])
+        .assert()
+        .success()
+        // Multi-ancestor header (plural form).
+        .stderr(predicate::str::contains(
+            "ancestor .creft/ directories exist at:",
+        ))
+        // Overlay message (shared between single- and multi-ancestor paths).
+        .stderr(predicate::str::contains("overlay"));
+
+    assert!(
+        child.join(".creft").join("commands").is_dir(),
+        ".creft/commands/ should have been created in the child directory"
+    );
+}
+
 /// `creft init` in a clean directory does NOT warn about parent `.creft/`.
 #[test]
 fn test_init_no_warn_without_parent() {

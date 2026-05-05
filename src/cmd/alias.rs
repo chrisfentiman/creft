@@ -169,7 +169,9 @@ fn render_local_tag(ctx: &AppContext, root: &std::path::Path) -> String {
 }
 
 /// Produce a simple relative path from `from_dir` to `to`. Uses `..` segments.
-/// Falls back to the absolute path when the distance is more than 3 levels.
+/// Falls back to the absolute path when the relative form would traverse more
+/// than one level upward, as specified: readability degrades beyond a single
+/// `..` component.
 fn pathdiff_simple(from_dir: &std::path::Path, to: &std::path::Path) -> String {
     // Find the longest common prefix.
     let from_parts: Vec<_> = from_dir.components().collect();
@@ -180,7 +182,7 @@ fn pathdiff_simple(from_dir: &std::path::Path, to: &std::path::Path) -> String {
         .take_while(|(a, b)| a == b)
         .count();
     let up = from_parts.len() - common;
-    if up > 3 {
+    if up > 1 {
         return to.to_string_lossy().into_owned();
     }
     let mut rel = std::path::PathBuf::new();
@@ -537,8 +539,6 @@ mod tests {
 
     #[test]
     fn cmd_alias_remove_nearest_first_removes_from_nearest_root() {
-        use crate::store::pin_ctx_to_root;
-
         let base = tempfile::tempdir().unwrap();
         let project_dir = base.path().join("project");
         let sub_dir = project_dir.join("sub");
@@ -556,9 +556,6 @@ mod tests {
         // Write `bl → backlog` in both local roots.
         let alias_content = b"- from: bl\n  to: backlog\n";
         for root in ctx.local_roots() {
-            let pinned = pin_ctx_to_root(&ctx, root);
-            let file = crate::aliases::load_for_scope(&pinned, crate::model::Scope::Local).unwrap();
-            drop(file); // ensure file is created
             std::fs::write(root.join("aliases.yaml"), alias_content).unwrap();
         }
 
