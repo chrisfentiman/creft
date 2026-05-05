@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/chrisfentiman/creft/compare/creft-v0.4.2...creft-v0.4.3) (2026-05-05)
+
+
+### Bug Fixes
+
+* **install:** use temp+rename to avoid macOS SIGKILL on upgrade ([#87](https://github.com/chrisfentiman/creft/issues/87)) ([0ce1edc](https://github.com/chrisfentiman/creft/commit/0ce1edc18fb18b60cba865a2fb631a0534a79e8d))
+
 ## [0.4.2](https://github.com/chrisfentiman/creft/compare/creft-v0.4.1...creft-v0.4.2) (2026-05-05)
 
 
