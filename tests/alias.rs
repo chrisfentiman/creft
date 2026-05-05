@@ -763,6 +763,66 @@ fn alias_add_docs_prints_nonempty_output() {
     );
 }
 
+// ── creft alias list: multi-root chain tagging ───────────────────────────────
+
+/// `creft alias list` from a CWD with two ancestor `.creft/` directories tags
+/// each local alias with its root path relative to CWD (e.g. `[local: .creft]`
+/// and `[local: ../.creft]`), while the global alias uses the `[global]` tag.
+///
+/// Single-root projects continue to use the legacy `[local]` form (verified by
+/// `alias_list_shows_sorted_aliases_with_scope_tags`). This test covers the
+/// chain-length-2 case added in Stage 3.
+#[test]
+fn alias_list_multi_root_prints_per_root_tags() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let parent_dir = tempfile::tempdir().unwrap();
+    let child_dir = parent_dir.path().join("child");
+
+    // Set up two local roots: parent and child.
+    std::fs::create_dir_all(parent_dir.path().join(".creft").join("commands")).unwrap();
+    std::fs::create_dir_all(child_dir.join(".creft").join("commands")).unwrap();
+
+    // Write an alias in each local root.
+    std::fs::write(
+        child_dir.join(".creft").join("aliases.yaml"),
+        "- from: deploy\n  to: ship\n",
+    )
+    .unwrap();
+    std::fs::write(
+        parent_dir.path().join(".creft").join("aliases.yaml"),
+        "- from: bl\n  to: backlog\n",
+    )
+    .unwrap();
+
+    let out = assert_cmd::Command::cargo_bin("creft")
+        .unwrap()
+        .env("HOME", home_dir.path())
+        .env_remove("CREFT_HOME")
+        .current_dir(&child_dir)
+        .args(["alias", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+
+    // The child-root alias must carry a tag that starts with "local: ".
+    assert!(
+        text.contains("[local: "),
+        "multi-root list must include per-root 'local: <path>' tags; got:\n{text}"
+    );
+    // Both aliases from both local roots must appear.
+    assert!(
+        text.contains("deploy → ship"),
+        "child-root alias 'deploy → ship' must appear in list; got:\n{text}"
+    );
+    assert!(
+        text.contains("bl → backlog"),
+        "parent-root alias 'bl → backlog' must appear in list; got:\n{text}"
+    );
+}
+
 // ── malformed aliases.yaml ────────────────────────────────────────────────────
 
 /// A malformed `aliases.yaml` in the global scope causes `creft alias list`

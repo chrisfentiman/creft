@@ -9,7 +9,7 @@ use yansi::Paint;
 use crate::error::CreftError;
 use crate::frontmatter;
 use crate::markdown;
-use crate::model::{AppContext, CodeBlock, SkillSource};
+use crate::model::{AppContext, CodeBlock, Scope, SkillSource};
 use crate::registry;
 use crate::settings::Settings;
 use crate::shell;
@@ -248,27 +248,51 @@ fn check_global_dir(ctx: &AppContext) -> CheckResult {
     }
 }
 
-/// Report whether a local `.creft/` directory was found.
-fn check_local_dir(ctx: &AppContext) -> CheckResult {
-    match ctx.find_local_root() {
-        Some(p) => CheckResult {
-            label: ".creft/".to_string(),
-            status: CheckStatus::Info,
-            detail: p.to_string_lossy().to_string(),
-        },
-        None => CheckResult {
+/// Report the local `.creft/` root chain.
+///
+/// With one root, emits one Info line. With multiple roots, emits one line per
+/// root labeled "local root (nearest)", "local root", "local root (farthest)"
+/// with their paths. When no local root exists, emits one Info line saying so.
+fn check_local_dir(ctx: &AppContext) -> Vec<CheckResult> {
+    let roots = ctx.local_roots();
+    if roots.is_empty() {
+        return vec![CheckResult {
             label: ".creft/".to_string(),
             status: CheckStatus::Info,
             detail: "no local .creft/ found".to_string(),
-        },
+        }];
     }
+    if roots.len() == 1 {
+        return vec![CheckResult {
+            label: ".creft/".to_string(),
+            status: CheckStatus::Info,
+            detail: roots[0].to_string_lossy().to_string(),
+        }];
+    }
+    let last = roots.len() - 1;
+    roots
+        .iter()
+        .enumerate()
+        .map(|(i, root)| {
+            let label = if i == 0 {
+                "local root (nearest)".to_string()
+            } else if i == last {
+                "local root (farthest)".to_string()
+            } else {
+                "local root".to_string()
+            };
+            CheckResult {
+                label,
+                status: CheckStatus::Info,
+                detail: root.to_string_lossy().to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Check installed packages from both scopes. Returns one result per broken
 /// manifest plus a summary result.
 fn check_packages(ctx: &AppContext) -> Vec<CheckResult> {
-    use crate::model::Scope;
-
     let mut results: Vec<CheckResult> = Vec::new();
 
     let mut total = 0usize;
@@ -354,120 +378,191 @@ fn scope_name(scope: crate::model::Scope) -> &'static str {
 
 /// Check for flat files with spaces in filename that should be directories.
 ///
-/// Scans the commands directory (both local and global) for `.md` files
+/// Scans the commands directory (every local root and global) for `.md` files
 /// whose names contain spaces. These files are unreachable by the resolver
-/// and should be migrated to directory structure.
+/// and should be migrated to directory structure. Each warning includes the
+/// root path so the user can locate the offending file.
 pub(crate) fn check_flat_files(ctx: &AppContext) -> Vec<CheckResult> {
-    use crate::model::Scope;
+    use crate::store::pin_ctx_to_root;
 
     let mut results: Vec<CheckResult> = Vec::new();
 
-    let scopes: Vec<Scope> = if ctx.find_local_root().is_some() {
-        vec![Scope::Local, Scope::Global]
-    } else {
-        vec![Scope::Global]
-    };
-
-    for scope in scopes {
-        let commands_dir = match ctx.commands_dir_for(scope) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !commands_dir.exists() {
-            continue;
-        }
-        let entries = match std::fs::read_dir(&commands_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if stem.contains(' ') {
-                // Convert "a b c" to the expected directory path "a/b/c.md".
-                let dir_path: String = {
-                    let parts: Vec<&str> = stem.split(' ').collect();
-                    format!(
-                        "{}/{}.md",
-                        parts[..parts.len() - 1].join("/"),
-                        parts.last().unwrap_or(&stem.as_str())
-                    )
-                };
-                let flat_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| format!("{stem}.md"));
-                results.push(CheckResult {
-                    label: "flat file".to_string(),
-                    status: CheckStatus::Fail,
-                    detail: format!(
-                        "\"{flat_name}\" should be {dir_path} -- run the command once to auto-migrate"
-                    ),
-                });
-            }
-        }
+    // Scan every local root.
+    for root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, root);
+        scan_flat_files_in(&pinned, Scope::Local, &mut results);
     }
+    // Scan global.
+    scan_flat_files_in(ctx, Scope::Global, &mut results);
 
     results
+}
+
+/// Scan one scope's commands directory for flat files and append any findings.
+fn scan_flat_files_in(ctx: &AppContext, scope: Scope, results: &mut Vec<CheckResult>) {
+    let commands_dir = match ctx.commands_dir_for(scope) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !commands_dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&commands_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if stem.contains(' ') {
+            // Convert "a b c" to the expected directory path "a/b/c.md".
+            let dir_path: String = {
+                let parts: Vec<&str> = stem.split(' ').collect();
+                format!(
+                    "{}/{}.md",
+                    parts[..parts.len() - 1].join("/"),
+                    parts.last().unwrap_or(&stem.as_str())
+                )
+            };
+            let flat_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("{stem}.md"));
+            results.push(CheckResult {
+                label: "flat file".to_string(),
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "\"{flat_name}\" in {} should be {dir_path} -- run the command once to auto-migrate",
+                    commands_dir.display()
+                ),
+            });
+        }
+    }
 }
 
 // ── Global check ──────────────────────────────────────────────────────────────
 
 /// Run all global health checks and return the results.
 /// Check activation settings for stale entries (activated plugins that no longer exist).
+///
+/// Scans every local root independently, then global. Each stale activation
+/// is reported with the containing root path so users can locate the offending file.
 fn check_activations(ctx: &AppContext) -> Vec<CheckResult> {
-    use crate::model::Scope;
+    use crate::store::pin_ctx_to_root;
 
     let mut results = Vec::new();
 
-    let scopes = {
-        let mut v = vec![Scope::Global];
-        if ctx.find_local_root().is_some() {
-            v.push(Scope::Local);
+    // Check each local root independently.
+    for root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, root);
+        check_activations_in(&pinned, Scope::Local, &mut results);
+    }
+    // Always check global.
+    check_activations_in(ctx, Scope::Global, &mut results);
+
+    results
+}
+
+/// Check one scope's activation settings and append stale-activation findings.
+fn check_activations_in(ctx: &AppContext, scope: Scope, results: &mut Vec<CheckResult>) {
+    let settings = match registry::load_settings(ctx, scope) {
+        Ok(s) => s,
+        Err(e) => {
+            results.push(CheckResult {
+                label: format!("plugin activations ({})", scope_name(scope)),
+                status: CheckStatus::Fail,
+                detail: format!("could not read settings.json: {}", e),
+            });
+            return;
         }
-        v
     };
 
-    for scope in scopes {
-        let settings = match registry::load_settings(ctx, scope) {
-            Ok(s) => s,
-            Err(e) => {
-                results.push(CheckResult {
-                    label: format!("plugin activations ({})", scope_name(scope)),
-                    status: CheckStatus::Fail,
-                    detail: format!("could not read settings.json: {}", e),
-                });
-                continue;
-            }
+    for plugin_name in settings.activated.keys() {
+        let plugins_dir = match ctx.plugins_dir() {
+            Ok(d) => d,
+            Err(_) => continue,
         };
-
-        for plugin_name in settings.activated.keys() {
-            let plugins_dir = match ctx.plugins_dir() {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let plugin_dir = plugins_dir.join(plugin_name);
-            if !plugin_dir.is_dir() {
-                results.push(CheckResult {
-                    label: format!("plugin activation ({}) {}", scope_name(scope), plugin_name),
-                    status: CheckStatus::Warn,
-                    detail: format!(
-                        "stale activation: plugin '{}' is not installed. \
-                         Run 'creft plugin deactivate {}' to clean up.",
-                        plugin_name, plugin_name
-                    ),
-                });
-            }
+        let plugin_dir = plugins_dir.join(plugin_name);
+        if !plugin_dir.is_dir() {
+            results.push(CheckResult {
+                label: format!("plugin activation ({}) {}", scope_name(scope), plugin_name),
+                status: CheckStatus::Warn,
+                detail: format!(
+                    "stale activation: plugin '{}' is not installed. \
+                     Run 'creft plugin deactivate {}' to clean up.",
+                    plugin_name, plugin_name
+                ),
+            });
         }
+    }
+}
+
+/// Detect skill names that exist in more than one local root and report
+/// the winner and shadowed paths.
+///
+/// Calls `store::list_per_root_with_source` (intra-local-only by contract),
+/// builds a name → roots map, and emits one Info-level result per name whose
+/// value has more than one local root. The first path (nearest, by construction
+/// of the input) is the winner; the rest are shadowed.
+///
+/// Local-shadows-global is the documented, intentional precedence rule and is
+/// NOT reported by this check.
+pub(crate) fn check_shadowed_skills(ctx: &AppContext) -> Vec<CheckResult> {
+    let per_root = match store::list_per_root_with_source(ctx) {
+        Ok(pr) => pr,
+        Err(_) => return Vec::new(),
+    };
+
+    // Build a map from skill name to the list of local roots that define it,
+    // in nearest-first order (which is the order list_per_root_with_source returns).
+    let mut name_to_roots: std::collections::HashMap<String, Vec<std::path::PathBuf>> =
+        std::collections::HashMap::new();
+    for (root, skills) in &per_root {
+        for (def, _) in skills {
+            name_to_roots
+                .entry(def.name.clone())
+                .or_default()
+                .push(root.clone());
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut shadowed_names: Vec<String> = name_to_roots
+        .iter()
+        .filter(|(_, roots)| roots.len() > 1)
+        .map(|(name, _)| name.clone())
+        .collect();
+    shadowed_names.sort();
+
+    for name in shadowed_names {
+        let roots = &name_to_roots[&name];
+        let winner = &roots[0];
+        let detail = {
+            let mut s = format!(
+                "skill '{}' is defined in {} local roots — {} wins",
+                name,
+                roots.len(),
+                winner.display()
+            );
+            for shadowed in &roots[1..] {
+                s.push_str(&format!("; shadowed: {}", shadowed.display()));
+            }
+            s
+        };
+        results.push(CheckResult {
+            label: format!("shadowed skill: {}", name),
+            status: CheckStatus::Info,
+            detail,
+        });
     }
 
     results
@@ -514,10 +609,11 @@ pub(crate) fn run_global_check(ctx: &AppContext) -> Vec<CheckResult> {
     }
 
     results.push(check_global_dir(ctx));
-    results.push(check_local_dir(ctx));
+    results.extend(check_local_dir(ctx));
     results.extend(check_packages(ctx));
     results.extend(check_flat_files(ctx));
     results.extend(check_activations(ctx));
+    results.extend(check_shadowed_skills(ctx));
 
     // Load the settings shell preference for doctor display. A corrupt or
     // missing settings file is treated as no preference — the check is
@@ -1218,8 +1314,12 @@ pub(crate) fn report_has_failures(report: &DoctorReport) -> bool {
 
 fn describe_source(source: &SkillSource) -> String {
     match source {
-        SkillSource::Owned(scope) => format!("{} owned", scope_name(*scope)),
-        SkillSource::Package(pkg, scope) => format!("package {} ({})", pkg, scope_name(*scope)),
+        SkillSource::Owned { scope, .. } => format!("{} owned", scope_name(*scope)),
+        SkillSource::Package {
+            name: pkg, scope, ..
+        } => {
+            format!("package {} ({})", pkg, scope_name(*scope))
+        }
         SkillSource::Plugin(name) => format!("plugin {}", name),
     }
 }
@@ -1590,6 +1690,7 @@ mod tests {
             home_dir: None,
             creft_home: None,
             cwd: std::path::PathBuf::from("/tmp"),
+            local_roots: Vec::new(),
         };
         let result = check_global_dir(&ctx);
         assert_eq!(result.status, CheckStatus::Fail);
@@ -1628,9 +1729,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx =
             crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        let result = check_local_dir(&ctx);
-        assert_eq!(result.status, CheckStatus::Info);
-        assert!(result.detail.contains("no local .creft/ found"));
+        let results = check_local_dir(&ctx);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, CheckStatus::Info);
+        assert!(results[0].detail.contains("no local .creft/ found"));
     }
 
     #[test]
@@ -1640,10 +1742,11 @@ mod tests {
         std::fs::create_dir(&creft_dir).unwrap();
         let ctx =
             crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        let result = check_local_dir(&ctx);
-        assert_eq!(result.status, CheckStatus::Info);
+        let results = check_local_dir(&ctx);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, CheckStatus::Info);
         // detail should be the path to .creft/
-        assert!(result.detail.contains(".creft"));
+        assert!(results[0].detail.contains(".creft"));
     }
 
     // ── render_global ─────────────────────────────────────────────────────────
@@ -1919,22 +2022,23 @@ mod tests {
 
     #[test]
     fn test_describe_source_owned_global() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Owned(Scope::Global));
+        use crate::model::SkillSource;
+        let s = describe_source(&SkillSource::owned_global());
         assert_eq!(s, "global owned");
     }
 
     #[test]
     fn test_describe_source_owned_local() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Owned(Scope::Local));
+        use crate::model::SkillSource;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = describe_source(&SkillSource::owned_local(tmp.path().to_path_buf()));
         assert_eq!(s, "local owned");
     }
 
     #[test]
     fn test_describe_source_package() {
-        use crate::model::{Scope, SkillSource};
-        let s = describe_source(&SkillSource::Package("mypkg".into(), Scope::Global));
+        use crate::model::SkillSource;
+        let s = describe_source(&SkillSource::package_global("mypkg".into()));
         assert_eq!(s, "package mypkg (global)");
     }
 
@@ -2118,9 +2222,17 @@ mod tests {
         std::fs::create_dir_all(&creft_dir).unwrap();
         let skill_path = creft_dir.join("test-skill.md");
         std::fs::write(&skill_path, markdown).unwrap();
-        let ctx =
-            crate::model::AppContext::for_test(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        let source = crate::model::SkillSource::Owned(crate::model::Scope::Local);
+        // Use a separate home_dir tempdir so the exclusion filter does not strip
+        // the project .creft/ (which would happen when home_dir == cwd).
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+        );
+        // The .creft/ directory is staged above — for_test walks the filesystem and
+        // populates local_roots. Use the nearest local root as the owning root.
+        let local_root = ctx.nearest_local_root().unwrap().to_path_buf();
+        let source = crate::model::SkillSource::owned_local(local_root);
         (tmp, ctx, "test-skill".to_string(), source)
     }
 
@@ -2306,6 +2418,273 @@ mod tests {
             !labels.contains(&"zsh"),
             "zsh should not appear for a python block, got: {:?}",
             labels
+        );
+    }
+
+    // ── Stage 3: check_local_dir chain output ─────────────────────────────────
+
+    #[test]
+    fn check_local_dir_no_local_root_returns_single_info() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let cwd_tmp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            cwd_tmp.path().to_path_buf(),
+        );
+        let results = check_local_dir(&ctx);
+        assert_eq!(results.len(), 1, "no local root → single result");
+        assert_eq!(results[0].status, CheckStatus::Info);
+        assert!(
+            results[0].detail.contains("no local"),
+            "detail should say 'no local'"
+        );
+    }
+
+    #[test]
+    fn check_local_dir_single_root_uses_simple_label() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".creft")).unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+        );
+        let results = check_local_dir(&ctx);
+        assert_eq!(results.len(), 1, "single root → single result");
+        assert_eq!(results[0].label, ".creft/");
+        assert_eq!(results[0].status, CheckStatus::Info);
+    }
+
+    #[test]
+    fn check_local_dir_two_roots_labels_nearest_and_farthest() {
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_local_dir(&ctx);
+        assert_eq!(results.len(), 2, "two roots → two results");
+        assert!(
+            results[0].label.contains("nearest"),
+            "first result must be labeled nearest"
+        );
+        assert!(
+            results[1].label.contains("farthest"),
+            "last result must be labeled farthest"
+        );
+    }
+
+    // ── Stage 3: check_shadowed_skills ────────────────────────────────────────
+
+    #[test]
+    fn check_shadowed_skills_no_roots_returns_empty() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let cwd_tmp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            cwd_tmp.path().to_path_buf(),
+        );
+        let results = check_shadowed_skills(&ctx);
+        assert!(results.is_empty(), "no local roots → no shadow results");
+    }
+
+    #[test]
+    fn check_shadowed_skills_single_root_returns_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let commands_dir = tmp.path().join(".creft/commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("remote.md"),
+            b"---\nname: remote\ndescription: remote\n---\nhello\n",
+        )
+        .unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+        );
+        let results = check_shadowed_skills(&ctx);
+        assert!(results.is_empty(), "single root → no intra-local shadowing");
+    }
+
+    #[test]
+    fn check_shadowed_skills_two_roots_same_skill_name_emits_info() {
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        // Both roots define `remote.md`.
+        let project_commands = project_dir.join(".creft/commands");
+        let sub_commands = sub_dir.join(".creft/commands");
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::create_dir_all(&sub_commands).unwrap();
+        std::fs::write(
+            project_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: project remote\n---\nhello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sub_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: sub remote\n---\nhello\n",
+        )
+        .unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_shadowed_skills(&ctx);
+        assert_eq!(
+            results.len(),
+            1,
+            "one skill name in two roots → one shadow result"
+        );
+        assert_eq!(results[0].status, CheckStatus::Info);
+        assert!(
+            results[0].label.contains("remote"),
+            "label must name the shadowed skill"
+        );
+        // Winner is the nearest root (sub_dir).
+        assert!(
+            results[0].detail.contains("sub"),
+            "detail must name the winning (nearest) root; got: {}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn check_shadowed_skills_different_names_in_two_roots_returns_empty() {
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let project_commands = project_dir.join(".creft/commands");
+        let sub_commands = sub_dir.join(".creft/commands");
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::create_dir_all(&sub_commands).unwrap();
+        std::fs::write(
+            project_commands.join("deploy.md"),
+            b"---\nname: deploy\ndescription: deploy\n---\nhello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sub_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: remote\n---\nhello\n",
+        )
+        .unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        let results = check_shadowed_skills(&ctx);
+        assert!(results.is_empty(), "distinct skill names → no shadowing");
+    }
+
+    // ── Stage 3: check_flat_files chain scan ──────────────────────────────────
+
+    #[test]
+    fn check_flat_files_reports_flat_file_in_farther_local_root() {
+        // Two local roots along an ancestor chain. A flat file (`a b.md`) lives
+        // only in the farther root. With CWD inside the nearer root, the chain
+        // walk must still surface the farther root's flat file.
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+
+        // Nearer root: has a commands dir but no flat files.
+        let sub_commands = sub_dir.join(".creft/commands");
+        std::fs::create_dir_all(&sub_commands).unwrap();
+
+        // Farther root: has a flat file `a b.md` whose name contains a space.
+        let project_commands = project_dir.join(".creft/commands");
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::write(
+            project_commands.join("a b.md"),
+            b"---\nname: a b\ndescription: flat\n---\nhello\n",
+        )
+        .unwrap();
+
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_flat_files(&ctx);
+        assert!(
+            !results.is_empty(),
+            "flat file in farther root must produce at least one Fail result"
+        );
+        let fail = results
+            .iter()
+            .find(|r| r.status == CheckStatus::Fail)
+            .unwrap_or_else(|| panic!("expected a Fail result, got: {:?}", results));
+        assert!(
+            fail.detail.contains(project_dir.to_str().unwrap()),
+            "detail must reference the farther root path; got: {}",
+            fail.detail
+        );
+    }
+
+    // ── Stage 3: check_activations chain scan ─────────────────────────────────
+
+    #[test]
+    fn check_activations_reports_stale_activation_in_farther_local_root() {
+        // Two local roots along an ancestor chain. The farther root's settings.json
+        // references a plugin that is not installed anywhere. With CWD inside the
+        // nearer root, the chain walk must still surface the stale activation.
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+
+        // Nearer root: has a .creft dir with no activation settings.
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+
+        // Farther root: has a settings.json referencing an uninstalled plugin.
+        let far_plugins_dir = project_dir.join(".creft/plugins");
+        std::fs::create_dir_all(&far_plugins_dir).unwrap();
+        std::fs::write(
+            far_plugins_dir.join("settings.json"),
+            br#"{"activated":{"ghost-plugin":true}}"#,
+        )
+        .unwrap();
+
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_activations(&ctx);
+        let warn = results
+            .iter()
+            .find(|r| r.status == CheckStatus::Warn && r.label.contains("ghost-plugin"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Warn result naming ghost-plugin, got: {:?}",
+                    results
+                )
+            });
+        assert!(
+            warn.label.contains("ghost-plugin"),
+            "label must name the stale plugin; got: {}",
+            warn.label
         );
     }
 }

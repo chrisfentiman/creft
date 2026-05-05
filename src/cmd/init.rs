@@ -10,12 +10,24 @@ pub fn cmd_init(ctx: &AppContext) -> Result<(), CreftError> {
         return Ok(());
     }
 
-    if let Some(parent_root) = store::find_parent_local_root(&cwd) {
-        eprintln!(
-            "note: parent directory already has local skills at {}",
-            parent_root.display()
-        );
-        eprintln!("creating nested .creft/ in current directory anyway");
+    // Explain how the new root interacts with any ancestor roots in the chain.
+    let ancestor_roots = store::walk_parent_local_roots(&cwd);
+    if !ancestor_roots.is_empty() {
+        if ancestor_roots.len() == 1 {
+            eprintln!(
+                "note: ancestor .creft/ exists at {}",
+                ancestor_roots[0].display()
+            );
+            eprintln!(
+                "this .creft/ will overlay the existing root; closer scopes win on conflicts"
+            );
+        } else {
+            eprintln!("note: ancestor .creft/ directories exist at:");
+            for root in &ancestor_roots {
+                eprintln!("  {}", root.display());
+            }
+            eprintln!("this .creft/ will overlay them; closer scopes win on conflicts");
+        }
     }
 
     let target = cwd.join(".creft").join("commands");

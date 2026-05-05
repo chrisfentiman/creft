@@ -9,7 +9,8 @@ use crate::aliases::{Alias, AliasFile, AliasMap, load_for_scope, save_for_scope}
 use crate::error::CreftError;
 use crate::model::{AppContext, Scope};
 use crate::store::{
-    is_reserved, namespace_exists, namespace_exists_in_scope, resolve_command, resolve_in_scope,
+    is_reserved, namespace_exists, namespace_exists_in_scope, pin_ctx_to_root, resolve_command,
+    resolve_in_scope,
 };
 
 /// `creft alias add <from> <to>`
@@ -54,37 +55,40 @@ pub fn cmd_alias_add(ctx: &AppContext, from: &str, to: &str) -> Result<(), Creft
 
 /// `creft alias remove <from>`
 ///
-/// Searches local then global (or global only under CREFT_HOME) and removes
-/// the alias from the first scope that contains it. One invocation removes
-/// from one scope — if both scopes have the same `from`, two invocations are
-/// required. Returns `AliasNotFound` when neither scope contains the alias.
+/// Walks nearest local root first, then farther local roots, then global.
+/// Removes the alias from the first scope+root that contains it. One
+/// invocation removes from one location — if multiple roots define the same
+/// `from`, subsequent invocations remove the next occurrence in chain order.
+/// Returns `AliasNotFound` when no location contains the alias.
 pub fn cmd_alias_remove(ctx: &AppContext, from: &str) -> Result<(), CreftError> {
     let from_segments: Vec<String> = from.split_whitespace().map(str::to_string).collect();
     if from_segments.is_empty() {
         return Err(CreftError::MissingArg("<from>".into()));
     }
 
-    // Build the search order. Local is skipped under CREFT_HOME so the file
-    // is never opened twice with the same path (resolve_root redirects both
-    // scopes to the same dir under CREFT_HOME).
-    let mut search: Vec<Scope> = Vec::with_capacity(2);
-    if ctx.find_local_root().is_some() {
-        search.push(Scope::Local);
-    }
-    search.push(Scope::Global);
-
-    for scope in search {
-        let mut file = load_for_scope(ctx, scope)?;
+    // Walk every local root nearest-first.
+    for root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, root);
+        let mut file = load_for_scope(&pinned, Scope::Local)?;
         if let Some(idx) = file.aliases.iter().position(|a| a.from == from_segments) {
             file.aliases.remove(idx);
-            save_for_scope(ctx, scope, &file)?;
+            save_for_scope(&pinned, Scope::Local, &file)?;
             eprintln!(
                 "removed: {} [{}]",
                 from_segments.join(" "),
-                scope_tag(scope)
+                render_local_tag(ctx, root)
             );
             return Ok(());
         }
+    }
+
+    // Fall through to global.
+    let mut file = load_for_scope(ctx, Scope::Global)?;
+    if let Some(idx) = file.aliases.iter().position(|a| a.from == from_segments) {
+        file.aliases.remove(idx);
+        save_for_scope(ctx, Scope::Global, &file)?;
+        eprintln!("removed: {} [global]", from_segments.join(" "));
+        return Ok(());
     }
 
     Err(CreftError::AliasNotFound(from_segments.join(" ")))
@@ -93,29 +97,29 @@ pub fn cmd_alias_remove(ctx: &AppContext, from: &str) -> Result<(), CreftError> 
 /// `creft alias list`
 ///
 /// Prints all aliases sorted by `from` (lexicographic on the joined string),
-/// with scope tags, to stdout. Prints "no aliases defined" when both scopes
-/// are empty. A parse failure in either scope propagates as
+/// with scope tags, to stdout. Prints "no aliases defined" when all scopes
+/// are empty. A parse failure in any scope propagates as
 /// `CreftError::Frontmatter` (exits 1), giving the user the file path to fix.
+///
+/// When multiple local roots exist, each entry is tagged with its root path
+/// relative to CWD (e.g., `[local: .creft]`). Single-root projects use the
+/// legacy `[local]` tag for backward-compatible output.
 pub fn cmd_alias_list(ctx: &AppContext) -> Result<(), CreftError> {
-    // Load both scopes explicitly so each entry carries its scope tag.
-    // Missing files are empty; parse failures propagate immediately.
-    let global = load_for_scope(ctx, Scope::Global)?;
-    let local = if ctx.find_local_root().is_some() {
-        load_for_scope(ctx, Scope::Local)?
-    } else {
-        crate::aliases::AliasFile::default()
-    };
+    // Collect (from_str, to_str, tag_string) for all entries.
+    let mut entries: Vec<(String, String, String)> = Vec::new();
 
-    // Collect (from, to, scope) triples in a single pass. Under CREFT_HOME
-    // find_local_root() returns None, so the local branch is skipped and only
-    // global entries appear (tagged [global]).
-    let mut entries: Vec<(String, String, Scope)> = global
-        .aliases
-        .iter()
-        .map(|a| (a.from.join(" "), a.to.join(" "), Scope::Global))
-        .collect();
-    for a in &local.aliases {
-        entries.push((a.from.join(" "), a.to.join(" "), Scope::Local));
+    let global = load_for_scope(ctx, Scope::Global)?;
+    for a in &global.aliases {
+        entries.push((a.from.join(" "), a.to.join(" "), "global".to_owned()));
+    }
+
+    for root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, root);
+        let file = load_for_scope(&pinned, Scope::Local)?;
+        let tag = render_local_tag(ctx, root);
+        for a in &file.aliases {
+            entries.push((a.from.join(" "), a.to.join(" "), tag.clone()));
+        }
     }
 
     if entries.is_empty() {
@@ -126,8 +130,8 @@ pub fn cmd_alias_list(ctx: &AppContext) -> Result<(), CreftError> {
     // Stable sort by the joined from string (case-sensitive, lexicographic).
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (from_key, to_val, scope) in &entries {
-        println!("{} \u{2192} {} [{}]", from_key, to_val, scope_tag(*scope));
+    for (from_key, to_val, tag) in &entries {
+        println!("{} \u{2192} {} [{}]", from_key, to_val, tag);
     }
 
     Ok(())
@@ -142,14 +146,68 @@ fn scope_tag(scope: Scope) -> &'static str {
     }
 }
 
+/// Render the tag for a local-root alias entry.
+///
+/// In single-root projects (`ctx.local_roots().len() <= 1`), returns `"local"`
+/// for backward-compatible output. In multi-root projects, returns
+/// `"local: <relative-path>"` where `<relative-path>` is `root` printed
+/// relative to `ctx.cwd`, falling back to the absolute path when the relative
+/// form would traverse too many parent segments.
+fn render_local_tag(ctx: &AppContext, root: &std::path::Path) -> String {
+    if ctx.local_roots().len() <= 1 {
+        return "local".to_owned();
+    }
+    // Try to produce a clean relative path from CWD to the root.
+    match root.strip_prefix(&ctx.cwd) {
+        Ok(rel) => format!("local: {}", rel.display()),
+        Err(_) => {
+            // Walk back: count how many parent segments are needed.
+            let rel = pathdiff_simple(&ctx.cwd, root);
+            format!("local: {}", rel)
+        }
+    }
+}
+
+/// Produce a simple relative path from `from_dir` to `to`. Uses `..` segments.
+/// Falls back to the absolute path when the relative form would traverse more
+/// than one level upward, as specified: readability degrades beyond a single
+/// `..` component.
+fn pathdiff_simple(from_dir: &std::path::Path, to: &std::path::Path) -> String {
+    // Find the longest common prefix.
+    let from_parts: Vec<_> = from_dir.components().collect();
+    let to_parts: Vec<_> = to.components().collect();
+    let common = from_parts
+        .iter()
+        .zip(to_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let up = from_parts.len() - common;
+    if up > 1 {
+        return to.to_string_lossy().into_owned();
+    }
+    let mut rel = std::path::PathBuf::new();
+    for _ in 0..up {
+        rel.push("..");
+    }
+    for part in &to_parts[common..] {
+        rel.push(part);
+    }
+    rel.to_string_lossy().into_owned()
+}
+
 /// Resolve which scope to write the alias into, based on where `to` lives.
 ///
-/// Tries local first (when a real local root exists), then global. Errors
-/// with `AliasTargetNotFound` if neither scope contains the target as a
-/// skill, package skill, plugin skill, or namespace prefix.
+/// Tries each local root nearest-first, then global. When the target exists in
+/// any local root, the write goes to the nearest root (matching `default_write_scope`).
+/// Errors with `AliasTargetNotFound` if no scope contains the target.
 fn resolve_target_scope(ctx: &AppContext, to: &[String]) -> Result<Scope, CreftError> {
-    if ctx.find_local_root().is_some() && target_exists_in_scope(ctx, to, Scope::Local)? {
-        return Ok(Scope::Local);
+    // Check each local root nearest-first.
+    for root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, root);
+        if target_exists_in_scope(&pinned, to, Scope::Local)? {
+            // Write goes to the nearest root regardless of which root found it.
+            return Ok(Scope::Local);
+        }
     }
     if target_exists_in_scope(ctx, to, Scope::Global)? {
         return Ok(Scope::Global);
@@ -434,5 +492,105 @@ mod tests {
             other => panic!("expected AliasConflict for '{name}', got {other:?}"),
         };
         assert_eq!(kind, "built-in command");
+    }
+
+    // ── render_local_tag (Stage 3) ────────────────────────────────────────────
+
+    #[test]
+    fn render_local_tag_single_root_returns_legacy_form() {
+        let base = tempfile::tempdir().unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        let creft_dir = base.path().join(".creft");
+        std::fs::create_dir_all(&creft_dir).unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            base.path().to_path_buf(),
+        );
+        // Single root → legacy "local" tag.
+        let tag = render_local_tag(&ctx, &creft_dir);
+        assert_eq!(tag, "local", "single root must use legacy 'local' tag");
+    }
+
+    #[test]
+    fn render_local_tag_multi_root_returns_relative_path() {
+        let base = tempfile::tempdir().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+        // For the nearest root (.creft inside sub_dir), tag should include "local: ".
+        let nearest = ctx.local_roots()[0].clone();
+        let tag = render_local_tag(&ctx, &nearest);
+        assert!(
+            tag.starts_with("local: "),
+            "multi-root tag must start with 'local: '; got: {tag}"
+        );
+    }
+
+    // ── cmd_alias_remove chain walk (Stage 3) ─────────────────────────────────
+
+    #[test]
+    fn cmd_alias_remove_nearest_first_removes_from_nearest_root() {
+        let base = tempfile::tempdir().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        // Write `bl → backlog` in both local roots.
+        let alias_content = b"- from: bl\n  to: backlog\n";
+        for root in ctx.local_roots() {
+            std::fs::write(root.join("aliases.yaml"), alias_content).unwrap();
+        }
+
+        // First removal removes from the nearest root.
+        cmd_alias_remove(&ctx, "bl").expect("first removal must succeed");
+
+        // The nearest root's aliases.yaml must no longer contain `bl`.
+        let nearest = &ctx.local_roots()[0];
+        let nearest_content =
+            std::fs::read_to_string(nearest.join("aliases.yaml")).unwrap_or_default();
+        assert!(
+            !nearest_content.contains("from: bl"),
+            "nearest root's alias.yaml must not contain 'bl' after first removal; got:\n{nearest_content}"
+        );
+
+        // The farthest root's aliases.yaml must still contain `bl`.
+        let farthest = &ctx.local_roots()[1];
+        let farthest_content =
+            std::fs::read_to_string(farthest.join("aliases.yaml")).unwrap_or_default();
+        assert!(
+            farthest_content.contains("bl"),
+            "farthest root's alias.yaml must still contain 'bl'; got:\n{farthest_content}"
+        );
+    }
+
+    #[test]
+    fn cmd_alias_remove_not_found_returns_alias_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".creft")).unwrap();
+        let ctx = crate::model::AppContext::for_test(
+            home_tmp.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
+        let err = cmd_alias_remove(&ctx, "nonexistent").expect_err("missing alias must error");
+        assert!(matches!(err, CreftError::AliasNotFound(_)));
     }
 }

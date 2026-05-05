@@ -220,27 +220,36 @@ pub struct AliasMap {
 impl AliasMap {
     /// Build the combined map for the given context.
     ///
-    /// Loads global first, then local. A local entry with the same `from` as a
-    /// global entry replaces it. Missing files are treated as empty. Returns an
+    /// Loads global first, then each local root from farthest to nearest. A
+    /// later entry with the same `from` replaces an earlier one, so nearest
+    /// roots win on conflict. Missing files are treated as empty. Returns an
     /// error only when a present, non-empty file fails to parse.
     pub fn load(ctx: &AppContext) -> Result<Self, CreftError> {
-        let global = load_for_scope(ctx, Scope::Global)?;
-        let local = if ctx.find_local_root().is_some() {
-            load_for_scope(ctx, Scope::Local)?
-        } else {
-            AliasFile::default()
-        };
+        use crate::store::pin_ctx_to_root;
 
         // Plain Vec + linear dedup scan: alias counts are expected in the
         // single digits, and the project's dependency budget is fixed.
         let mut entries: Vec<Alias> = Vec::new();
-        for alias in global.aliases.into_iter().chain(local.aliases) {
+
+        let mut merge = |alias: Alias| {
             if let Some(existing) = entries.iter_mut().find(|e| e.from == alias.from) {
                 *existing = alias;
             } else {
                 entries.push(alias);
             }
+        };
+
+        let global = load_for_scope(ctx, Scope::Global)?;
+        global.aliases.into_iter().for_each(&mut merge);
+
+        // Iterate farthest-to-nearest so that nearest entries arrive last and
+        // overwrite farther entries in the dedup pass above.
+        for root in ctx.local_roots().iter().rev() {
+            let pinned = pin_ctx_to_root(ctx, root);
+            let file = load_for_scope(&pinned, Scope::Local)?;
+            file.aliases.into_iter().for_each(&mut merge);
         }
+
         // Sort longest-from first so find_prefix() takes the first match.
         entries.sort_by_key(|e| std::cmp::Reverse(e.from.len()));
         Ok(AliasMap { entries })
@@ -673,10 +682,10 @@ mod tests {
     #[test]
     fn alias_map_loads_global_only_when_no_local_root() {
         // Verify the spec's "running outside any project" success criterion:
-        // when find_local_root() returns None, AliasMap::load still resolves
+        // when nearest_local_root() returns None, AliasMap::load still resolves
         // global aliases correctly and does not error.
         let home_dir = tempdir().unwrap();
-        let cwd_dir = tempdir().unwrap(); // no .creft/ — find_local_root() returns None
+        let cwd_dir = tempdir().unwrap(); // no .creft/ — nearest_local_root() returns None
 
         std::fs::create_dir_all(home_dir.path().join(".creft")).unwrap();
         std::fs::write(
@@ -686,13 +695,13 @@ mod tests {
         .unwrap();
 
         // home_dir and cwd_dir are independent temp dirs; cwd_dir has no .creft/
-        // ancestor, so find_local_root() returns None for this context.
+        // ancestor, so nearest_local_root() returns None for this context.
         let ctx = crate::model::AppContext::for_test(
             home_dir.path().to_path_buf(),
             cwd_dir.path().to_path_buf(),
         );
         assert!(
-            ctx.find_local_root().is_none(),
+            ctx.nearest_local_root().is_none(),
             "test setup: cwd must have no local root"
         );
 
@@ -707,6 +716,90 @@ mod tests {
             result.unwrap().to,
             vec!["backlog".to_string()],
             "global alias must rewrite bl to backlog"
+        );
+    }
+
+    // ── Chain-walk tests (Stage 3) ────────────────────────────────────────────
+
+    /// Build a two-root chain: `base/project/.creft/` (farthest) and
+    /// `base/project/sub/.creft/` (nearest). Returns `(home_dir, cwd, project_root, sub_root)`.
+    fn setup_two_root_chain(
+        base: &std::path::Path,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let home_dir = base.join("home");
+        let project_dir = base.join("project");
+        let sub_dir = project_dir.join("sub");
+        std::fs::create_dir_all(home_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(project_dir.join(".creft")).unwrap();
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+        let project_root = project_dir.join(".creft");
+        let sub_root = sub_dir.join(".creft");
+        (home_dir, sub_dir, project_root, sub_root)
+    }
+
+    #[test]
+    fn alias_map_two_roots_union_without_conflict() {
+        let base = tempdir().unwrap();
+        let (home_dir, cwd, project_root, sub_root) = setup_two_root_chain(base.path());
+
+        // Farthest root: deploy → ship
+        std::fs::write(
+            project_root.join("aliases.yaml"),
+            b"- from: deploy\n  to: ship\n",
+        )
+        .unwrap();
+        // Nearest root: bl → backlog
+        std::fs::write(
+            sub_root.join("aliases.yaml"),
+            b"- from: bl\n  to: backlog\n",
+        )
+        .unwrap();
+
+        let ctx = crate::model::AppContext::for_test(home_dir, cwd);
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let map = AliasMap::load(&ctx).expect("AliasMap::load must succeed");
+        // Both aliases must be present.
+        assert!(
+            map.find_prefix(&args(&["deploy"])).is_some(),
+            "deploy alias must load from farthest root"
+        );
+        assert!(
+            map.find_prefix(&args(&["bl"])).is_some(),
+            "bl alias must load from nearest root"
+        );
+    }
+
+    #[test]
+    fn alias_map_two_roots_nearest_wins_on_conflict() {
+        let base = tempdir().unwrap();
+        let (home_dir, cwd, project_root, sub_root) = setup_two_root_chain(base.path());
+
+        // Both roots define `bl`, but with different `to` values.
+        std::fs::write(
+            project_root.join("aliases.yaml"),
+            b"- from: bl\n  to: backlog\n",
+        )
+        .unwrap();
+        std::fs::write(sub_root.join("aliases.yaml"), b"- from: bl\n  to: tasks\n").unwrap();
+
+        let ctx = crate::model::AppContext::for_test(home_dir, cwd);
+        let map = AliasMap::load(&ctx).expect("AliasMap::load must succeed");
+
+        let hit = map.find_prefix(&args(&["bl"])).expect("alias must resolve");
+        assert_eq!(
+            hit.to,
+            vec!["tasks".to_string()],
+            "nearest root's alias must shadow farthest root's alias"
         );
     }
 }

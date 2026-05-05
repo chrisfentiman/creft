@@ -26,9 +26,10 @@ pub(crate) const FUZZY_THRESHOLD: f64 = 0.3;
 
 /// Search all indexes across all scopes, loading content snippets for matches.
 ///
-/// Reads every `.idx` file from the index directories (global and local),
-/// including `_builtin.idx`, queries each with the given query string, and
-/// returns combined results with snippets populated from the source documents.
+/// Reads every `.idx` file from the global index directory and from each local
+/// root's index directory, nearest-first. Deduplicates by index file stem
+/// (namespace key) so that when two local roots define skills in the same
+/// namespace, only the entry from the nearest root appears in results.
 ///
 /// For each matching index entry, loads the source document text and extracts
 /// snippets containing the query terms. Entries where the XOR filter matched
@@ -41,32 +42,29 @@ pub(crate) const FUZZY_THRESHOLD: f64 = 0.3;
 /// descending before snippet extraction.
 ///
 /// Files that fail to deserialize or whose content cannot be loaded are
-/// skipped silently. When both scopes resolve to the same directory (e.g.
-/// under `CREFT_HOME`), the directory is searched only once.
+/// skipped silently.
+///
+/// Note: the old `seen_dirs` dedup guard is removed. The chain construction
+/// in `AppContext::from_env` excludes `~/.creft/` from `local_roots()`, and
+/// `CREFT_HOME` mode yields an empty `local_roots()`. Those two structural
+/// invariants guarantee that no two entries in the iteration can resolve to
+/// the same directory, so the guard was dead code.
 pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetResult> {
     let terms: Vec<&str> = query.split_whitespace().collect();
-    let mut seen_dirs: Vec<std::path::PathBuf> = Vec::new();
 
     // Load all valid indexes first so we can reuse them for the fuzzy pass
     // without reading from disk twice.
+    // Each entry is (file_stem, index); file_stem acts as the namespace key.
+    // We deduplicate by file_stem: the first occurrence (nearest) wins.
     let mut loaded: Vec<(String, self::index::SearchIndex)> = Vec::new();
+    let mut seen_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for scope in &[Scope::Global, Scope::Local] {
-        let dir = match ctx.index_dir_for(*scope) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        if seen_dirs.contains(&dir) {
-            continue;
-        }
-        seen_dirs.push(dir.clone());
-
-        let read_dir = match std::fs::read_dir(&dir) {
+    // Load from a single index directory, deduplicating by file stem.
+    let mut load_dir = |dir: &std::path::Path| {
+        let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
-            Err(_) => continue,
+            Err(_) => return,
         };
-
         for dir_entry in read_dir.flatten() {
             let path = dir_entry.path();
             let Some(ext) = path.extension() else {
@@ -75,13 +73,14 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
             if ext != "idx" {
                 continue;
             }
-
-            let namespace = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_owned();
-
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_owned(),
+                None => continue,
+            };
+            // Nearest root wins: skip if we already loaded this stem.
+            if seen_stems.contains(&stem) {
+                continue;
+            }
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -90,9 +89,24 @@ pub(crate) fn search_all_indexes(ctx: &AppContext, query: &str) -> Vec<SnippetRe
                 Some(idx) => idx,
                 None => continue,
             };
-
-            loaded.push((namespace, index));
+            seen_stems.insert(stem.clone());
+            loaded.push((stem, index));
         }
+    };
+
+    // Local roots nearest-first, global last. This ordering is required for
+    // nearest-wins semantics under first-wins dedup: the first occurrence of a
+    // namespace stem in `seen_stems` is kept, so loading local roots before the
+    // global root ensures a local namespace shadows the corresponding global index,
+    // not the other way around. The spec text describing the order as
+    // "[Global, local-nearest, ...]" was incorrect — that ordering would produce
+    // global-wins, the opposite of the intended behavior.
+    for local_root in ctx.local_roots() {
+        let local_dir = local_root.join("indexes");
+        load_dir(&local_dir);
+    }
+    if let Ok(global_dir) = ctx.index_dir_for(Scope::Global) {
+        load_dir(&global_dir);
     }
 
     // Exact search pass (AND semantics on whole-token hashes).
@@ -531,6 +545,79 @@ mod tests {
         assert!(
             results.iter().any(|r| r.name == "sort bravo"),
             "sort bravo must appear in fuzzy results"
+        );
+    }
+
+    // ── Stage 3: chain iteration with nearest-wins dedup ──────────────────────
+
+    /// `search_all_indexes` with two local roots that both define an index for
+    /// the same namespace produces one result per skill name (no duplicate hits),
+    /// and the snippet content comes from the nearest root's index.
+    ///
+    /// Spec test expectation: spec line 778.
+    #[test]
+    fn search_all_indexes_local_chain_nearest_root_wins() {
+        let home_tmp = tempfile::TempDir::new().unwrap();
+        let parent_tmp = tempfile::TempDir::new().unwrap();
+        let child_dir = parent_tmp.path().join("child");
+
+        // Set up two local roots in the filesystem.
+        std::fs::create_dir_all(parent_tmp.path().join(".creft/commands")).unwrap();
+        std::fs::create_dir_all(child_dir.join(".creft/commands")).unwrap();
+
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), child_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect chain of 2 local roots"
+        );
+
+        // Write a "deploy.idx" to the NEAREST (child) root with one skill entry
+        // whose body text contains "rollback".
+        let nearest_root = ctx.local_roots()[0].clone();
+        let nearest_idx = SearchIndex::build(&[(
+            "deploy rollback",
+            "Roll back from nearest",
+            "rollback from nearest root",
+        )]);
+        let nearest_index_dir = nearest_root.join("indexes");
+        std::fs::create_dir_all(&nearest_index_dir).unwrap();
+        std::fs::write(nearest_index_dir.join("deploy.idx"), nearest_idx.to_bytes()).unwrap();
+
+        // Write a different "deploy.idx" to the FARTHEST (parent) root whose
+        // entry text also matches "rollback" but with different content. If
+        // both were loaded, the result count would be 2 — dedup prevents this.
+        let farthest_root = ctx.local_roots()[1].clone();
+        let farthest_idx = SearchIndex::build(&[(
+            "deploy rollback",
+            "Roll back from farthest",
+            "rollback from farthest root",
+        )]);
+        let farthest_index_dir = farthest_root.join("indexes");
+        std::fs::create_dir_all(&farthest_index_dir).unwrap();
+        std::fs::write(
+            farthest_index_dir.join("deploy.idx"),
+            farthest_idx.to_bytes(),
+        )
+        .unwrap();
+
+        let results = search_all_indexes(&ctx, "rollback");
+
+        // Exactly one result: nearest-wins dedup collapses the two indexes.
+        assert_eq!(
+            results.len(),
+            1,
+            "nearest-wins dedup must produce exactly one result for the same namespace; got {} results",
+            results.len()
+        );
+        // The result must come from the nearest root's index (description differs).
+        assert_eq!(results[0].name, "deploy rollback");
+        // Description from nearest index.
+        assert_eq!(
+            results[0].description, "Roll back from nearest",
+            "description must come from the nearest root's index, not the farthest; \
+             got: {:?}",
+            results[0].description
         );
     }
 }

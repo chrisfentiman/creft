@@ -564,7 +564,7 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
     let (_, _, source) = store::resolve_command(ctx, &args)?;
 
     match &source {
-        model::SkillSource::Package(_, _) => {
+        model::SkillSource::Package { .. } => {
             return Err(CreftError::Setup(
                 "cannot remove individual skills from an installed package -- use 'creft plugin uninstall <package>' instead".into(),
             ));
@@ -574,20 +574,28 @@ pub fn cmd_rm(ctx: &AppContext, name: &str, global: bool) -> Result<(), CreftErr
                 "cannot remove individual skills from a plugin -- use 'creft plugin deactivate <plugin>' or 'creft plugin uninstall <plugin>' instead".into(),
             ));
         }
-        model::SkillSource::Owned(_) => {}
+        model::SkillSource::Owned { .. } => {}
     }
 
-    let scope = if global {
-        model::Scope::Global
+    if global {
+        store::remove_in(ctx, name, model::Scope::Global)?;
     } else {
-        match &source {
-            model::SkillSource::Owned(s) => *s,
-            model::SkillSource::Package(_, s) => *s,
-            // Unreachable: Plugin is rejected above, but required for exhaustiveness.
-            model::SkillSource::Plugin(_) => model::Scope::Global,
+        // Use the owning root from the resolver's authoritative answer. For local skills
+        // in a chain, this removes from wherever the skill actually lives — not necessarily
+        // the nearest root. For single-root projects, behavior is identical to before.
+        match source.local_root() {
+            Some(owning_root) => {
+                // Pin the context to the owning root so remove_in targets the right
+                // directory, then reuse the full remove_in logic (index rebuild, empty
+                // directory cleanup).
+                let pinned = store::pin_ctx_to_root(ctx, owning_root);
+                store::remove_in(&pinned, name, model::Scope::Local)?;
+            }
+            None => {
+                store::remove_in(ctx, name, model::Scope::Global)?;
+            }
         }
-    };
-    store::remove_in(ctx, name, scope)?;
+    }
     eprintln!("removed: {}", name);
     Ok(())
 }
@@ -873,8 +881,10 @@ fn check_body_no_name_key(body: &str) -> Result<(), CreftError> {
 /// it is actionable (users can uninstall or inspect package skills separately).
 pub fn format_skill_desc(def: &model::CommandDef, source: &model::SkillSource) -> String {
     match source {
-        model::SkillSource::Owned(_) => def.description.clone(),
-        model::SkillSource::Package(pkg, _) => format!("{}  (pkg: {pkg})", def.description),
+        model::SkillSource::Owned { .. } => def.description.clone(),
+        model::SkillSource::Package { name: pkg, .. } => {
+            format!("{}  (pkg: {pkg})", def.description)
+        }
         model::SkillSource::Plugin(name) => format!("{}  (plugin: {name})", def.description),
     }
 }
@@ -950,6 +960,63 @@ mod cmd_rm_tests {
         assert!(
             result.is_err(),
             "cmd_rm for a missing skill must return an error; got: {result:?}"
+        );
+    }
+
+    /// When a skill lives in an ancestor root and the CWD is inside an empty
+    /// intermediate `.creft/`, `cmd_rm` must remove it from the ancestor root —
+    /// not from the intermediate. This is the latent-bug fix: previously `rm`
+    /// would have targeted the nearest root, then returned `CommandNotFound`
+    /// because the file is in the ancestor.
+    #[test]
+    fn cmd_rm_removes_from_ancestor_root_not_sub_root() {
+        use pretty_assertions::assert_eq;
+
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        let sub_dir = project_tmp.path().join("sub");
+
+        // Ancestor root: skill lives here.
+        let ancestor_root = project_tmp.path().join(".creft");
+        let ancestor_cmd_dir = ancestor_root.join("commands");
+        std::fs::create_dir_all(&ancestor_cmd_dir).expect("create ancestor commands dir");
+        std::fs::write(
+            ancestor_cmd_dir.join("remote.md"),
+            "---\nname: remote\ndescription: remote skill\n---\n```bash\necho remote\n```\n",
+        )
+        .expect("write ancestor skill");
+
+        // Intermediate root: exists but has no skills.
+        let sub_creft = sub_dir.join(".creft");
+        std::fs::create_dir_all(sub_creft.join("commands")).expect("create sub commands dir");
+
+        // CWD is the sub-project directory — chain: sub_creft (empty) → ancestor_root.
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+
+        let ancestor_skill_file = ancestor_cmd_dir.join("remote.md");
+        assert!(
+            ancestor_skill_file.exists(),
+            "ancestor skill must exist before removal"
+        );
+
+        super::cmd_rm(&ctx, "remote", false)
+            .expect("cmd_rm must succeed for skill in ancestor root");
+
+        // The ancestor file must be gone.
+        assert!(
+            !ancestor_skill_file.exists(),
+            "cmd_rm must remove the ancestor file, not leave it behind"
+        );
+
+        // The sub-root commands directory must remain empty (nothing was written there).
+        let sub_cmd_dir = sub_creft.join("commands");
+        let sub_entries: Vec<_> = std::fs::read_dir(&sub_cmd_dir)
+            .expect("read sub commands dir")
+            .collect();
+        assert_eq!(
+            sub_entries.len(),
+            0,
+            "sub-root commands directory must remain empty after cmd_rm"
         );
     }
 }
@@ -1534,7 +1601,7 @@ mod tests {
                     tags: vec![],
                     supports: vec![],
                 },
-                model::SkillSource::Owned(model::Scope::Local),
+                model::SkillSource::owned_global(),
             )
         };
 

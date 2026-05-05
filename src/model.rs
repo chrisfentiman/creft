@@ -31,6 +31,26 @@ pub struct AppContext {
 
     /// Process current working directory at startup.
     pub cwd: PathBuf,
+
+    /// Project-local `.creft/` directories between `cwd` and the filesystem root,
+    /// nearest first. Empty when no local root exists, when `creft_home` is set,
+    /// or when the only `.creft/` on the walk is the global root (`~/.creft/`).
+    pub local_roots: Vec<PathBuf>,
+}
+
+/// A single entry in the local-root chain.
+///
+/// `depth` is 0 for the nearest root and increases toward the filesystem root.
+/// Useful for diagnostics and for callers that want to label roots in output
+/// (e.g., `creft alias list` and `creft doctor`).
+// Stage 2 callers (`list_all_with_source`, `resolve_command`) and Stage 3
+// callers (`alias list`, `doctor`) use this type. Established here so the
+// public API is stable across the implementation stages.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct LocalRootRef<'a> {
+    pub path: &'a Path,
+    pub depth: usize,
 }
 
 impl AppContext {
@@ -46,11 +66,40 @@ impl AppContext {
             .map(PathBuf::from);
         let cwd = std::env::current_dir().map_err(CreftError::Io)?;
 
+        let local_roots = if creft_home.is_some() {
+            Vec::new()
+        } else {
+            Self::build_local_roots(&cwd, home_dir.as_deref())
+        };
+
         Ok(Self {
             home_dir,
             creft_home,
             cwd,
+            local_roots,
         })
+    }
+
+    /// Walk up from `start` collecting `.creft/` directories, filtering out
+    /// the global root (`home_dir/.creft/`).
+    fn build_local_roots(start: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
+        let global_root_canon = home_dir.map(|h| {
+            let global = h.join(".creft");
+            std::fs::canonicalize(&global).unwrap_or(global)
+        });
+
+        walk_local_roots_from(start)
+            .into_iter()
+            .filter(|entry| {
+                if let Some(ref global_canon) = global_root_canon {
+                    let entry_canon =
+                        std::fs::canonicalize(entry).unwrap_or_else(|_| entry.clone());
+                    entry_canon != *global_canon
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
 
     fn read_home_dir() -> Option<PathBuf> {
@@ -67,24 +116,80 @@ impl AppContext {
 
     /// Construct for testing with explicit paths.
     ///
-    /// All three fields are set directly. No env vars or CWD are read.
+    /// Walks the filesystem from `cwd` to populate `local_roots`, mirroring
+    /// `from_env`'s behavior. The `~/.creft/` exclusion uses the supplied
+    /// `home_dir` (canonicalize-and-skip applied per chain entry). Tests that
+    /// construct a real `.creft/` tree under a tempdir with `cwd` inside it
+    /// receive a context whose `local_roots()` reflects that tree, with no
+    /// further setup.
     #[cfg(test)]
     pub fn for_test(home_dir: PathBuf, cwd: PathBuf) -> Self {
+        let local_roots = Self::build_local_roots(&cwd, Some(home_dir.as_path()));
         Self {
             home_dir: Some(home_dir),
             creft_home: None,
             cwd,
+            local_roots,
         }
     }
 
     /// Construct for testing with CREFT_HOME override.
+    ///
+    /// `local_roots` is empty: the CREFT_HOME mode short-circuits the chain
+    /// walk, matching `from_env`'s structural guard.
     #[cfg(test)]
     pub fn for_test_with_creft_home(creft_home: PathBuf, cwd: PathBuf) -> Self {
         Self {
             home_dir: None,
             creft_home: Some(creft_home),
             cwd,
+            local_roots: Vec::new(),
         }
+    }
+
+    /// Construct for testing with an explicit chain of local roots, nearest first.
+    ///
+    /// Bypasses the filesystem walk. Use when the test wants to assert the
+    /// chain shape without staging real `.creft/` directories on disk, or to
+    /// inject a chain that does not match the actual filesystem layout.
+    #[cfg(test)]
+    pub fn for_test_with_local_roots(
+        home_dir: PathBuf,
+        cwd: PathBuf,
+        local_roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            home_dir: Some(home_dir),
+            creft_home: None,
+            cwd,
+            local_roots,
+        }
+    }
+
+    /// All local roots in nearest-first order. Empty when no local root exists.
+    pub fn local_roots(&self) -> &[PathBuf] {
+        &self.local_roots
+    }
+
+    /// The nearest local root, or `None` when the chain is empty.
+    pub fn nearest_local_root(&self) -> Option<&Path> {
+        self.local_roots().first().map(PathBuf::as_path)
+    }
+
+    /// Iterate the chain with depth labels.
+    ///
+    /// Depth 0 is the nearest root; depth increases toward the filesystem root.
+    // Stage 2 and Stage 3 callers use this iterator. Established here so the
+    // chain abstraction is complete at the model layer.
+    #[allow(dead_code)]
+    pub fn iter_local_roots(&self) -> impl Iterator<Item = LocalRootRef<'_>> {
+        self.local_roots()
+            .iter()
+            .enumerate()
+            .map(|(depth, path)| LocalRootRef {
+                path: path.as_path(),
+                depth,
+            })
     }
 
     /// Global creft root directory (`~/.creft/`).
@@ -100,30 +205,6 @@ impl AppContext {
         }
     }
 
-    /// Walk up from CWD looking for `.creft/`.
-    ///
-    /// Returns `None` immediately when `creft_home` is set -- in CREFT_HOME mode
-    /// the concept of a local root is meaningless; all scopes resolve to the
-    /// CREFT_HOME directory. This guard is structural so callers cannot accidentally
-    /// bypass it.
-    pub fn find_local_root(&self) -> Option<PathBuf> {
-        if self.creft_home.is_some() {
-            return None;
-        }
-        let found = find_local_root_from(&self.cwd)?;
-        // ~/.creft/ is the global store, not a project-local root.
-        // If the walk-up lands on it, treat that as "no local root".
-        // Canonicalize both sides to handle symlinks (e.g. macOS /var -> /private/var).
-        if let Ok(global) = self.global_root() {
-            let found_canon = std::fs::canonicalize(&found).unwrap_or_else(|_| found.clone());
-            let global_canon = std::fs::canonicalize(&global).unwrap_or(global);
-            if found_canon == global_canon {
-                return None;
-            }
-        }
-        Some(found)
-    }
-
     /// Root directory for a given scope.
     ///
     /// When `creft_home` is set, both scopes resolve to it.
@@ -134,7 +215,8 @@ impl AppContext {
         }
         match scope {
             Scope::Local => Ok(self
-                .find_local_root()
+                .nearest_local_root()
+                .map(|p| p.to_path_buf())
                 .map_or_else(|| self.global_root(), Ok)?),
             Scope::Global => self.global_root(),
         }
@@ -150,7 +232,7 @@ impl AppContext {
         if self.creft_home.is_some() {
             return Scope::Global;
         }
-        if self.find_local_root().is_some() {
+        if self.nearest_local_root().is_some() {
             Scope::Local
         } else {
             Scope::Global
@@ -217,37 +299,41 @@ impl AppContext {
 
     /// Derive CWD for subprocess execution based on skill source.
     ///
-    /// - Local skills: project root (parent of `.creft/`)
+    /// - Local skills: project root (parent of the owning `.creft/`)
     /// - Global skills and plugin skills: captured CWD
     /// - `CREFT_HOME` mode: captured CWD (no project root concept)
     pub fn derive_cwd(&self, source: &SkillSource) -> PathBuf {
         if self.creft_home.is_some() {
             return self.cwd.clone();
         }
-        match source {
-            SkillSource::Owned(Scope::Local) | SkillSource::Package(_, Scope::Local) => self
-                .find_local_root()
-                .and_then(|creft_dir| creft_dir.parent().map(|p| p.to_path_buf()))
-                .unwrap_or_else(|| self.cwd.clone()),
-            SkillSource::Owned(Scope::Global)
-            | SkillSource::Package(_, Scope::Global)
-            | SkillSource::Plugin(_) => self.cwd.clone(),
+        // The owning root is carried on the source by constructor invariant.
+        // No chain walk here: source.local_root() is the authoritative answer.
+        if let Some(creft_dir) = source.local_root() {
+            creft_dir
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.cwd.clone())
+        } else {
+            self.cwd.clone()
         }
     }
 }
 
-/// Walk up from `start` looking for a `.creft/` directory.
+/// Walk up from `start` collecting every `.creft/` directory, nearest first.
 ///
-/// Returns `None` if no `.creft/` directory is found before reaching the filesystem root.
-pub fn find_local_root_from(start: &Path) -> Option<PathBuf> {
+/// Returns an empty `Vec` when no `.creft/` exists between `start` and the
+/// filesystem root. Entries are the `.creft/` directory paths themselves, not
+/// their parents.
+pub fn walk_local_roots_from(start: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
     let mut dir = start.to_path_buf();
     loop {
         let candidate = dir.join(".creft");
         if candidate.is_dir() {
-            return Some(candidate);
+            roots.push(candidate);
         }
         if !dir.pop() {
-            return None;
+            return roots;
         }
     }
 }
@@ -283,14 +369,111 @@ pub enum Scope {
 }
 
 /// Where a resolved skill came from.
+///
+/// Construction is via the four constructors below — direct literal
+/// construction would let callers bypass the `root.is_some() ⇔ scope == Local`
+/// invariant. The fields are visible for read-side destructuring (`match`
+/// arms remain idiomatic) but the variants must be built through the
+/// constructors so the invariant is enforced at every construction site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
-    /// A user-created skill, with its storage scope.
-    Owned(Scope),
-    /// An installed package skill, with its storage scope.
-    Package(String, Scope),
+    /// A user-created skill.
+    ///
+    /// **Invariant:** `root.is_some()` if and only if `scope == Scope::Local`.
+    /// Construct via [`SkillSource::owned_local`] or [`SkillSource::owned_global`].
+    Owned { scope: Scope, root: Option<PathBuf> },
+    /// An installed package skill.
+    ///
+    /// **Invariant:** `root.is_some()` if and only if `scope == Scope::Local`.
+    /// Construct via [`SkillSource::package_local`] or [`SkillSource::package_global`].
+    Package {
+        name: String,
+        scope: Scope,
+        root: Option<PathBuf>,
+    },
     /// A skill from an activated plugin in the global plugin cache.
+    ///
+    /// Plugins live in `~/.creft/plugins/`; no local root applies.
     Plugin(String),
+}
+
+impl SkillSource {
+    /// Construct a local-scope owned source. The owning local root is required.
+    pub fn owned_local(root: PathBuf) -> Self {
+        SkillSource::Owned {
+            scope: Scope::Local,
+            root: Some(root),
+        }
+    }
+
+    /// Construct a global-scope owned source.
+    pub fn owned_global() -> Self {
+        SkillSource::Owned {
+            scope: Scope::Global,
+            root: None,
+        }
+    }
+
+    /// Construct a local-scope package source. The owning local root is required.
+    pub fn package_local(name: String, root: PathBuf) -> Self {
+        SkillSource::Package {
+            name,
+            scope: Scope::Local,
+            root: Some(root),
+        }
+    }
+
+    /// Construct a global-scope package source.
+    pub fn package_global(name: String) -> Self {
+        SkillSource::Package {
+            name,
+            scope: Scope::Global,
+            root: None,
+        }
+    }
+
+    /// The local root that owns this skill, when the skill is local-scoped.
+    ///
+    /// Returns `Some(root)` for `Owned { scope: Scope::Local, .. }` and
+    /// `Package { scope: Scope::Local, .. }`. Returns `None` for global and
+    /// plugin sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a local-tagged variant has `root == None`. Such a value can
+    /// only exist if a caller bypassed the constructors and built the variant
+    /// by literal expression. The panic surfaces a real bug rather than
+    /// producing the silent wrong behavior that motivated this fix.
+    pub fn local_root(&self) -> Option<&Path> {
+        match self {
+            SkillSource::Owned {
+                scope: Scope::Local,
+                root,
+            }
+            | SkillSource::Package {
+                scope: Scope::Local,
+                root,
+                ..
+            } => Some(root.as_deref().expect(
+                "local-tagged SkillSource missing root: invariant violation; \
+                     use SkillSource::owned_local / package_local",
+            )),
+            SkillSource::Owned { .. } | SkillSource::Package { .. } | SkillSource::Plugin(_) => {
+                None
+            }
+        }
+    }
+
+    /// The storage scope. `Plugin(_)` is always treated as `Scope::Global`.
+    // Used by Stage 2 tests and Stage 3 callers (cmd::alias, doctor). Not yet
+    // referenced in production binary code at this stage.
+    #[allow(dead_code)]
+    pub fn scope(&self) -> Scope {
+        match self {
+            SkillSource::Owned { scope, .. } | SkillSource::Package { scope, .. } => *scope,
+            SkillSource::Plugin(_) => Scope::Global,
+        }
+    }
 }
 
 /// Skill definition parsed from YAML frontmatter.
@@ -771,6 +954,7 @@ mod tests {
             home_dir: None,
             creft_home: None,
             cwd: std::path::PathBuf::from("/tmp"),
+            local_roots: Vec::new(),
         };
         let result = ctx.global_root();
         assert!(
@@ -1131,31 +1315,34 @@ name: MY_TOKEN
         );
     }
 
-    // ── find_local_root CREFT_HOME guard ─────────────────────────────────────
+    // ── nearest_local_root / local_roots chain ────────────────────────────────
 
     #[test]
-    fn test_find_local_root_returns_none_when_creft_home_set() {
+    fn test_nearest_local_root_returns_none_when_creft_home_set() {
         let dir = tempfile::tempdir().unwrap();
         // Create a .creft/ directory that would normally be found by walk-up.
         std::fs::create_dir_all(dir.path().join(".creft")).unwrap();
 
-        let ctx = AppContext {
-            home_dir: None,
-            creft_home: Some(dir.path().to_path_buf()),
-            cwd: dir.path().to_path_buf(),
-        };
+        let ctx = AppContext::for_test_with_creft_home(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+        );
 
         assert!(
-            ctx.find_local_root().is_none(),
-            "find_local_root must return None when creft_home is set"
+            ctx.nearest_local_root().is_none(),
+            "nearest_local_root must return None when creft_home is set"
+        );
+        assert!(
+            ctx.local_roots().is_empty(),
+            "local_roots must be empty when creft_home is set"
         );
     }
 
     #[test]
-    fn test_find_local_root_excludes_global_root() {
+    fn test_nearest_local_root_excludes_global_root() {
         // HOME is a temp dir containing ~/.creft/ (the global store).
         // CWD is a subdirectory of HOME with no .creft/ of its own.
-        // find_local_root() must return None — the global store is not a project root.
+        // nearest_local_root() must return None — the global store is not a project root.
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".creft")).unwrap();
         let subdir = home.path().join("myproject");
@@ -1164,16 +1351,16 @@ name: MY_TOKEN
         let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
 
         assert!(
-            ctx.find_local_root().is_none(),
-            "find_local_root must return None when walk-up reaches the global ~/.creft/"
+            ctx.nearest_local_root().is_none(),
+            "nearest_local_root must return None when walk-up reaches the global ~/.creft/"
         );
     }
 
     #[test]
-    fn test_find_local_root_finds_real_project_root() {
+    fn test_nearest_local_root_finds_real_project_root() {
         // HOME is a temp dir containing ~/.creft/ (the global store).
         // CWD is a subdirectory that has its own .creft/ — a real project root.
-        // find_local_root() must return the project-local root, not None.
+        // nearest_local_root() must return the project-local root, not None.
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".creft")).unwrap();
         let project = home.path().join("myproject");
@@ -1184,13 +1371,164 @@ name: MY_TOKEN
         let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
 
         let found = ctx
-            .find_local_root()
-            .expect("find_local_root must find the project-local .creft/");
+            .nearest_local_root()
+            .expect("nearest_local_root must find the project-local .creft/");
         assert_eq!(
             found,
             project.join(".creft"),
-            "find_local_root must return the project-local root"
+            "nearest_local_root must return the project-local root"
         );
+    }
+
+    #[test]
+    fn test_local_roots_empty_when_no_creft_in_ancestry() {
+        // CWD with no .creft/ ancestors (other than possibly global).
+        // for_test walk finds nothing and local_roots is empty.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        // No .creft/ in either; home has no .creft/ either, so exclusion is moot.
+        let ctx = AppContext::for_test(home.path().to_path_buf(), cwd.path().to_path_buf());
+        assert!(
+            ctx.local_roots().is_empty(),
+            "local_roots must be empty when no .creft/ exists in ancestry"
+        );
+        assert!(ctx.nearest_local_root().is_none());
+    }
+
+    #[test]
+    fn test_local_roots_single_entry_for_single_root_project() {
+        // Project has one .creft/ at its root; CWD is a subdirectory.
+        // local_roots must have exactly one entry pointing at that root.
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".creft")).unwrap();
+        let subdir = project.path().join("src");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
+
+        assert_eq!(
+            ctx.local_roots().len(),
+            1,
+            "single-root project must produce exactly one entry in local_roots"
+        );
+        assert_eq!(
+            ctx.nearest_local_root().unwrap(),
+            project.path().join(".creft")
+        );
+    }
+
+    #[test]
+    fn test_local_roots_two_element_chain_nearest_first() {
+        // BL-4 repro: intermediate directory has an empty .creft/, ancestor has a
+        // populated one. Both must appear in the chain, nearest first.
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        // Ancestor .creft/
+        std::fs::create_dir_all(project.path().join(".creft").join("commands")).unwrap();
+        // Intermediate empty .creft/
+        let infra = project.path().join("infra").join("rackroom");
+        std::fs::create_dir_all(infra.join(".creft")).unwrap();
+        // CWD is inside the intermediate
+        let cwd = infra.join("deploy");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let ctx = AppContext::for_test(home.path().to_path_buf(), cwd);
+
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "two-element chain must have exactly two entries"
+        );
+        assert_eq!(
+            ctx.local_roots()[0],
+            infra.join(".creft"),
+            "nearest root (intermediate) must be first"
+        );
+        assert_eq!(
+            ctx.local_roots()[1],
+            project.path().join(".creft"),
+            "farthest root (project) must be second"
+        );
+        assert_eq!(ctx.nearest_local_root().unwrap(), infra.join(".creft"));
+    }
+
+    #[test]
+    fn test_local_roots_excludes_global_root_per_entry() {
+        // HOME has .creft/ (global root). A subdirectory of HOME also has a project
+        // .creft/. Only the project root must appear in local_roots; the global
+        // root must be filtered out even though the walk visits it.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".creft")).unwrap();
+        let project = home.path().join("myproject");
+        std::fs::create_dir_all(project.join(".creft")).unwrap();
+        let subdir = project.join("src");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let ctx = AppContext::for_test(home.path().to_path_buf(), subdir);
+
+        // Must have exactly the project root, not the global root.
+        assert_eq!(
+            ctx.local_roots().len(),
+            1,
+            "global root must be excluded from local_roots"
+        );
+        assert_eq!(ctx.local_roots()[0], project.join(".creft"));
+    }
+
+    #[test]
+    fn test_for_test_with_creft_home_has_empty_local_roots() {
+        let creft_home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        // Even with a .creft/ in the cwd tree, CREFT_HOME mode yields empty chain.
+        std::fs::create_dir_all(cwd.path().join(".creft")).unwrap();
+
+        let ctx = AppContext::for_test_with_creft_home(
+            creft_home.path().to_path_buf(),
+            cwd.path().to_path_buf(),
+        );
+        assert!(
+            ctx.local_roots().is_empty(),
+            "CREFT_HOME mode must produce an empty local_roots"
+        );
+    }
+
+    #[test]
+    fn test_for_test_with_local_roots_exposes_supplied_chain() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let root_a = PathBuf::from("/fake/a/.creft");
+        let root_b = PathBuf::from("/fake/b/.creft");
+        let chain = vec![root_a.clone(), root_b.clone()];
+
+        let ctx = AppContext::for_test_with_local_roots(
+            home.path().to_path_buf(),
+            cwd.path().to_path_buf(),
+            chain,
+        );
+        assert_eq!(ctx.local_roots(), &[root_a.clone(), root_b.clone()]);
+        assert_eq!(ctx.nearest_local_root().unwrap(), root_a.as_path());
+    }
+
+    #[test]
+    fn test_iter_local_roots_depth_labels() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        // Build a 2-element chain via for_test_with_local_roots (synthetic, no FS).
+        let root_near = project.path().join("infra").join(".creft");
+        let root_far = project.path().join(".creft");
+        let ctx = AppContext::for_test_with_local_roots(
+            home.path().to_path_buf(),
+            project.path().to_path_buf(),
+            vec![root_near.clone(), root_far.clone()],
+        );
+
+        let entries: Vec<LocalRootRef<'_>> = ctx.iter_local_roots().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].depth, 0);
+        assert_eq!(entries[0].path, root_near.as_path());
+        assert_eq!(entries[1].depth, 1);
+        assert_eq!(entries[1].path, root_far.as_path());
     }
 
     // ── help_text: ANSI bold formatting ──────────────────────────────────────

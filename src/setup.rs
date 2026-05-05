@@ -1293,6 +1293,7 @@ mod tests {
             home_dir: None,
             creft_home: None,
             cwd: project_dir.path().to_path_buf(),
+            local_roots: Vec::new(),
         };
         let result = install(&ctx, system, project_dir.path(), true);
         assert!(
@@ -1771,6 +1772,7 @@ mod tests {
             home_dir: None,
             creft_home: None,
             cwd: project_dir.path().to_path_buf(),
+            local_roots: Vec::new(),
         };
 
         let result = ensure_session_skill(&ctx, project_dir.path(), true);
