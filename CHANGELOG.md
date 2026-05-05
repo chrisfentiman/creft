@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/chrisfentiman/creft/compare/creft-v0.4.1...creft-v0.4.2) (2026-05-05)
+
+
+### Bug Fixes
+
+* **resolution:** walk .creft/ chain across all ancestors ([#85](https://github.com/chrisfentiman/creft/issues/85)) ([613de0d](https://github.com/chrisfentiman/creft/commit/613de0d3c3c34c653efaa794d75e7da1f629fdf7))
+
 ## [0.4.1](https://github.com/chrisfentiman/creft/compare/creft-v0.4.0...creft-v0.4.1) (2026-04-29)
 
 
