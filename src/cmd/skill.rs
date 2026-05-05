@@ -962,6 +962,63 @@ mod cmd_rm_tests {
             "cmd_rm for a missing skill must return an error; got: {result:?}"
         );
     }
+
+    /// When a skill lives in an ancestor root and the CWD is inside an empty
+    /// intermediate `.creft/`, `cmd_rm` must remove it from the ancestor root —
+    /// not from the intermediate. This is the latent-bug fix: previously `rm`
+    /// would have targeted the nearest root, then returned `CommandNotFound`
+    /// because the file is in the ancestor.
+    #[test]
+    fn cmd_rm_removes_from_ancestor_root_not_sub_root() {
+        use pretty_assertions::assert_eq;
+
+        let home_tmp = tempfile::TempDir::new().expect("home tmp");
+        let project_tmp = tempfile::TempDir::new().expect("project tmp");
+        let sub_dir = project_tmp.path().join("sub");
+
+        // Ancestor root: skill lives here.
+        let ancestor_root = project_tmp.path().join(".creft");
+        let ancestor_cmd_dir = ancestor_root.join("commands");
+        std::fs::create_dir_all(&ancestor_cmd_dir).expect("create ancestor commands dir");
+        std::fs::write(
+            ancestor_cmd_dir.join("remote.md"),
+            "---\nname: remote\ndescription: remote skill\n---\n```bash\necho remote\n```\n",
+        )
+        .expect("write ancestor skill");
+
+        // Intermediate root: exists but has no skills.
+        let sub_creft = sub_dir.join(".creft");
+        std::fs::create_dir_all(sub_creft.join("commands")).expect("create sub commands dir");
+
+        // CWD is the sub-project directory — chain: sub_creft (empty) → ancestor_root.
+        let ctx = AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+
+        let ancestor_skill_file = ancestor_cmd_dir.join("remote.md");
+        assert!(
+            ancestor_skill_file.exists(),
+            "ancestor skill must exist before removal"
+        );
+
+        super::cmd_rm(&ctx, "remote", false)
+            .expect("cmd_rm must succeed for skill in ancestor root");
+
+        // The ancestor file must be gone.
+        assert!(
+            !ancestor_skill_file.exists(),
+            "cmd_rm must remove the ancestor file, not leave it behind"
+        );
+
+        // The sub-root commands directory must remain empty (nothing was written there).
+        let sub_cmd_dir = sub_creft.join("commands");
+        let sub_entries: Vec<_> = std::fs::read_dir(&sub_cmd_dir)
+            .expect("read sub commands dir")
+            .collect();
+        assert_eq!(
+            sub_entries.len(),
+            0,
+            "sub-root commands directory must remain empty after cmd_rm"
+        );
+    }
 }
 
 // ── cmd_add_test tests ────────────────────────────────────────────────────────

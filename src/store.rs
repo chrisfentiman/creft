@@ -279,11 +279,6 @@ pub(crate) fn pin_ctx_to_root(ctx: &AppContext, root: &Path) -> AppContext {
     pinned
 }
 
-/// Module-private alias used internally. See `pin_ctx_to_root`.
-fn pin_local_root(ctx: &AppContext, root: &Path) -> AppContext {
-    pin_ctx_to_root(ctx, root)
-}
-
 /// Build an owned `SkillSource` for the given scope, reading the owning root
 /// from `ctx.nearest_local_root()` for `Scope::Local`. On a pinned context
 /// that root is the pinned root.
@@ -780,7 +775,7 @@ pub fn list_all_with_source(
     // list_scope_with_packages reads the right directory and emits sources with the
     // correct owning root.
     for local_root in ctx.local_roots() {
-        let pinned = pin_local_root(ctx, local_root);
+        let pinned = pin_ctx_to_root(ctx, local_root);
         for item in list_scope_with_packages(&pinned, Scope::Local)? {
             if !seen_names.contains(&item.0.name) {
                 seen_names.insert(item.0.name.clone());
@@ -892,7 +887,7 @@ fn append_activated_plugin_skills(
     // Walk every local root nearest-first; pin the context so load_settings reads
     // the right settings.json for each root.
     for local_root in ctx.local_roots() {
-        let pinned = pin_local_root(ctx, local_root);
+        let pinned = pin_ctx_to_root(ctx, local_root);
         append_activated_plugin_skills_for_scope_dedup(
             &pinned,
             Scope::Local,
@@ -1206,7 +1201,7 @@ pub fn resolve_command(
     // resolve_in_scope operates on that single root and emits sources whose
     // root field reflects the pinned root.
     for local_root in ctx.local_roots() {
-        let pinned = pin_local_root(ctx, local_root);
+        let pinned = pin_ctx_to_root(ctx, local_root);
         if let Ok(result) = resolve_in_scope(&pinned, args, Scope::Local) {
             return Ok(result);
         }
@@ -2608,6 +2603,115 @@ mod tests {
         let sub_results = sub_index.search("push");
         assert_eq!(sub_results.len(), 1);
         assert_eq!(sub_results[0].name, "deploy push");
+    }
+
+    /// A package installed in an ancestor `.creft/packages/` resolves from a
+    /// sub-project CWD with an empty intermediate `.creft/`. The returned
+    /// source must be `Package`-scoped with `local_root()` pointing to the
+    /// ancestor `.creft/`.
+    #[test]
+    fn resolve_command_package_skill_falls_through_empty_intermediate_creft() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        // Ancestor root: package installed here.
+        let ancestor_root = project_dir.path().join(".creft");
+        let pkg_dir = ancestor_root.join("packages").join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("deploy.md"),
+            "---\nname: mypkg deploy\ndescription: deploy via package\n---\n\n```bash\necho deploy\n```\n",
+        )
+        .unwrap();
+
+        // Intermediate root: empty — no packages or commands.
+        let sub_root = sub_dir.join(".creft");
+        std::fs::create_dir_all(sub_root.join("commands")).unwrap();
+
+        // CWD is inside the sub-project — chain: sub_root (empty) → ancestor_root.
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        let args: Vec<String> = vec!["mypkg".to_string(), "deploy".to_string()];
+        let (name, remaining, source) = resolve_command(&ctx, &args)
+            .expect("resolve_command must resolve package skill through empty intermediate root");
+
+        assert_eq!(name, "mypkg deploy");
+        assert!(remaining.is_empty());
+        assert_eq!(
+            source.scope(),
+            Scope::Local,
+            "package skill from ancestor root must be Local-scoped"
+        );
+        assert_eq!(
+            source.local_root(),
+            Some(ancestor_root.as_path()),
+            "local_root must be the ancestor .creft/, not the intermediate"
+        );
+    }
+
+    /// A plugin activated in an ancestor `.creft/plugins/settings.json` produces
+    /// its commands when `list_all_with_source` is called from a descendant CWD
+    /// with its own empty `.creft/`. Plugin sources have `local_root() == None`.
+    #[test]
+    fn list_all_with_source_includes_ancestor_activated_plugin_from_sub_cwd() {
+        use pretty_assertions::assert_eq;
+
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let sub_dir = project_dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        // Install the plugin skill into the global plugin cache (~/.creft/plugins/myplugin/).
+        let global_root = home_dir.path().join(".creft");
+        let plugin_dir = global_root.join("plugins").join("myplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("greet.md"),
+            "---\nname: greet\ndescription: plugin greet\n---\n\n```bash\necho hi\n```\n",
+        )
+        .unwrap();
+
+        // Activate the plugin in the ancestor root's local settings.
+        let ancestor_root = project_dir.path().join(".creft");
+        let ancestor_plugin_settings_dir = ancestor_root.join("plugins");
+        std::fs::create_dir_all(&ancestor_plugin_settings_dir).unwrap();
+        std::fs::write(
+            ancestor_plugin_settings_dir.join("settings.json"),
+            r#"{"activated":{"myplugin":true}}"#,
+        )
+        .unwrap();
+
+        // Descendant root: exists but has no activations.
+        let sub_root = sub_dir.join(".creft");
+        std::fs::create_dir_all(&sub_root).unwrap();
+
+        // CWD is the descendant — chain: sub_root → ancestor_root.
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+
+        let items = list_all_with_source(&ctx).expect("list_all_with_source must succeed");
+        let by_name: std::collections::HashMap<&str, &SkillSource> =
+            items.iter().map(|(d, s)| (d.name.as_str(), s)).collect();
+
+        assert!(
+            by_name.contains_key("greet"),
+            "plugin command from ancestor activation must appear in list; got: {:?}",
+            by_name.keys().collect::<Vec<_>>()
+        );
+
+        let plugin_source = by_name["greet"];
+        assert_eq!(
+            plugin_source.local_root(),
+            None,
+            "plugin source must have local_root() == None (plugins are global)"
+        );
+        assert!(
+            matches!(plugin_source, SkillSource::Plugin(name) if name == "myplugin"),
+            "source must be Plugin(\"myplugin\"), got: {plugin_source:?}"
+        );
     }
 
     /// Single-root project: `rebuild_all_indexes` produces the same set of
