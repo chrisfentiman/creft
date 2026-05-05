@@ -373,6 +373,7 @@ mod tests {
     use super::*;
     use crate::error::CreftError;
     use crate::model::AppContext;
+    use pretty_assertions::assert_eq;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
