@@ -2589,4 +2589,102 @@ mod tests {
         let results = check_shadowed_skills(&ctx);
         assert!(results.is_empty(), "distinct skill names → no shadowing");
     }
+
+    // ── Stage 3: check_flat_files chain scan ──────────────────────────────────
+
+    #[test]
+    fn check_flat_files_reports_flat_file_in_farther_local_root() {
+        // Two local roots along an ancestor chain. A flat file (`a b.md`) lives
+        // only in the farther root. With CWD inside the nearer root, the chain
+        // walk must still surface the farther root's flat file.
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+
+        // Nearer root: has a commands dir but no flat files.
+        let sub_commands = sub_dir.join(".creft/commands");
+        std::fs::create_dir_all(&sub_commands).unwrap();
+
+        // Farther root: has a flat file `a b.md` whose name contains a space.
+        let project_commands = project_dir.join(".creft/commands");
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::write(
+            project_commands.join("a b.md"),
+            b"---\nname: a b\ndescription: flat\n---\nhello\n",
+        )
+        .unwrap();
+
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_flat_files(&ctx);
+        assert!(
+            !results.is_empty(),
+            "flat file in farther root must produce at least one Fail result"
+        );
+        let fail = results
+            .iter()
+            .find(|r| r.status == CheckStatus::Fail)
+            .unwrap_or_else(|| panic!("expected a Fail result, got: {:?}", results));
+        assert!(
+            fail.detail.contains(project_dir.to_str().unwrap()),
+            "detail must reference the farther root path; got: {}",
+            fail.detail
+        );
+    }
+
+    // ── Stage 3: check_activations chain scan ─────────────────────────────────
+
+    #[test]
+    fn check_activations_reports_stale_activation_in_farther_local_root() {
+        // Two local roots along an ancestor chain. The farther root's settings.json
+        // references a plugin that is not installed anywhere. With CWD inside the
+        // nearer root, the chain walk must still surface the stale activation.
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_tmp = tempfile::TempDir::new().unwrap();
+
+        // Nearer root: has a .creft dir with no activation settings.
+        std::fs::create_dir_all(sub_dir.join(".creft")).unwrap();
+
+        // Farther root: has a settings.json referencing an uninstalled plugin.
+        let far_plugins_dir = project_dir.join(".creft/plugins");
+        std::fs::create_dir_all(&far_plugins_dir).unwrap();
+        std::fs::write(
+            far_plugins_dir.join("settings.json"),
+            br#"{"activated":{"ghost-plugin":true}}"#,
+        )
+        .unwrap();
+
+        let ctx =
+            crate::model::AppContext::for_test(home_tmp.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let results = check_activations(&ctx);
+        let warn = results
+            .iter()
+            .find(|r| r.status == CheckStatus::Warn && r.label.contains("ghost-plugin"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Warn result naming ghost-plugin, got: {:?}",
+                    results
+                )
+            });
+        assert!(
+            warn.label.contains("ghost-plugin"),
+            "label must name the stale plugin; got: {}",
+            warn.label
+        );
+    }
 }
