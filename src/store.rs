@@ -804,6 +804,34 @@ pub fn list_all_with_source(
     Ok(result)
 }
 
+/// List every skill in every local root, partitioned by root, without nearest-wins dedup.
+///
+/// Returns one entry per local root in nearest-first order. Each entry is
+/// One bucket of skills belonging to a single local root.
+///
+/// `(root_path, skills)` — skills carry their [`SkillSource`] so the caller
+/// can identify origin without re-reading the filesystem.
+pub(crate) type RootSkillBucket = (PathBuf, Vec<(CommandDef, SkillSource)>);
+
+/// `(local_root_path, skills_in_that_root)`. Does NOT include global skills:
+/// cross-scope shadowing (local masks global) is the documented, intentional
+/// precedence rule and is not a configuration smell. The returned data is
+/// intra-local only, by contract.
+///
+/// Used exclusively by `doctor::check_shadowed_skills` to detect skill names
+/// that appear in more than one local root. Internal to this crate.
+pub(crate) fn list_per_root_with_source(
+    ctx: &AppContext,
+) -> Result<Vec<RootSkillBucket>, CreftError> {
+    let mut result = Vec::new();
+    for local_root in ctx.local_roots() {
+        let pinned = pin_ctx_to_root(ctx, local_root);
+        let skills = list_scope_with_packages(&pinned, Scope::Local)?;
+        result.push((local_root.clone(), skills));
+    }
+    Ok(result)
+}
+
 /// Collect activated plugin skills for a single scope and append them to `result`.
 ///
 /// Deduplication (via `seen_plugin_skills`) is the caller's responsibility when
@@ -2744,6 +2772,127 @@ mod tests {
         assert!(
             idx_path.exists(),
             "single-root project must produce a local deploy.idx"
+        );
+    }
+
+    // ── list_per_root_with_source (Stage 3) ────────────────────────────────────
+
+    #[test]
+    fn list_per_root_with_source_empty_chain_returns_empty_vec() {
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let cwd_dir = tempfile::TempDir::new().unwrap();
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), cwd_dir.path().to_path_buf());
+        let result =
+            list_per_root_with_source(&ctx).expect("list_per_root_with_source must succeed");
+        assert!(result.is_empty(), "no local roots → empty result");
+    }
+
+    #[test]
+    fn list_per_root_with_source_single_root_returns_one_bucket() {
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let commands_dir = project_dir.path().join(".creft/commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("remote.md"),
+            b"---\nname: remote\ndescription: ssh tunnel\n---\nhello\n",
+        )
+        .unwrap();
+        let ctx = AppContext::for_test(
+            home_dir.path().to_path_buf(),
+            project_dir.path().to_path_buf(),
+        );
+        let result =
+            list_per_root_with_source(&ctx).expect("list_per_root_with_source must succeed");
+        assert_eq!(result.len(), 1, "single root → one bucket");
+        let (root, skills) = &result[0];
+        assert_eq!(root, &project_dir.path().join(".creft"));
+        assert_eq!(skills.len(), 1, "one skill in the root");
+        assert_eq!(skills[0].0.name, "remote");
+    }
+
+    #[test]
+    fn list_per_root_with_source_two_roots_no_dedup_emits_both() {
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let sub_dir = project_dir.join("sub");
+        let home_dir = tempfile::TempDir::new().unwrap();
+
+        // Both roots define `remote.md`.
+        let project_commands = project_dir.join(".creft/commands");
+        let sub_commands = sub_dir.join(".creft/commands");
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::create_dir_all(&sub_commands).unwrap();
+        std::fs::write(
+            project_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: project remote\n---\nhello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sub_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: sub remote\n---\nhello\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), sub_dir.clone());
+        assert_eq!(
+            ctx.local_roots().len(),
+            2,
+            "test setup: expect 2 local roots"
+        );
+
+        let result =
+            list_per_root_with_source(&ctx).expect("list_per_root_with_source must succeed");
+        // Two buckets, each with one `remote` skill — no nearest-wins dedup.
+        assert_eq!(result.len(), 2, "two roots → two buckets");
+        assert!(
+            result[0].1.iter().any(|(d, _)| d.name == "remote"),
+            "nearest bucket must contain remote"
+        );
+        assert!(
+            result[1].1.iter().any(|(d, _)| d.name == "remote"),
+            "farthest bucket must contain remote"
+        );
+        // Nearest root is first in the result.
+        assert_eq!(
+            result[0].0,
+            sub_dir.join(".creft"),
+            "first bucket is nearest root"
+        );
+    }
+
+    #[test]
+    fn list_per_root_with_source_does_not_include_global_skills() {
+        let base = tempfile::TempDir::new().unwrap();
+        let project_dir = base.path().join("project");
+        let home_dir = tempfile::TempDir::new().unwrap();
+
+        // Local root has `remote.md`; global root has `global-skill.md`.
+        let local_commands = project_dir.join(".creft/commands");
+        let global_commands = home_dir.path().join(".creft/commands");
+        std::fs::create_dir_all(&local_commands).unwrap();
+        std::fs::create_dir_all(&global_commands).unwrap();
+        std::fs::write(
+            local_commands.join("remote.md"),
+            b"---\nname: remote\ndescription: remote\n---\nhello\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global_commands.join("global-skill.md"),
+            b"---\nname: global-skill\ndescription: global\n---\nhello\n",
+        )
+        .unwrap();
+
+        let ctx = AppContext::for_test(home_dir.path().to_path_buf(), project_dir.clone());
+        let result =
+            list_per_root_with_source(&ctx).expect("list_per_root_with_source must succeed");
+
+        // Only one local root bucket; no global skills included.
+        assert_eq!(result.len(), 1, "one local root → one bucket");
+        let global_in_result = result[0].1.iter().any(|(d, _)| d.name == "global-skill");
+        assert!(
+            !global_in_result,
+            "list_per_root_with_source must not include global skills"
         );
     }
 }

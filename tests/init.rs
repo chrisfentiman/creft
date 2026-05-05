@@ -55,7 +55,7 @@ fn test_init_idempotent() {
         .stderr(predicate::str::contains("already initialized"));
 }
 
-/// `creft init` in a subdirectory warns when a parent already has `.creft/`.
+/// `creft init` in a subdirectory explains that a new root overlays the ancestor root.
 #[test]
 fn test_init_warns_parent() {
     let home = creft_env();
@@ -75,7 +75,8 @@ fn test_init_warns_parent() {
         .args(["init"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("parent directory"));
+        .stderr(predicate::str::contains("ancestor .creft/ exists at"))
+        .stderr(predicate::str::contains("overlay"));
 
     assert!(
         child.join(".creft").join("commands").is_dir(),
@@ -96,5 +97,5 @@ fn test_init_no_warn_without_parent() {
         .args(["init"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("parent").not());
+        .stderr(predicate::str::contains("ancestor").not());
 }

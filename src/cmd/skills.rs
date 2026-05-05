@@ -55,6 +55,62 @@ pub fn cmd_skills_test(
     cmd_skills_test_unix(ctx, skill, scenario, keep, detail, where_)
 }
 
+/// Discover fixture files across every local root in the chain, nearest-first.
+///
+/// When two local roots contain a fixture for the same skill basename, only the
+/// nearest root's fixture is included. The farther fixture is reported on stderr
+/// as "note: shadowed fixture: <path> (overridden by <nearer-path>)". A fixture
+/// from a non-nearest root is run when the corresponding skill name is not also
+/// defined in a nearer root — it is still reachable via hierarchical fall-through.
+#[cfg(unix)]
+fn discover_fixtures_chain(
+    ctx: &AppContext,
+    skill_filter: Option<&crate::skill_test::match_pattern::Matcher>,
+) -> Result<Vec<std::path::PathBuf>, fixture::FixtureError> {
+    use std::collections::HashMap;
+
+    // Map from skill basename to (fixture_path, source_root) for nearest-wins tracking.
+    // We iterate nearest-first and record the first (nearest) occurrence.
+    let mut seen: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let mut result: Vec<std::path::PathBuf> = Vec::new();
+    let mut shadowed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+
+    for root in ctx.local_roots() {
+        let commands_dir = root.join("commands");
+        if !commands_dir.exists() {
+            continue;
+        }
+        let discovered = fixture::discover(&commands_dir, skill_filter)?;
+        for path in discovered {
+            // The skill basename is the filename stem with `.test.yaml` stripped.
+            let basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.strip_suffix(".test.yaml").unwrap_or(n).to_owned())
+                .unwrap_or_default();
+            if let Some(winner) = seen.get(&basename) {
+                // A nearer root already claimed this basename.
+                shadowed.push((path, winner.clone()));
+            } else {
+                seen.insert(basename, path.clone());
+                result.push(path);
+            }
+        }
+    }
+
+    // Report shadowed fixtures on stderr before returning.
+    for (shadowed_path, winner_path) in &shadowed {
+        eprintln!(
+            "note: shadowed fixture: {} (overridden by {})",
+            shadowed_path.display(),
+            winner_path.display()
+        );
+    }
+
+    result.sort();
+    Ok(result)
+}
+
 #[cfg(unix)]
 fn cmd_skills_test_unix(
     ctx: &AppContext,
@@ -64,16 +120,14 @@ fn cmd_skills_test_unix(
     detail: bool,
     where_: bool,
 ) -> Result<(), CreftError> {
-    // Require a local root — fixtures only exist in project skill trees.
-    let local_root = ctx.nearest_local_root().ok_or_else(|| {
-        CreftError::Setup(
+    // Require at least one local root — fixtures only exist in project skill trees.
+    if ctx.local_roots().is_empty() {
+        return Err(CreftError::Setup(
             "no .creft/ directory found in this or any parent directory; \
              run from a project root or after `creft init`"
                 .to_owned(),
-        )
-    })?;
-
-    let commands_dir = local_root.join("commands");
+        ));
+    }
 
     // Compile the SKILL pattern once before the filesystem walk. Plain text is
     // an exact basename match; globs are anchored fnmatch. When the caller
@@ -84,9 +138,8 @@ fn cmd_skills_test_unix(
         .transpose()
         .map_err(|e| CreftError::Setup(e.to_string()))?;
 
-    // Discover fixture files, applying the skill basename matcher at the
-    // filesystem level (before any file is opened).
-    let fixture_paths = fixture::discover(&commands_dir, skill_matcher.as_ref())
+    // Discover fixture files across all local roots in the chain.
+    let fixture_paths = discover_fixtures_chain(ctx, skill_matcher.as_ref())
         .map_err(|e| CreftError::Setup(e.to_string()))?;
 
     // Parse every fixture file, collecting parse errors to report before running.

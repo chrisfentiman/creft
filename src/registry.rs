@@ -987,29 +987,30 @@ pub fn activate(ctx: &AppContext, target: &str, scope: Scope) -> Result<(), Cref
 ///
 /// Returns `ActivationNotFound` when the target exists in no checked scope.
 pub fn deactivate(ctx: &AppContext, target: &str, global_only: bool) -> Result<(), CreftError> {
+    use crate::store::pin_ctx_to_root;
+
     let (plugin_name, cmd_name) = parse_activation_target(target);
-
-    let scopes_to_check: Vec<Scope> = if global_only {
-        vec![Scope::Global]
-    } else {
-        // Always check global; check local only when a local root exists.
-        let mut scopes = Vec::new();
-        if ctx.nearest_local_root().is_some() {
-            scopes.push(Scope::Local);
-        }
-        scopes.push(Scope::Global);
-        scopes
-    };
-
     let mut found_in_any = false;
 
-    for scope in scopes_to_check {
-        let mut settings = load_settings(ctx, scope)?;
-        let changed = remove_from_settings(&mut settings, plugin_name, cmd_name);
-        if changed {
-            found_in_any = true;
-            save_settings(ctx, scope, &settings)?;
+    if !global_only {
+        // Walk every local root in chain order and remove from each that contains the entry.
+        for root in ctx.local_roots() {
+            let pinned = pin_ctx_to_root(ctx, root);
+            let mut settings = load_settings(&pinned, Scope::Local)?;
+            let changed = remove_from_settings(&mut settings, plugin_name, cmd_name);
+            if changed {
+                found_in_any = true;
+                save_settings(&pinned, Scope::Local, &settings)?;
+            }
         }
+    }
+
+    // Always check global (unless CREFT_HOME skips local in which case global is the only scope).
+    let mut global_settings = load_settings(ctx, Scope::Global)?;
+    let changed = remove_from_settings(&mut global_settings, plugin_name, cmd_name);
+    if changed {
+        found_in_any = true;
+        save_settings(ctx, Scope::Global, &global_settings)?;
     }
 
     if !found_in_any {
