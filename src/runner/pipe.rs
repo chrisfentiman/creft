@@ -358,11 +358,7 @@ pub(super) fn sponge_stage(
             }
         };
 
-        // Compute flags from the block's `# flags:` directive. The sponge thread
-        // owns `bound_refs` as `Vec<(String, String)>` (cloned for thread-boundary
-        // safety), so build a borrow-view here before calling expand_and_split_flags.
-        let ref_borrow: Vec<(&str, &str)> = ref_pairs.clone();
-        let flags = match expand_and_split_flags(block, &ref_borrow) {
+        let flags = match expand_and_split_flags(block, &ref_pairs) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
