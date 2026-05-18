@@ -88,8 +88,8 @@ Code Blocks:
       creft_exit 1        Stop with failure (exit 1)
 
   Interpreters:
-    Any binary on PATH works as an interpreter. Unknown tags receive the
-    block content on stdin (e.g. ```zx, ```ruby, ```deno).
+    Any binary on PATH works as an interpreter.
+    Unknown tags receive the block content on stdin (e.g. ```zx, ```ruby, ```deno).
     Known families (bash, sh, zsh, python, python3, node, javascript, js,
     typescript, ts, llm) get a preamble, a temp-file extension, and the
     creft_print/creft_exit helpers prewired.
@@ -129,8 +129,9 @@ Code Blocks:
                                       the script path; in stdin mode, after the
                                       interpreter.
 
-  At add time, creft warns (does not fail) when a non-family tag's binary is
-  not on PATH on the current machine. Skills travel between machines.
+  Unknown-tag interpreters: at add time, creft warns (does not fail) when a
+  non-family tag's binary is not on PATH on the current machine. Skills travel
+  between machines.
 
 Template Placeholders:
   {{name}}            Positional arg or flag value
@@ -2090,16 +2091,28 @@ mod tests {
     #[test]
     fn add_long_about_mentions_stdin_mode_for_arbitrary_interpreters() {
         assert!(
-            ADD_LONG_ABOUT.contains("stdin"),
-            "ADD_LONG_ABOUT must describe stdin mode for unknown/arbitrary interpreters"
+            ADD_LONG_ABOUT.contains("Unknown tags receive the block content on stdin"),
+            "ADD_LONG_ABOUT must contain the exact phrase 'Unknown tags receive the block content on stdin' \
+             on a single source-text line inside the Interpreters section; the bare 'stdin' substring is \
+             insufficient because it also appears in the LLM Blocks paragraph"
         );
     }
 
     #[test]
-    fn add_long_about_mentions_path_warning() {
+    fn add_long_about_mentions_unknown_tag_path_warning() {
         assert!(
-            ADD_LONG_ABOUT.contains("not on PATH"),
-            "ADD_LONG_ABOUT must mention the add-time PATH warning"
+            ADD_LONG_ABOUT.contains("Unknown-tag interpreters"),
+            "ADD_LONG_ABOUT must contain the section header 'Unknown-tag interpreters' for the \
+             add-time PATH warning paragraph; the bare 'not on PATH' substring is insufficient \
+             because it already appears in the deps line"
+        );
+    }
+
+    #[test]
+    fn add_long_about_preserves_frontmatter_keyword() {
+        assert!(
+            ADD_LONG_ABOUT.contains("frontmatter"),
+            "ADD_LONG_ABOUT must keep the 'frontmatter' keyword for the search-coverage test in src/search/store.rs"
         );
     }
 

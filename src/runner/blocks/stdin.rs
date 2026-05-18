@@ -28,9 +28,15 @@ impl BlockRunner for StdinRunner {
         let interp = interpreter(&block.lang);
         // Split on whitespace to handle multi-token interpreter strings, matching
         // the same approach used by ShellRunner for "npx tsx".
-        let parts: Vec<&str> = interp.split_whitespace().collect();
-        let mut c = std::process::Command::new(parts[0]);
-        for p in &parts[1..] {
+        let mut parts = interp.split_whitespace();
+        let program = parts.next().ok_or_else(|| {
+            CreftError::Setup(format!(
+                "block lang '{}' resolves to an empty interpreter string",
+                block.lang
+            ))
+        })?;
+        let mut c = std::process::Command::new(program);
+        for p in parts {
             c.arg(p);
         }
         // Flags are placed immediately after the interpreter, before any other args.
