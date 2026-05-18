@@ -422,8 +422,6 @@ mod tests {
         assert!(blocks[0].deps.is_empty());
     }
 
-    // ── parse_block_directives ────────────────────────────────────────────────
-
     #[test]
     fn directive_extension_populates_field_and_strips_line() {
         let body = "\n```bash\n# extension: zip\necho hello\n```\n";

@@ -567,8 +567,6 @@ fn test_add_dep_warn_skipped_with_no_validate() {
         .stderr(predicate::str::contains("not found on PATH").not());
 }
 
-// ── check_unknown_lang_binary add-time integration tests ──────────────────────
-
 /// A skill whose block uses an unknown lang tag that is absent from PATH warns
 /// at add time but still saves the skill successfully. Skills travel between
 /// machines — the absence of the binary is advisory, not fatal.
@@ -638,8 +636,6 @@ fn add_no_validate_skips_unknown_interpreter_warning() {
         .success()
         .stderr(predicate::str::contains("via stdin").not());
 }
-
-// ── check_extension_value add-time integration tests ─────────────────────────
 
 /// A `# extension: ../etc/passwd` value is rejected at add time with an error.
 /// The skill is not saved.

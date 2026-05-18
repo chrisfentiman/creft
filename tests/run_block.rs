@@ -8,8 +8,6 @@ mod helpers;
 use helpers::{creft_env, creft_with, tool_available};
 use predicates::prelude::*;
 
-// ── stdin-mode execution ─────────────────────────────────────────────────────
-
 /// A `ruby` block with no directives runs via stdin mode: the block source is
 /// piped to `ruby`'s stdin and stdout is captured.
 #[test]
@@ -87,8 +85,6 @@ fn ruby_stdin_mode_pipe_chain_receives_upstream_via_prev() {
         .success()
         .stdout(predicate::str::contains("got: upstream"));
 }
-
-// ── `# flags:` directive ─────────────────────────────────────────────────────
 
 /// A `bash` block with `# flags: -x` passes `-x` to bash, which traces each
 /// command to stderr. Verifies flags are inserted between the interpreter and
@@ -252,8 +248,6 @@ fn zx_stdin_mode_with_flags_dash() {
         .stdout(predicate::str::contains("hello from zx"));
 }
 
-// ── `# extension:` directive ─────────────────────────────────────────────────
-
 /// A `python` block with `# extension: pyi` writes the temp file with a `.pyi`
 /// suffix. Python doesn't care about the extension so this test verifies the
 /// block still executes correctly with the overridden extension.
@@ -322,8 +316,6 @@ fn unknown_tag_with_extension_uses_file_mode() {
         .success()
         .stdout(predicate::str::contains("file mode"));
 }
-
-// ── unknown-tag PATH warning ─────────────────────────────────────────────────
 
 /// An unknown-tag block whose binary is missing from PATH prints the interpreter-
 /// not-found error at execution time (from `spawn_block`'s existing error path).

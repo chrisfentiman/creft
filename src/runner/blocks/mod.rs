@@ -374,8 +374,6 @@ mod tests {
         cmd.get_program().to_str().unwrap().to_string()
     }
 
-    // ── runner_for dispatch ──────────────────────────────────────────────────
-
     /// Known-family langs route through their own runners; unknown tags without
     /// `# extension:` route through StdinRunner (program == lang tag).
     #[rstest]
@@ -449,8 +447,6 @@ mod tests {
         );
     }
 
-    // ── execution_mode_for ──────────────────────────────────────────────────
-
     /// Cartesian product: (known family / unknown) × (with extension / without).
     #[rstest]
     #[case::bash_no_ext("bash", None, ExecutionMode::File)]
@@ -480,8 +476,6 @@ mod tests {
         };
         assert_eq!(execution_mode_for(&block), expected);
     }
-
-    // ── expand_and_split_flags ──────────────────────────────────────────────
 
     #[test]
     fn expand_and_split_flags_none_returns_empty() {
@@ -523,8 +517,6 @@ mod tests {
         let result = expand_and_split_flags(&block, &[]).unwrap();
         assert_eq!(result, Vec::<String>::new());
     }
-
-    // ── CodeBlock predicates ─────────────────────────────────────────────────
 
     /// runs_via_stdin is true exactly for unknown tags without extension.
     #[rstest]

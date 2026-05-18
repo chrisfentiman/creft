@@ -2749,8 +2749,6 @@ mod tests {
         );
     }
 
-    // ── check_unknown_lang_binary unit tests ─────────────────────────────────
-
     fn make_block_with_extension(lang: &str, code: &str, extension: Option<&str>) -> CodeBlock {
         CodeBlock {
             lang: lang.into(),
@@ -2848,8 +2846,6 @@ mod tests {
             "PATH warning must reference block index 1 (the second block)"
         );
     }
-
-    // ── check_extension_value unit tests ─────────────────────────────────────
 
     /// Valid extensions that should produce no errors.
     #[rstest]
