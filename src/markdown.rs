@@ -180,9 +180,7 @@ fn is_directive_line(line: &str, lang: &str) -> bool {
     } else {
         trimmed.starts_with("# deps:")
     };
-    deps_match
-        || trimmed.starts_with("# extension:")
-        || trimmed.starts_with("# flags:")
+    deps_match || trimmed.starts_with("# extension:") || trimmed.starts_with("# flags:")
 }
 
 /// Parse and strip the directive comment block at the top of `code`.
@@ -539,10 +537,7 @@ mod tests {
         // SyntaxError because `#` is not a comment in JavaScript.
         let body = "\n```node\n# flags: --experimental-modules\nconst x = 1;\n```\n";
         let (_, blocks) = extract_blocks(body);
-        assert_eq!(
-            blocks[0].flags,
-            Some("--experimental-modules".to_string())
-        );
+        assert_eq!(blocks[0].flags, Some("--experimental-modules".to_string()));
         assert!(!blocks[0].code.contains("# flags:"));
         assert_eq!(blocks[0].code, "const x = 1;");
     }
@@ -551,8 +546,7 @@ mod tests {
     fn node_block_mixed_slash_deps_and_hash_flags_both_parsed_and_stripped() {
         // A contiguous leading run that mixes `// deps:` and `# flags:` —
         // both are directive lines and the scan must not stop between them.
-        let body =
-            "\n```node\n// deps: lodash\n# flags: --no-warnings\nrequire('lodash');\n```\n";
+        let body = "\n```node\n// deps: lodash\n# flags: --no-warnings\nrequire('lodash');\n```\n";
         let (_, blocks) = extract_blocks(body);
         assert_eq!(blocks[0].deps, vec!["lodash"]);
         assert_eq!(blocks[0].flags, Some("--no-warnings".to_string()));
