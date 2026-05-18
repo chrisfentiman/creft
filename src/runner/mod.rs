@@ -2493,6 +2493,34 @@ mod tests {
         );
     }
 
+    /// A block with `# extension: .mjs` produces a temp file ending in exactly
+    /// `.mjs`, not `..mjs`. The block fixture carries `extension: Some("mjs")`
+    /// — the post-parse value after `parse_block_directives` strips the leading
+    /// dot — because the runner reads `block.extension` directly and trusts the
+    /// parser's invariant.
+    #[test]
+    fn prepare_block_script_leading_dot_extension_produces_single_dot_suffix() {
+        let block = CodeBlock {
+            lang: "node".into(),
+            code: String::new(),
+            deps: vec![],
+            extension: Some("mjs".into()),
+            flags: None,
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        let tmp = prepare_block_script(&block, "console.log('hi')\n", None).unwrap();
+        let path = tmp.path().to_string_lossy();
+        assert!(
+            path.ends_with(".mjs"),
+            "extension Some(\"mjs\") must produce a path ending in .mjs, not ..mjs; got: {path}"
+        );
+        assert!(
+            !path.ends_with("..mjs"),
+            "path must not contain a double-dot suffix; got: {path}"
+        );
+    }
+
     // ── creft_search in single-block mode ────────────────────────────────────
 
     /// A single-block bash skill that calls creft_index then creft_search must

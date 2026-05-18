@@ -1121,11 +1121,17 @@ fn check_unknown_lang_binary(
 /// Reject `# extension:` values that are not safe identifiers.
 ///
 /// Allowed characters: ASCII letters, digits, `_`, `-`, and inner dots. Inner
-/// dots support compound extensions like `tar.gz`. Leading and trailing dots are
-/// rejected because `prepare_block_script` composes the suffix as
-/// `format!(".{ext}")`: a leading dot produces `..foo` and a trailing dot
-/// produces `bar.`, both of which several tools mishandle. Path separators and
-/// shell metacharacters are rejected to prevent temp-file injection.
+/// dots support compound extensions like `tar.gz`.
+///
+/// `parse_block_directives` strips exactly one leading dot before writing
+/// `block.extension`, so `# extension: .mjs` arrives here as `"mjs"` and is
+/// accepted. A double leading dot (`# extension: ..mjs`) strips to `".mjs"` —
+/// still starts with a dot — and is rejected by the `starts_with('.')` check.
+///
+/// Trailing dots are rejected because `prepare_block_script` composes the
+/// suffix as `format!(".{ext}")`: a trailing dot produces `bar.`, which several
+/// tools mishandle. Path separators and shell metacharacters are rejected to
+/// prevent temp-file injection.
 ///
 /// An empty `# extension:` value is rejected separately with a clearer message.
 fn check_extension_value(
@@ -2854,6 +2860,10 @@ mod tests {
     #[case::with_hyphen("min.js")]
     #[case::underscore("my_ext")]
     #[case::pyi("pyi")]
+    // The parser strips one leading dot before writing block.extension, so the
+    // validator only sees the residue without it. Direct fixture must reflect
+    // the post-parse value ("mjs", not ".mjs").
+    #[case::post_parse_mjs("mjs")]
     fn check_extension_value_accepts_valid_extensions(#[case] ext: &str) {
         let def = make_def(vec![], vec![]);
         let block = make_block_with_extension("ruby", "puts 'hi'", Some(ext));
@@ -2872,8 +2882,19 @@ mod tests {
 
     /// Invalid extensions that must produce an error. Each case identifies the
     /// rule it exercises.
+    ///
+    /// Note on `leading_dot`: the parser strips one leading dot before writing
+    /// `block.extension`, so `# extension: .foo` in markdown produces
+    /// `block.extension = Some("foo")` — a valid identifier that the validator
+    /// accepts. The case below (`".foo"`) tests a direct fixture that bypasses
+    /// the parser, demonstrating that the validator still enforces the invariant
+    /// (block.extension must not carry a leading dot). The end-to-end behaviour
+    /// is covered by `extension_leading_dot_round_trip_accepted`.
     #[rstest]
-    #[case::leading_dot(".foo", "leading dot")]
+    #[case::leading_dot(
+        ".foo",
+        "leading dot — direct fixture bypasses parser; invariant check"
+    )]
     #[case::trailing_dot("bar.", "trailing dot")]
     #[case::dot_only(".", "dot only")]
     #[case::path_separator("../etc/passwd", "path separator")]
@@ -2924,6 +2945,38 @@ mod tests {
             ext_errors[0].message.contains("empty"),
             "error must mention 'empty'; got: {}",
             ext_errors[0].message
+        );
+    }
+
+    /// Prove that `# extension: .mjs` in markdown round-trips through the parser
+    /// and produces no extension-related validation error.
+    ///
+    /// This is the load-bearing test: it exercises the full user journey from
+    /// authored markdown to `validate_skill`, confirming that the parser's
+    /// leading-dot strip relaxes the validator's gate at the user-visible level.
+    #[test]
+    fn extension_leading_dot_round_trip_accepted() {
+        let body = "```bash\n# extension: .mjs\necho hi\n```\n";
+        let (_, blocks) = crate::markdown::extract_blocks(body);
+        assert_eq!(blocks.len(), 1, "expected one block");
+        // Parser must have stored "mjs", not ".mjs".
+        assert_eq!(
+            blocks[0].extension.as_deref(),
+            Some("mjs"),
+            "parser must strip the leading dot; got: {:?}",
+            blocks[0].extension
+        );
+        let def = make_def(vec![], vec![]);
+        let result = validate_skill(&def, &blocks, "", None);
+        let ext_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("extension"))
+            .collect();
+        assert!(
+            ext_errors.is_empty(),
+            "# extension: .mjs must be accepted after parser normalization; got errors: {:?}",
+            ext_errors
         );
     }
 

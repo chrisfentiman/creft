@@ -219,7 +219,11 @@ pub(crate) fn parse_block_directives(code: &str, lang: &str) -> (String, BlockDi
         // `# extension:` and `# flags:` are universal — dispatch them first so
         // the slash-prefix branch below only ever sees `// deps:` lines.
         if let Some(rest) = trimmed.strip_prefix("# extension:") {
-            dirs.extension = Some(rest.trim().to_string());
+            let trimmed_val = rest.trim();
+            // Strip at most one leading dot so `.mjs` and `mjs` both produce
+            // `Some("mjs")`. Stripping greedily would silently accept `....mjs`.
+            let normalized = trimmed_val.strip_prefix('.').unwrap_or(trimmed_val);
+            dirs.extension = Some(normalized.to_string());
         } else if let Some(rest) = trimmed.strip_prefix("# flags:") {
             dirs.flags = Some(rest.trim().to_string());
         } else if uses_slash_prefix(lang) {
@@ -506,6 +510,48 @@ mod tests {
     fn trailing_whitespace_on_directive_value_is_trimmed() {
         let (_, dirs) = parse_block_directives("# extension: zip   \necho hi", "bash");
         assert_eq!(dirs.extension, Some("zip".to_string()));
+    }
+
+    // ── leading-dot stripping in parse_block_directives ──────────────────────
+
+    #[test]
+    fn extension_leading_dot_stripped_to_bare_identifier() {
+        // `.mjs` must produce `Some("mjs")` — one leading dot stripped.
+        let (_, dirs) = parse_block_directives("# extension: .mjs\necho hi", "bash");
+        assert_eq!(dirs.extension, Some("mjs".to_string()));
+    }
+
+    #[test]
+    fn extension_without_leading_dot_unchanged() {
+        // `mjs` without any leading dot must still produce `Some("mjs")`.
+        let (_, dirs) = parse_block_directives("# extension: mjs\necho hi", "bash");
+        assert_eq!(dirs.extension, Some("mjs".to_string()));
+    }
+
+    #[test]
+    fn extension_single_dot_strips_to_empty_string() {
+        // `# extension: .` strips to `""`. The parser preserves this; the
+        // validator's empty-value branch fires. No new branch needed here.
+        let (_, dirs) = parse_block_directives("# extension: .\necho hi", "bash");
+        assert_eq!(dirs.extension, Some(String::new()));
+    }
+
+    #[test]
+    fn extension_double_leading_dot_strips_only_one() {
+        // `..mjs` strips to `.mjs` — exactly one leading dot removed. The
+        // validator then rejects the residue as a malformed identifier (still
+        // starts with a dot). This is a regression guard: greedy stripping
+        // would silently accept `....mjs`, masking an authoring mistake.
+        let (_, dirs) = parse_block_directives("# extension: ..mjs\necho hi", "bash");
+        assert_eq!(dirs.extension, Some(".mjs".to_string()));
+    }
+
+    #[test]
+    fn extension_leading_dot_with_inner_dot_preserved() {
+        // `.tar.gz` strips to `tar.gz`. The inner dot is not affected by the
+        // leading-dot strip, and the validator accepts compound extensions.
+        let (_, dirs) = parse_block_directives("# extension: .tar.gz\necho hi", "bash");
+        assert_eq!(dirs.extension, Some("tar.gz".to_string()));
     }
 
     #[test]

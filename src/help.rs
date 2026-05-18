@@ -87,7 +87,13 @@ Code Blocks:
       creft_exit 0        Same as above
       creft_exit 1        Stop with failure (exit 1)
 
-  Interpreters: bash, python, node, zsh, docs (not executed -- shown in --help)
+  Interpreters:
+    Any binary on PATH works as an interpreter. Unknown tags receive the
+    block content on stdin (e.g. ```zx, ```ruby, ```deno).
+    Known families (bash, sh, zsh, python, python3, node, javascript, js,
+    typescript, ts, llm) get a preamble, a temp-file extension, and the
+    creft_print/creft_exit helpers prewired.
+    docs blocks are shown but not executed.
 
   LLM Blocks:
     Use ```llm to send prompts to AI providers as pipeline steps. Add a YAML
@@ -109,10 +115,22 @@ Code Blocks:
     Use {{prev}} in the prompt to reference the buffered input.
     On non-Unix systems, multi-block skills with LLM blocks are not supported.
 
-  Dependencies (first line comment):
+  Directives (first line comments, before the block code):
     # deps: requests, pandas          Python (uses uv run --with)
-    // deps: lodash, chalk            Node (uses npm install + NODE_PATH)
-    # deps: jq, yq                    Shell (warns if not on PATH)
+    // deps: lodash, chalk            Node/TS (uses npm install + NODE_PATH)
+    # deps: jq, yq                    Shell or unknown tag (warns if not on PATH)
+    # extension: mjs                  Force temp-file mode with this extension.
+                                      Leading dot is optional: '.mjs' and 'mjs'
+                                      both work. Unknown tags become file mode
+                                      with this directive.
+    # flags: -                        Arguments passed to the interpreter.
+                                      Goes through {{var}} expansion. In file
+                                      mode, placed between the interpreter and
+                                      the script path; in stdin mode, after the
+                                      interpreter.
+
+  At add time, creft warns (does not fail) when a non-family tag's binary is
+  not on PATH on the current machine. Skills travel between machines.
 
 Template Placeholders:
   {{name}}            Positional arg or flag value
@@ -2048,6 +2066,40 @@ mod tests {
         assert!(
             output.contains("\x1b["),
             "render_docs with yansi enabled must contain ANSI escapes on section headers",
+        );
+    }
+
+    // ── ADD_LONG_ABOUT content pins ──────────────────────────────────────────
+
+    #[test]
+    fn add_long_about_mentions_extension_directive() {
+        assert!(
+            ADD_LONG_ABOUT.contains("# extension:"),
+            "ADD_LONG_ABOUT must document the # extension: directive"
+        );
+    }
+
+    #[test]
+    fn add_long_about_mentions_flags_directive() {
+        assert!(
+            ADD_LONG_ABOUT.contains("# flags:"),
+            "ADD_LONG_ABOUT must document the # flags: directive"
+        );
+    }
+
+    #[test]
+    fn add_long_about_mentions_stdin_mode_for_arbitrary_interpreters() {
+        assert!(
+            ADD_LONG_ABOUT.contains("stdin"),
+            "ADD_LONG_ABOUT must describe stdin mode for unknown/arbitrary interpreters"
+        );
+    }
+
+    #[test]
+    fn add_long_about_mentions_path_warning() {
+        assert!(
+            ADD_LONG_ABOUT.contains("not on PATH"),
+            "ADD_LONG_ABOUT must mention the add-time PATH warning"
         );
     }
 

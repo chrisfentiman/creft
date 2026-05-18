@@ -686,9 +686,10 @@ fn add_accepts_extension_with_inner_dot() {
         .stderr(predicate::str::contains("simple identifier").not());
 }
 
-/// A `# extension:` with a leading dot is rejected.
+/// A `# extension:` with a leading dot is accepted: the parser strips the dot
+/// so `.foo` and `foo` both produce the same normalized value.
 #[test]
-fn add_rejects_extension_with_leading_dot() {
+fn add_accepts_extension_with_leading_dot() {
     let dir = creft_env();
     creft_with(&dir)
         .args(["add"])
@@ -700,6 +701,30 @@ fn add_rejects_extension_with_leading_dot() {
             "\n",
             "```bash\n",
             "# extension: .foo\n",
+            "echo ok\n",
+            "```\n",
+        ))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("simple identifier").not());
+}
+
+/// Two or more leading dots (`# extension: ..mjs`) are rejected: the parser
+/// strips exactly one dot, leaving `.mjs` which still starts with a dot and
+/// fails the safe-identifier check.
+#[test]
+fn add_rejects_extension_with_double_leading_dot() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: double-dot-extension\n",
+            "description: extension with double leading dot\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "# extension: ..mjs\n",
             "echo ok\n",
             "```\n",
         ))
