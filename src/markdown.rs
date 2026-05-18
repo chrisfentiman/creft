@@ -169,19 +169,20 @@ fn uses_slash_prefix(lang: &str) -> bool {
 
 /// Whether `line` is a recognised directive comment line for the given `lang`.
 ///
-/// The `#`-prefix directives (`# deps:`, `# extension:`, `# flags:`) are
-/// recognised for any tag that is NOT in the `//`-prefix set. The `//`-prefix
-/// deps directive (`// deps:`) is recognised only for tags in that set.
-/// `# extension:` and `# flags:` use the `#` prefix universally.
+/// `# extension:` and `# flags:` are recognised with the `#` prefix for every
+/// lang tag — including slash-prefix langs like `node`, `typescript`, and `go`.
+/// The `deps:` directive discriminates on prefix: slash-prefix langs use
+/// `// deps:` and all others use `# deps:`.
 fn is_directive_line(line: &str, lang: &str) -> bool {
     let trimmed = line.trim();
-    if uses_slash_prefix(lang) {
+    let deps_match = if uses_slash_prefix(lang) {
         trimmed.starts_with("// deps:")
     } else {
         trimmed.starts_with("# deps:")
-            || trimmed.starts_with("# extension:")
-            || trimmed.starts_with("# flags:")
-    }
+    };
+    deps_match
+        || trimmed.starts_with("# extension:")
+        || trimmed.starts_with("# flags:")
 }
 
 /// Parse and strip the directive comment block at the top of `code`.
@@ -217,8 +218,14 @@ pub(crate) fn parse_block_directives(code: &str, lang: &str) -> (String, BlockDi
 
         let trimmed = line.trim();
 
-        if uses_slash_prefix(lang) {
-            // Only "// deps:" reaches here.
+        // `# extension:` and `# flags:` are universal — dispatch them first so
+        // the slash-prefix branch below only ever sees `// deps:` lines.
+        if let Some(rest) = trimmed.strip_prefix("# extension:") {
+            dirs.extension = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("# flags:") {
+            dirs.flags = Some(rest.trim().to_string());
+        } else if uses_slash_prefix(lang) {
+            // Only `// deps:` reaches here for slash-prefix langs.
             let val = trimmed["// deps:".len()..].trim();
             let parsed: Vec<String> = val
                 .split(',')
@@ -234,10 +241,6 @@ pub(crate) fn parse_block_directives(code: &str, lang: &str) -> (String, BlockDi
                 .filter(|s| !s.is_empty())
                 .collect();
             dirs.deps.extend(parsed);
-        } else if let Some(rest) = trimmed.strip_prefix("# extension:") {
-            dirs.extension = Some(rest.trim().to_string());
-        } else if let Some(rest) = trimmed.strip_prefix("# flags:") {
-            dirs.flags = Some(rest.trim().to_string());
         }
     }
 
@@ -442,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn all_three_directives_any_order_all_populated_and_stripped() {
+    fn all_three_directives_flags_first_all_populated_and_stripped() {
         let body = "\n```bash\n# flags: -x\n# deps: jq\n# extension: sh\necho hello\n```\n";
         let (_, blocks) = extract_blocks(body);
         assert_eq!(blocks[0].deps, vec!["jq"]);
@@ -516,6 +519,44 @@ mod tests {
         let (_, blocks) = extract_blocks(body);
         assert_eq!(blocks[0].deps, vec!["lodash"]);
         assert!(!blocks[0].code.contains("// deps:"));
+    }
+
+    #[test]
+    fn node_block_extension_directive_recognised_universally() {
+        // `# extension:` must be stripped and parsed on slash-prefix langs (node)
+        // — the spec promises "recognised universally with the # prefix".
+        let body = "\n```node\n# extension: mjs\nconst x = 1;\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].extension, Some("mjs".to_string()));
+        assert!(!blocks[0].code.contains("# extension:"));
+        assert_eq!(blocks[0].code, "const x = 1;");
+    }
+
+    #[test]
+    fn node_block_flags_directive_recognised_universally() {
+        // `# flags:` must be stripped and parsed on slash-prefix langs (node).
+        // Previously this line would pass through to node as-is, causing a
+        // SyntaxError because `#` is not a comment in JavaScript.
+        let body = "\n```node\n# flags: --experimental-modules\nconst x = 1;\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(
+            blocks[0].flags,
+            Some("--experimental-modules".to_string())
+        );
+        assert!(!blocks[0].code.contains("# flags:"));
+        assert_eq!(blocks[0].code, "const x = 1;");
+    }
+
+    #[test]
+    fn node_block_mixed_slash_deps_and_hash_flags_both_parsed_and_stripped() {
+        // A contiguous leading run that mixes `// deps:` and `# flags:` —
+        // both are directive lines and the scan must not stop between them.
+        let body =
+            "\n```node\n// deps: lodash\n# flags: --no-warnings\nrequire('lodash');\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].deps, vec!["lodash"]);
+        assert_eq!(blocks[0].flags, Some("--no-warnings".to_string()));
+        assert_eq!(blocks[0].code, "require('lodash');");
     }
 
     #[test]
