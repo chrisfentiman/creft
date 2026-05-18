@@ -17,7 +17,14 @@ impl BlockRunner for LlmRunner {
         &self,
         block: &CodeBlock,
         _script_path: &Path,
+        _flags: &[String],
     ) -> Result<(std::process::Command, Option<tempfile::TempDir>), CreftError> {
+        // `_flags` is accepted for trait uniformity. In production the value is
+        // always an empty slice: `parse_llm_block` does not consume `#`-directives,
+        // so `block.flags` is unconditionally `None` for LLM blocks and
+        // `expand_and_split_flags` returns `[]`. The parameter joins `_script_path`
+        // (accepted and ignored for the same reason — LLM blocks deliver their
+        // prompt via stdin, not a temp file).
         let config = block.llm_config.as_ref().ok_or_else(|| {
             CreftError::Setup("llm block is missing provider configuration".into())
         })?;
@@ -153,7 +160,7 @@ mod tests {
             llm_config: None,
             llm_parse_error: None,
         };
-        let result = LlmRunner.build_command(&block, Path::new("/tmp/dummy"));
+        let result = LlmRunner.build_command(&block, Path::new("/tmp/dummy"), &[]);
         match result {
             Err(CreftError::Setup(msg)) => {
                 assert!(
