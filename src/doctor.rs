@@ -2122,6 +2122,8 @@ mod tests {
             lang: "python".into(),
             code: "import requests".into(),
             deps: vec!["requests".into()],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };
@@ -2138,6 +2140,8 @@ mod tests {
             lang: "node".into(),
             code: "const axios = require('axios')".into(),
             deps: vec!["axios".into()],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };
@@ -2153,6 +2157,8 @@ mod tests {
             lang: "bash".into(),
             code: "curl url | jq .".into(),
             deps: vec!["curl".into(), "creft_no_such_dep_xyz9999".into()],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };

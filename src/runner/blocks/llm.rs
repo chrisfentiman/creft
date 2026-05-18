@@ -148,6 +148,8 @@ mod tests {
             lang: "llm".to_string(),
             code: "say hello".to_string(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };

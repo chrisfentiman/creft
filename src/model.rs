@@ -563,12 +563,51 @@ impl Default for LlmConfig {
     }
 }
 
+/// Returns true when `lang` is a known language family.
+///
+/// Known families have language-specific runners with preambles, file
+/// extensions, and side-channel wiring. Tags outside this set are treated as
+/// opaque binaries by the runner: invoked verbatim, default to stdin mode,
+/// optionally forced into file mode via `# extension:`.
+pub(crate) fn is_known_family(lang: &str) -> bool {
+    matches!(
+        lang,
+        "bash"
+            | "sh"
+            | "zsh"
+            | "python"
+            | "python3"
+            | "node"
+            | "javascript"
+            | "js"
+            | "typescript"
+            | "ts"
+            | "llm"
+    )
+}
+
 /// A fenced code block extracted from a skill's markdown body.
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     pub lang: String,
     pub code: String,
     pub deps: Vec<String>,
+    /// File extension override for the temp script written in file mode.
+    ///
+    /// When `Some(ext)`, the runner writes the block to a temp file ending
+    /// in `.<ext>` and invokes the binary with that path as the final
+    /// argument, regardless of whether the language tag is a known family.
+    /// When `None`, known families use their conventional extension;
+    /// unknown tags use stdin mode and the temp file is unused.
+    pub extension: Option<String>,
+    /// Runner argument string, expanded with the same `{{var}}` machinery
+    /// as the block body and split on whitespace at execution time.
+    ///
+    /// Placement: between the interpreter and the script path in file mode;
+    /// immediately after the interpreter in stdin mode.
+    // Read by the runner dispatch layer introduced in the next stage.
+    #[allow(dead_code)]
+    pub flags: Option<String>,
     /// LLM configuration, present only when `lang == "llm"`.
     /// Parsed from the YAML header before `---` in the block content.
     pub llm_config: Option<LlmConfig>,
@@ -587,7 +626,16 @@ impl CodeBlock {
     /// complete input before it can begin (e.g., LLM providers that read
     /// the full prompt from stdin before producing output).
     pub fn needs_sponge(&self) -> bool {
-        self.lang == "llm"
+        self.lang == "llm" || self.runs_via_stdin()
+    }
+
+    /// Whether this block delivers its source via stdin rather than a temp file.
+    ///
+    /// True for non-family language tags without an `# extension:` directive.
+    /// LLM blocks are sponged but are not stdin-mode in this sense: their
+    /// command shape is provider-specific, not generic-interpreter.
+    pub fn runs_via_stdin(&self) -> bool {
+        !is_known_family(&self.lang) && self.extension.is_none()
     }
 }
 
@@ -1751,6 +1799,8 @@ params: "--max-tokens 1000"
             lang: lang.to_string(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }
@@ -1761,8 +1811,73 @@ params: "--max-tokens 1000"
     #[case::bash("bash", false)]
     #[case::python("python", false)]
     #[case::node("node", false)]
-    #[case::unknown_language("typescript", false)]
+    #[case::typescript("typescript", false)]
+    // Unknown tags without an extension directive are stdin-mode → sponged.
+    #[case::unknown_tag("ruby", true)]
     fn needs_sponge(#[case] lang: &str, #[case] expected: bool) {
         assert_eq!(make_block(lang).needs_sponge(), expected);
+    }
+
+    #[rstest]
+    #[case::bash("bash", false)]
+    #[case::sh("sh", false)]
+    #[case::zsh("zsh", false)]
+    #[case::python("python", false)]
+    #[case::python3("python3", false)]
+    #[case::node("node", false)]
+    #[case::javascript("javascript", false)]
+    #[case::js("js", false)]
+    #[case::typescript("typescript", false)]
+    #[case::ts("ts", false)]
+    #[case::llm("llm", false)]
+    #[case::ruby("ruby", true)]
+    #[case::zx("zx", true)]
+    #[case::deno("deno", true)]
+    fn runs_via_stdin_no_extension(#[case] lang: &str, #[case] expected: bool) {
+        assert_eq!(make_block(lang).runs_via_stdin(), expected);
+    }
+
+    #[test]
+    fn runs_via_stdin_false_when_extension_set() {
+        let block = CodeBlock {
+            lang: "ruby".to_string(),
+            code: String::new(),
+            deps: vec![],
+            extension: Some("rb".to_string()),
+            flags: None,
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        assert!(!block.runs_via_stdin());
+    }
+
+    #[test]
+    fn is_known_family_covers_expected_tags() {
+        let known = [
+            "bash",
+            "sh",
+            "zsh",
+            "python",
+            "python3",
+            "node",
+            "javascript",
+            "js",
+            "typescript",
+            "ts",
+            "llm",
+        ];
+        for tag in known {
+            assert!(
+                super::is_known_family(tag),
+                "expected '{tag}' to be a known family"
+            );
+        }
+        let unknown = ["ruby", "zx", "deno", "bun", "perl", "go", "rust", ""];
+        for tag in unknown {
+            assert!(
+                !super::is_known_family(tag),
+                "expected '{tag}' to NOT be a known family"
+            );
+        }
     }
 }

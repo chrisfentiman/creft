@@ -235,6 +235,8 @@ mod tests {
             lang: lang.to_string(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }
@@ -245,6 +247,8 @@ mod tests {
             lang: "llm".to_string(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: Some(LlmConfig {
                 provider: provider.to_string(),
                 model: String::new(),

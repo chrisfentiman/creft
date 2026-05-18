@@ -44,6 +44,8 @@ mod tests {
             lang: "python".to_string(),
             code: String::new(),
             deps: deps.into_iter().map(str::to_string).collect(),
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }

@@ -52,11 +52,13 @@ pub fn extract_blocks(body: &str) -> (Option<String>, Vec<CodeBlock>) {
             let block = parse_llm_block(content);
             blocks.push(block);
         } else if !lang_tag.is_empty() {
-            let deps = parse_deps(&content, &lang_tag);
+            let (stripped, dirs) = parse_block_directives(&content, &lang_tag);
             blocks.push(CodeBlock {
                 lang: lang_tag,
-                code: content,
-                deps,
+                code: stripped,
+                deps: dirs.deps,
+                extension: dirs.extension,
+                flags: dirs.flags,
                 llm_config: None,
                 llm_parse_error: None,
             });
@@ -86,6 +88,8 @@ fn parse_llm_block(content: String) -> CodeBlock {
                 lang: "llm".to_string(),
                 code: content,
                 deps: Vec::new(),
+                extension: None,
+                flags: None,
                 llm_config: Some(LlmConfig::default()),
                 llm_parse_error: None,
             }
@@ -105,6 +109,8 @@ fn parse_llm_block(content: String) -> CodeBlock {
                     lang: "llm".to_string(),
                     code: prompt,
                     deps: Vec::new(),
+                    extension: None,
+                    flags: None,
                     llm_config: Some(LlmConfig::default()),
                     llm_parse_error: None,
                 }
@@ -114,6 +120,8 @@ fn parse_llm_block(content: String) -> CodeBlock {
                         lang: "llm".to_string(),
                         code: prompt,
                         deps: Vec::new(),
+                        extension: None,
+                        flags: None,
                         llm_config: Some(config),
                         llm_parse_error: None,
                     },
@@ -125,6 +133,8 @@ fn parse_llm_block(content: String) -> CodeBlock {
                             lang: "llm".to_string(),
                             code: prompt,
                             deps: Vec::new(),
+                            extension: None,
+                            flags: None,
                             llm_config: None,
                             llm_parse_error: Some(e.to_string()),
                         }
@@ -135,33 +145,115 @@ fn parse_llm_block(content: String) -> CodeBlock {
     }
 }
 
-/// Parse inline dependency declarations from the first comment line of a code block.
+/// Directives parsed from a block's leading `#` (or `//`) comment lines.
 ///
-/// Supported formats:
-/// - `# deps: requests, beautifulsoup4` (Python/Bash)
-/// - `// deps: lodash, chalk` (Node/JS/TS)
-fn parse_deps(code: &str, lang: &str) -> Vec<String> {
-    let first_line = match code.lines().next() {
-        Some(l) => l.trim(),
-        None => return Vec::new(),
-    };
+/// Each field is empty/`None` when the directive is absent. The parser
+/// scans consecutive directive comment lines from the top of the block
+/// and stops at the first non-directive line.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct BlockDirectives {
+    pub deps: Vec<String>,
+    pub extension: Option<String>,
+    pub flags: Option<String>,
+}
 
-    let comment_prefix = match lang {
-        "bash" | "sh" | "zsh" | "python" | "ruby" => "#",
-        "node" | "javascript" | "typescript" | "js" | "ts" | "go" | "rust" => "//",
-        _ => return Vec::new(),
-    };
+/// The set of lang tags that use `//` as their comment prefix for `deps:`.
+///
+/// Every tag NOT in this set is treated as using `#` as its comment prefix.
+fn uses_slash_prefix(lang: &str) -> bool {
+    matches!(
+        lang,
+        "node" | "javascript" | "typescript" | "js" | "ts" | "go" | "rust"
+    )
+}
 
-    let pattern = format!("{} deps:", comment_prefix);
-    if !first_line.starts_with(&pattern) {
-        return Vec::new();
+/// Whether `line` is a recognised directive comment line for the given `lang`.
+///
+/// The `#`-prefix directives (`# deps:`, `# extension:`, `# flags:`) are
+/// recognised for any tag that is NOT in the `//`-prefix set. The `//`-prefix
+/// deps directive (`// deps:`) is recognised only for tags in that set.
+/// `# extension:` and `# flags:` use the `#` prefix universally.
+fn is_directive_line(line: &str, lang: &str) -> bool {
+    let trimmed = line.trim();
+    if uses_slash_prefix(lang) {
+        trimmed.starts_with("// deps:")
+    } else {
+        trimmed.starts_with("# deps:")
+            || trimmed.starts_with("# extension:")
+            || trimmed.starts_with("# flags:")
+    }
+}
+
+/// Parse and strip the directive comment block at the top of `code`.
+///
+/// Returns `(stripped_body, directives)`. The stripped body is every line
+/// from the first non-directive line onward; directive lines are removed so
+/// the interpreter never sees them. This is required for languages where `#`
+/// is not a comment (zx, node, typescript).
+///
+/// Recognised directives:
+/// - `# deps: <comma-separated>` for any tag whose comment prefix is `#`,
+///   i.e. every tag that is NOT in the `//`-prefix set. The `//`-prefix set
+///   is `node | javascript | typescript | js | ts | go | rust`; those tags
+///   use `// deps: <comma-separated>` instead.
+/// - `# extension: <ext>` (recognised universally with the `#` prefix).
+/// - `# flags: <args...>` (recognised universally with the `#` prefix).
+///
+/// The scan terminates at the first non-directive line. If the first line is
+/// not a recognised directive, the returned body equals the input verbatim
+/// and all directive fields are empty/`None`.
+pub(crate) fn parse_block_directives(code: &str, lang: &str) -> (String, BlockDirectives) {
+    let mut dirs = BlockDirectives::default();
+    let mut lines = code.lines().peekable();
+    let mut skip_count: usize = 0;
+
+    // Walk the contiguous leading run of directive lines.
+    while let Some(&line) = lines.peek() {
+        if !is_directive_line(line, lang) {
+            break;
+        }
+        lines.next();
+        skip_count += 1;
+
+        let trimmed = line.trim();
+
+        if uses_slash_prefix(lang) {
+            // Only "// deps:" reaches here.
+            let val = trimmed["// deps:".len()..].trim();
+            let parsed: Vec<String> = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            dirs.deps.extend(parsed);
+        } else if let Some(rest) = trimmed.strip_prefix("# deps:") {
+            let parsed: Vec<String> = rest
+                .trim()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            dirs.deps.extend(parsed);
+        } else if let Some(rest) = trimmed.strip_prefix("# extension:") {
+            dirs.extension = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("# flags:") {
+            dirs.flags = Some(rest.trim().to_string());
+        }
     }
 
-    first_line[pattern.len()..]
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    if skip_count == 0 {
+        // No directives: return verbatim. Avoid an allocation if nothing changed.
+        return (code.to_string(), dirs);
+    }
+
+    // Collect the remaining (non-directive) lines into the stripped body.
+    // Preserve the same trailing-newline behaviour as extract_blocks: the
+    // outer loop already stripped a trailing newline from `content` before
+    // calling us, so we just join with "\n" — no extra trailing newline.
+    let remaining: Vec<&str> = lines.collect();
+    let stripped = remaining.join("\n");
+
+    (stripped, dirs)
 }
 
 /// A finding from fence nesting analysis.
@@ -301,6 +393,12 @@ mod tests {
         let body = "\n```python\n# deps: requests, bs4\nimport requests\n```\n";
         let (_, blocks) = extract_blocks(body);
         assert_eq!(blocks[0].deps, vec!["requests", "bs4"]);
+        // Directive line must be stripped from the delivered code.
+        assert!(
+            !blocks[0].code.contains("# deps:"),
+            "directive line must not appear in block code"
+        );
+        assert_eq!(blocks[0].code, "import requests");
     }
 
     #[test]
@@ -308,6 +406,12 @@ mod tests {
         let body = "\n```node\n// deps: lodash, chalk\nconst _ = require('lodash');\n```\n";
         let (_, blocks) = extract_blocks(body);
         assert_eq!(blocks[0].deps, vec!["lodash", "chalk"]);
+        // Directive line must be stripped from the delivered code.
+        assert!(
+            !blocks[0].code.contains("// deps:"),
+            "directive line must not appear in block code"
+        );
+        assert_eq!(blocks[0].code, "const _ = require('lodash');");
     }
 
     #[test]
@@ -315,6 +419,119 @@ mod tests {
         let body = "\n```bash\necho no deps here\n```\n";
         let (_, blocks) = extract_blocks(body);
         assert!(blocks[0].deps.is_empty());
+    }
+
+    // ── parse_block_directives ────────────────────────────────────────────────
+
+    #[test]
+    fn directive_extension_populates_field_and_strips_line() {
+        let body = "\n```bash\n# extension: zip\necho hello\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].extension, Some("zip".to_string()));
+        assert!(!blocks[0].code.contains("# extension:"));
+        assert_eq!(blocks[0].code, "echo hello");
+    }
+
+    #[test]
+    fn directive_flags_populates_field_and_strips_line() {
+        let body = "\n```bash\n# flags: -e\necho hello\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].flags, Some("-e".to_string()));
+        assert!(!blocks[0].code.contains("# flags:"));
+        assert_eq!(blocks[0].code, "echo hello");
+    }
+
+    #[test]
+    fn all_three_directives_any_order_all_populated_and_stripped() {
+        let body = "\n```bash\n# flags: -x\n# deps: jq\n# extension: sh\necho hello\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].deps, vec!["jq"]);
+        assert_eq!(blocks[0].extension, Some("sh".to_string()));
+        assert_eq!(blocks[0].flags, Some("-x".to_string()));
+        assert_eq!(blocks[0].code, "echo hello");
+    }
+
+    #[test]
+    fn non_directive_first_line_leaves_fields_empty_and_code_verbatim() {
+        let body = "\n```bash\necho hello\n# deps: jq\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert!(blocks[0].deps.is_empty());
+        assert!(blocks[0].extension.is_none());
+        assert!(blocks[0].flags.is_none());
+        // The directive after a non-directive line is not parsed.
+        assert_eq!(blocks[0].code, "echo hello\n# deps: jq");
+    }
+
+    #[test]
+    fn gap_between_directives_stops_scan_at_gap() {
+        // Directive, then non-directive, then another directive: only the first
+        // contiguous run is parsed and stripped.
+        let body = "\n```bash\n# deps: jq\necho hello\n# flags: -x\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].deps, vec!["jq"]);
+        assert!(blocks[0].flags.is_none());
+        // The second directive line sits after the gap and remains in code.
+        assert!(blocks[0].code.contains("# flags:"));
+    }
+
+    #[test]
+    fn unknown_tag_hash_deps_parsed_and_stripped() {
+        // Unknown tags (e.g. "zx") use the # prefix for deps — widened from the
+        // previous closed-set recognition (bash|sh|zsh|python|ruby only).
+        let body = "\n```zx\n# deps: jq\nawait $`echo hello`\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].deps, vec!["jq"]);
+        assert!(!blocks[0].code.contains("# deps:"));
+        assert_eq!(blocks[0].code, "await $`echo hello`");
+    }
+
+    #[test]
+    fn zx_block_flags_directive_stripped_so_js_parser_never_sees_hash_line() {
+        // The motivating bug: a zx block with `# flags: -` would cause
+        // zx's JS parser to fail on the `#` line. Stripping fixes it.
+        let body = "\n```zx\n# flags: -\nawait $`echo hello`\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].flags, Some("-".to_string()));
+        assert_eq!(blocks[0].code, "await $`echo hello`");
+    }
+
+    #[test]
+    fn extension_empty_value_yields_some_empty_string() {
+        // Empty value is preserved as Some("") — validation (Stage 3) rejects it.
+        let (stripped, dirs) = parse_block_directives("# extension: \necho hi", "bash");
+        assert_eq!(dirs.extension, Some(String::new()));
+        assert_eq!(stripped, "echo hi");
+    }
+
+    #[test]
+    fn trailing_whitespace_on_directive_value_is_trimmed() {
+        let (_, dirs) = parse_block_directives("# extension: zip   \necho hi", "bash");
+        assert_eq!(dirs.extension, Some("zip".to_string()));
+    }
+
+    #[test]
+    fn node_block_slash_deps_unchanged() {
+        // node/js/ts tags continue to use // deps: (no widening to # deps:).
+        let body = "\n```node\n// deps: lodash\nrequire('lodash')\n```\n";
+        let (_, blocks) = extract_blocks(body);
+        assert_eq!(blocks[0].deps, vec!["lodash"]);
+        assert!(!blocks[0].code.contains("// deps:"));
+    }
+
+    #[test]
+    fn block_with_no_directive_returns_code_verbatim() {
+        let code = "echo hello\necho world";
+        let (stripped, dirs) = parse_block_directives(code, "bash");
+        assert_eq!(stripped, code);
+        assert!(dirs.deps.is_empty());
+        assert!(dirs.extension.is_none());
+        assert!(dirs.flags.is_none());
+    }
+
+    #[test]
+    fn flags_with_multiple_tokens_preserved_as_single_string() {
+        let (_, dirs) = parse_block_directives("# flags: -e --no-warnings\ncode", "bash");
+        assert_eq!(dirs.flags, Some("-e --no-warnings".to_string()));
     }
 
     #[test]

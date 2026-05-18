@@ -52,6 +52,8 @@ mod tests {
             lang: lang.to_string(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }
