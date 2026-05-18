@@ -1849,33 +1849,38 @@ params: "--max-tokens 1000"
         assert!(!block.runs_via_stdin());
     }
 
-    #[test]
-    fn is_known_family_covers_expected_tags() {
-        let known = [
-            "bash",
-            "sh",
-            "zsh",
-            "python",
-            "python3",
-            "node",
-            "javascript",
-            "js",
-            "typescript",
-            "ts",
-            "llm",
-        ];
-        for tag in known {
-            assert!(
-                super::is_known_family(tag),
-                "expected '{tag}' to be a known family"
-            );
-        }
-        let unknown = ["ruby", "zx", "deno", "bun", "perl", "go", "rust", ""];
-        for tag in unknown {
-            assert!(
-                !super::is_known_family(tag),
-                "expected '{tag}' to NOT be a known family"
-            );
-        }
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::sh("sh")]
+    #[case::zsh("zsh")]
+    #[case::python("python")]
+    #[case::python3("python3")]
+    #[case::node("node")]
+    #[case::javascript("javascript")]
+    #[case::js("js")]
+    #[case::typescript("typescript")]
+    #[case::ts("ts")]
+    #[case::llm("llm")]
+    fn is_known_family_recognises_known_tags(#[case] tag: &str) {
+        assert!(
+            super::is_known_family(tag),
+            "expected '{tag}' to be a known family"
+        );
+    }
+
+    #[rstest]
+    #[case::ruby("ruby")]
+    #[case::zx("zx")]
+    #[case::deno("deno")]
+    #[case::bun("bun")]
+    #[case::perl("perl")]
+    #[case::go("go")]
+    #[case::rust("rust")]
+    #[case::empty("")]
+    fn is_known_family_rejects_unknown_tags(#[case] tag: &str) {
+        assert!(
+            !super::is_known_family(tag),
+            "expected '{tag}' to NOT be a known family"
+        );
     }
 }

@@ -2801,36 +2801,31 @@ mod tests {
 
     /// Known-family tags (bash, python, etc.) never trigger the PATH warning —
     /// `creft doctor` handles family interpreter availability separately.
-    #[test]
-    fn validate_skill_no_path_warning_for_known_families() {
+    #[rstest]
+    #[case::bash("bash")]
+    #[case::sh("sh")]
+    #[case::zsh("zsh")]
+    #[case::python("python")]
+    #[case::python3("python3")]
+    #[case::node("node")]
+    #[case::javascript("javascript")]
+    #[case::js("js")]
+    #[case::typescript("typescript")]
+    #[case::ts("ts")]
+    fn validate_skill_no_path_warning_for_known_families(#[case] lang: &str) {
         let def = make_def(vec![], vec![]);
-        for lang in &[
-            "bash",
-            "sh",
-            "zsh",
-            "python",
-            "python3",
-            "node",
-            "javascript",
-            "js",
-            "typescript",
-            "ts",
-        ] {
-            let block = make_block(lang, "echo hello");
-            let result = validate_skill(&def, &[block], "", None);
-            let path_warnings: Vec<_> = result
-                .warnings
-                .iter()
-                .filter(|w| {
-                    w.message.contains("not found on PATH") && w.message.contains("via stdin")
-                })
-                .collect();
-            assert!(
-                path_warnings.is_empty(),
-                "known family '{lang}' must not produce an interpreter PATH warning; got: {:?}",
-                path_warnings
-            );
-        }
+        let block = make_block(lang, "echo hello");
+        let result = validate_skill(&def, &[block], "", None);
+        let path_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("not found on PATH") && w.message.contains("via stdin"))
+            .collect();
+        assert!(
+            path_warnings.is_empty(),
+            "known family '{lang}' must not produce an interpreter PATH warning; got: {:?}",
+            path_warnings
+        );
     }
 
     /// The warning carries the correct block_index for the second block (index 1)
