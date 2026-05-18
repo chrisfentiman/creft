@@ -156,6 +156,66 @@ fn flags_directive_static_flag_reaches_interpreter() {
         .stdout(predicate::str::contains("flagged"));
 }
 
+/// A `# flags: {{placeholder}}` directive expands the bound value and splits it
+/// on whitespace before passing discrete tokens to the interpreter.
+///
+/// When `opts` is bound to `"-e -x"` (a single string containing a space),
+/// `expand_and_split_flags` must produce two tokens — `["-e", "-x"]` — not one.
+/// bash receives `bash -e -x script.sh`. The `-x` flag traces each command to
+/// stderr, and the script's echo reaches stdout. If the value were passed as a
+/// single token `"-e -x"`, bash would reject it as an unknown option and the
+/// command would fail, making the split observable through success vs. failure.
+///
+/// Gated on `which bash` — bash is always present on supported platforms.
+#[test]
+fn flags_placeholder_value_splits_into_discrete_tokens() {
+    if !tool_available("bash") {
+        eprintln!("skipping: bash not on PATH");
+        return;
+    }
+
+    let dir = creft_env();
+
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: flags-placeholder-split\n",
+            "description: placeholder flags split on whitespace\n",
+            "args:\n",
+            "  - name: opts\n",
+            "    description: flags to pass to bash\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "# flags: {{opts}}\n",
+            "echo split-ok\n",
+            "```\n",
+        ))
+        .assert()
+        .success();
+
+    // Pass "-e -x" as a single string value for `opts`. The `--` separates
+    // creft's own option parsing from the skill's positional args, allowing the
+    // value to start with `-` without creft misinterpreting it as a flag.
+    // After substitution and whitespace splitting, bash receives two discrete
+    // tokens: `-e` and `-x`. bash -x traces execution to stderr; the echo still
+    // writes to stdout.
+    //
+    // If the split were absent, bash would receive "-e -x" as one argument and
+    // reject it as an unknown option — failure would be the observable proof of
+    // the missing split.
+    //
+    // `--verbose` causes creft to forward child stderr to its own stderr, making
+    // bash's -x trace observable in the captured output.
+    creft_with(&dir)
+        .args(["flags-placeholder-split", "--verbose", "--", "-e -x"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("split-ok"))
+        .stderr(predicate::str::contains("echo split-ok"));
+}
+
 /// A `zx` block with `# flags: -` runs the block content through `zx -` via
 /// stdin. The `# flags:` directive line is stripped from the body by the parser
 /// so zx's JS engine never sees it.
