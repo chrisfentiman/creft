@@ -605,8 +605,6 @@ pub struct CodeBlock {
     ///
     /// Placement: between the interpreter and the script path in file mode;
     /// immediately after the interpreter in stdin mode.
-    // Read by the runner dispatch layer introduced in the next stage.
-    #[allow(dead_code)]
     pub flags: Option<String>,
     /// LLM configuration, present only when `lang == "llm"`.
     /// Parsed from the YAML header before `---` in the block content.
