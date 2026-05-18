@@ -390,6 +390,8 @@ pub fn validate_skill(
         }
 
         check_dependency_resolution(block, i, ctx, &mut warnings);
+        check_unknown_lang_binary(block, i, &mut warnings);
+        check_extension_value(block, i, &mut errors);
     }
 
     ValidationResult { errors, warnings }
@@ -1085,6 +1087,78 @@ fn check_shell_deps(
                 line: None,
             });
         }
+    }
+}
+
+/// Warn when a block's lang tag is non-family and the tag-as-binary is not on PATH.
+///
+/// Skills travel between machines; this is a warning, not an error. The author
+/// can install the binary later (or use the skill on a machine that has it). The
+/// message states what creft will do at execution time so the author knows the
+/// failure mode before saving.
+fn check_unknown_lang_binary(
+    block: &CodeBlock,
+    block_index: usize,
+    warnings: &mut Vec<ValidationDiagnostic>,
+) {
+    if crate::model::is_known_family(&block.lang) {
+        return;
+    }
+    if doctor::which_path(&block.lang).is_some() {
+        return;
+    }
+    warnings.push(ValidationDiagnostic {
+        block_index: Some(block_index),
+        lang: Some(block.lang.clone()),
+        message: format!(
+            "interpreter '{}' not found on PATH (block will run via stdin if available at execution time)",
+            block.lang
+        ),
+        line: None,
+    });
+}
+
+/// Reject `# extension:` values that are not safe identifiers.
+///
+/// Allowed characters: ASCII letters, digits, `_`, `-`, and inner dots. Inner
+/// dots support compound extensions like `tar.gz`. Leading and trailing dots are
+/// rejected because `prepare_block_script` composes the suffix as
+/// `format!(".{ext}")`: a leading dot produces `..foo` and a trailing dot
+/// produces `bar.`, both of which several tools mishandle. Path separators and
+/// shell metacharacters are rejected to prevent temp-file injection.
+///
+/// An empty `# extension:` value is rejected separately with a clearer message.
+fn check_extension_value(
+    block: &CodeBlock,
+    block_index: usize,
+    errors: &mut Vec<ValidationDiagnostic>,
+) {
+    let ext = match &block.extension {
+        Some(s) => s.as_str(),
+        None => return,
+    };
+    if ext.is_empty() {
+        errors.push(ValidationDiagnostic {
+            block_index: Some(block_index),
+            lang: Some(block.lang.clone()),
+            message: "'# extension:' value is empty (set a non-empty extension)".to_string(),
+            line: None,
+        });
+        return;
+    }
+    let safe = ext
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
+    if !safe || ext.starts_with('.') || ext.ends_with('.') {
+        errors.push(ValidationDiagnostic {
+            block_index: Some(block_index),
+            lang: Some(block.lang.clone()),
+            message: format!(
+                "'# extension:' value '{}' is not a simple identifier (use letters, digits, '_', '-', inner '.')",
+                ext
+            ),
+            line: None,
+        });
     }
 }
 
@@ -2672,6 +2746,211 @@ mod tests {
             !result.has_errors(),
             "expected no errors for properly nested fences, got: {:?}",
             result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ── check_unknown_lang_binary unit tests ─────────────────────────────────
+
+    fn make_block_with_extension(lang: &str, code: &str, extension: Option<&str>) -> CodeBlock {
+        CodeBlock {
+            lang: lang.into(),
+            code: code.into(),
+            deps: vec![],
+            extension: extension.map(str::to_string),
+            flags: None,
+            llm_config: None,
+            llm_parse_error: None,
+        }
+    }
+
+    /// A non-family lang tag whose binary is absent from PATH produces a warning
+    /// with the interpreter name and the "via stdin" message.
+    #[test]
+    fn validate_skill_warns_when_unknown_tag_binary_missing() {
+        let def = make_def(vec![], vec![]);
+        // Use a tag that cannot exist on any machine.
+        let block = make_block("an-interpreter-that-cannot-exist-9a8b7c6d", "echo hello");
+        let result = validate_skill(&def, &[block], "", None);
+        let path_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("not found on PATH"))
+            .collect();
+        assert_eq!(
+            path_warnings.len(),
+            1,
+            "expected exactly one PATH warning; got: {:?}",
+            result.warnings
+        );
+        assert!(
+            path_warnings[0]
+                .message
+                .contains("an-interpreter-that-cannot-exist-9a8b7c6d"),
+            "warning must name the missing interpreter"
+        );
+        assert!(
+            path_warnings[0].message.contains("via stdin"),
+            "warning must mention stdin execution"
+        );
+        assert_eq!(
+            path_warnings[0].block_index,
+            Some(0),
+            "warning must identify the block"
+        );
+    }
+
+    /// Known-family tags (bash, python, etc.) never trigger the PATH warning —
+    /// `creft doctor` handles family interpreter availability separately.
+    #[test]
+    fn validate_skill_no_path_warning_for_known_families() {
+        let def = make_def(vec![], vec![]);
+        for lang in &[
+            "bash",
+            "sh",
+            "zsh",
+            "python",
+            "python3",
+            "node",
+            "javascript",
+            "js",
+            "typescript",
+            "ts",
+        ] {
+            let block = make_block(lang, "echo hello");
+            let result = validate_skill(&def, &[block], "", None);
+            let path_warnings: Vec<_> = result
+                .warnings
+                .iter()
+                .filter(|w| {
+                    w.message.contains("not found on PATH") && w.message.contains("via stdin")
+                })
+                .collect();
+            assert!(
+                path_warnings.is_empty(),
+                "known family '{lang}' must not produce an interpreter PATH warning; got: {:?}",
+                path_warnings
+            );
+        }
+    }
+
+    /// The warning carries the correct block_index for the second block (index 1)
+    /// in a multi-block skill.
+    #[test]
+    fn validate_skill_path_warning_carries_correct_block_index() {
+        let def = make_def(vec![], vec![]);
+        let bash_block = make_block("bash", "echo first");
+        let unknown_block = make_block("an-interpreter-that-cannot-exist-9a8b7c6d", "echo second");
+        let result = validate_skill(&def, &[bash_block, unknown_block], "", None);
+        let path_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("via stdin"))
+            .collect();
+        assert_eq!(path_warnings.len(), 1, "expected exactly one PATH warning");
+        assert_eq!(
+            path_warnings[0].block_index,
+            Some(1),
+            "PATH warning must reference block index 1 (the second block)"
+        );
+    }
+
+    // ── check_extension_value unit tests ─────────────────────────────────────
+
+    /// Valid extensions that should produce no errors.
+    #[rstest]
+    #[case::simple("rb")]
+    #[case::dotted("tar.gz")]
+    #[case::with_hyphen("min.js")]
+    #[case::underscore("my_ext")]
+    #[case::pyi("pyi")]
+    fn check_extension_value_accepts_valid_extensions(#[case] ext: &str) {
+        let def = make_def(vec![], vec![]);
+        let block = make_block_with_extension("ruby", "puts 'hi'", Some(ext));
+        let result = validate_skill(&def, &[block], "", None);
+        let ext_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("extension"))
+            .collect();
+        assert!(
+            ext_errors.is_empty(),
+            "extension '{ext}' should be valid; got errors: {:?}",
+            ext_errors
+        );
+    }
+
+    /// Invalid extensions that must produce an error. Each case identifies the
+    /// rule it exercises.
+    #[rstest]
+    #[case::leading_dot(".foo", "leading dot")]
+    #[case::trailing_dot("bar.", "trailing dot")]
+    #[case::dot_only(".", "dot only")]
+    #[case::path_separator("../etc/passwd", "path separator")]
+    #[case::slash("foo/bar", "slash")]
+    #[case::space("foo bar", "space")]
+    fn check_extension_value_rejects_invalid_extensions(#[case] ext: &str, #[case] _reason: &str) {
+        let def = make_def(vec![], vec![]);
+        let block = make_block_with_extension("ruby", "puts 'hi'", Some(ext));
+        let result = validate_skill(&def, &[block], "", None);
+        let ext_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("extension"))
+            .collect();
+        assert_eq!(
+            ext_errors.len(),
+            1,
+            "extension '{ext}' ({_reason}) should produce exactly one error; got: {:?}",
+            ext_errors
+        );
+        assert!(
+            ext_errors[0].message.contains(ext)
+                || ext_errors[0].message.contains("simple identifier"),
+            "error message should describe the problem; got: {}",
+            ext_errors[0].message
+        );
+    }
+
+    /// An empty `# extension:` value produces a dedicated error message (not the
+    /// generic identifier message).
+    #[test]
+    fn check_extension_value_rejects_empty_value() {
+        let def = make_def(vec![], vec![]);
+        let block = make_block_with_extension("ruby", "puts 'hi'", Some(""));
+        let result = validate_skill(&def, &[block], "", None);
+        let ext_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("extension"))
+            .collect();
+        assert_eq!(
+            ext_errors.len(),
+            1,
+            "empty extension should produce exactly one error; got: {:?}",
+            ext_errors
+        );
+        assert!(
+            ext_errors[0].message.contains("empty"),
+            "error must mention 'empty'; got: {}",
+            ext_errors[0].message
+        );
+    }
+
+    /// When `block.extension` is `None`, `check_extension_value` produces no errors.
+    #[test]
+    fn check_extension_value_skipped_when_none() {
+        let def = make_def(vec![], vec![]);
+        let block = make_block("bash", "echo hello");
+        let result = validate_skill(&def, &[block], "", None);
+        let ext_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("extension"))
+            .collect();
+        assert!(
+            ext_errors.is_empty(),
+            "no extension directive → no extension errors; got: {:?}",
+            ext_errors
         );
     }
 }

@@ -566,3 +566,170 @@ fn test_add_dep_warn_skipped_with_no_validate() {
         .success()
         .stderr(predicate::str::contains("not found on PATH").not());
 }
+
+// ── check_unknown_lang_binary add-time integration tests ──────────────────────
+
+/// A skill whose block uses an unknown lang tag that is absent from PATH warns
+/// at add time but still saves the skill successfully. Skills travel between
+/// machines — the absence of the binary is advisory, not fatal.
+#[test]
+fn add_warns_when_unknown_interpreter_missing_from_path() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: unknown-interp-warn\n",
+            "description: unknown interpreter PATH warning\n",
+            "---\n",
+            "\n",
+            "```an-interpreter-that-cannot-exist-9a8b7c6d\n",
+            "echo hello\n",
+            "```\n",
+        ))
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("an-interpreter-that-cannot-exist-9a8b7c6d")
+                .and(predicate::str::contains("not found on PATH")),
+        );
+}
+
+/// A bash block does NOT trigger the unknown-interpreter PATH warning regardless
+/// of whether bash is on PATH — bash is a known family handled by creft doctor.
+#[test]
+fn add_does_not_warn_for_known_family_bash() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: bash-no-interp-warn\n",
+            "description: bash block no interpreter PATH warning\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "echo hello\n",
+            "```\n",
+        ))
+        .assert()
+        .success()
+        // The "via stdin" text is the distinguishing phrase from check_unknown_lang_binary.
+        .stderr(predicate::str::contains("via stdin").not());
+}
+
+/// `creft add --no-validate` bypasses the unknown-interpreter warning entirely.
+#[test]
+fn add_no_validate_skips_unknown_interpreter_warning() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add", "--no-validate"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: unknown-interp-novalidate\n",
+            "description: bypass unknown interpreter check\n",
+            "---\n",
+            "\n",
+            "```an-interpreter-that-cannot-exist-9a8b7c6d\n",
+            "echo hello\n",
+            "```\n",
+        ))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("via stdin").not());
+}
+
+// ── check_extension_value add-time integration tests ─────────────────────────
+
+/// A `# extension: ../etc/passwd` value is rejected at add time with an error.
+/// The skill is not saved.
+#[test]
+fn add_rejects_extension_with_path_separator() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: bad-extension-path\n",
+            "description: extension with path separator\n",
+            "---\n",
+            "\n",
+            "```ruby\n",
+            "# extension: ../etc/passwd\n",
+            "puts 'hi'\n",
+            "```\n",
+        ))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("extension")
+                .and(predicate::str::contains("simple identifier")),
+        );
+}
+
+/// A `# extension: tar.gz` value (compound extension with inner dot) is accepted.
+#[test]
+fn add_accepts_extension_with_inner_dot() {
+    let dir = creft_env();
+    // Use bash to avoid the unknown-interpreter warning confusing the assertion.
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: compound-extension\n",
+            "description: compound extension inner dot\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "# extension: tar.gz\n",
+            "echo ok\n",
+            "```\n",
+        ))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("simple identifier").not());
+}
+
+/// A `# extension:` with a leading dot is rejected.
+#[test]
+fn add_rejects_extension_with_leading_dot() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: leading-dot-extension\n",
+            "description: extension with leading dot\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "# extension: .foo\n",
+            "echo ok\n",
+            "```\n",
+        ))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("extension"));
+}
+
+/// An empty `# extension:` value is rejected with the empty-value message.
+#[test]
+fn add_rejects_empty_extension_value() {
+    let dir = creft_env();
+    creft_with(&dir)
+        .args(["add"])
+        .write_stdin(concat!(
+            "---\n",
+            "name: empty-extension\n",
+            "description: empty extension value\n",
+            "---\n",
+            "\n",
+            "```bash\n",
+            "# extension: \n",
+            "echo ok\n",
+            "```\n",
+        ))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("empty"));
+}
