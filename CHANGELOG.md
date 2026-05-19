@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/chrisfentiman/creft/compare/creft-v0.4.3...creft-v0.4.4) (2026-05-19)
+
+
+### Features
+
+* custom interpreters via stdin + # extension/# flags directives ([#90](https://github.com/chrisfentiman/creft/issues/90)) ([51b6a84](https://github.com/chrisfentiman/creft/commit/51b6a84b093449e5c387993ae94b586a463116c0))
+
 ## [0.4.3](https://github.com/chrisfentiman/creft/compare/creft-v0.4.2...creft-v0.4.3) (2026-05-05)
 
 
