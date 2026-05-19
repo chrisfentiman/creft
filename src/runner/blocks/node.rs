@@ -12,6 +12,7 @@ impl BlockRunner for NodeRunner {
         &self,
         block: &CodeBlock,
         script_path: &Path,
+        flags: &[String],
     ) -> Result<(std::process::Command, Option<tempfile::TempDir>), CreftError> {
         if !block.deps.is_empty() {
             let dir = tempfile::tempdir().map_err(CreftError::Io)?;
@@ -43,10 +44,18 @@ impl BlockRunner for NodeRunner {
             let node_modules = dir.path().join("node_modules");
             let mut c = std::process::Command::new("node");
             c.env("NODE_PATH", node_modules);
+            // Flags go between the interpreter and the script path.
+            for flag in flags {
+                c.arg(flag);
+            }
             c.arg(script_path);
             Ok((c, Some(dir)))
         } else {
             let mut c = std::process::Command::new("node");
+            // Flags go between the interpreter and the script path.
+            for flag in flags {
+                c.arg(flag);
+            }
             c.arg(script_path);
             Ok((c, None))
         }
@@ -69,6 +78,8 @@ mod tests {
             lang: "node".to_string(),
             code: String::new(),
             deps: deps.into_iter().map(str::to_owned).collect(),
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }
@@ -82,7 +93,7 @@ mod tests {
         let runner = NodeRunner;
         let block = make_node_block(vec![]);
         let script = Path::new("/tmp/test_script.js");
-        let (cmd, dir) = runner.build_command(&block, script).unwrap();
+        let (cmd, dir) = runner.build_command(&block, script, &[]).unwrap();
 
         assert_eq!(cmd.get_program().to_str().unwrap(), "node");
         assert!(dir.is_none(), "no-deps path must not allocate a TempDir");
@@ -93,5 +104,18 @@ mod tests {
         // No NODE_PATH override — the system node_modules resolution is used.
         let node_path: Vec<_> = cmd.get_envs().filter(|(k, _)| *k == "NODE_PATH").collect();
         assert!(node_path.is_empty(), "no-deps path must not set NODE_PATH");
+    }
+
+    /// Flags appear between the interpreter and the script path.
+    #[test]
+    fn build_command_flags_inserted_before_script_path() {
+        let runner = NodeRunner;
+        let block = make_node_block(vec![]);
+        let script = Path::new("/tmp/test_script.js");
+        let flags = vec!["--no-warnings".to_string()];
+        let (cmd, _) = runner.build_command(&block, script, &flags).unwrap();
+
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["--no-warnings", "/tmp/test_script.js"]);
     }
 }

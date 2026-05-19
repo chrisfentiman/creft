@@ -17,6 +17,7 @@ impl BlockRunner for LlmRunner {
         &self,
         block: &CodeBlock,
         _script_path: &Path,
+        _flags: &[String],
     ) -> Result<(std::process::Command, Option<tempfile::TempDir>), CreftError> {
         let config = block.llm_config.as_ref().ok_or_else(|| {
             CreftError::Setup("llm block is missing provider configuration".into())
@@ -148,10 +149,12 @@ mod tests {
             lang: "llm".to_string(),
             code: "say hello".to_string(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };
-        let result = LlmRunner.build_command(&block, Path::new("/tmp/dummy"));
+        let result = LlmRunner.build_command(&block, Path::new("/tmp/dummy"), &[]);
         match result {
             Err(CreftError::Setup(msg)) => {
                 assert!(

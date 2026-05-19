@@ -4,7 +4,7 @@ use std::io::Write as _;
 use crate::error::CreftError;
 use crate::model::{CodeBlock, ParsedCommand};
 
-use super::blocks::spawn_block;
+use super::blocks::{self, expand_and_split_flags, spawn_block};
 use super::substitute::substitute;
 use super::{RunContext, exit_code_of, make_execution_error, preamble, prepare_block_script};
 
@@ -358,11 +358,33 @@ pub(super) fn sponge_stage(
             }
         };
 
-        // prepare_block_script creates a temp file; LLM runners ignore it (prompt
-        // is delivered via stdin), but it must exist for the trait signature.
-        // Sponge stages run LLM blocks — preamble injection is out of scope for
-        // sponge (no pre_exec hook available without fork). Pass None.
-        let tmp = match prepare_block_script(block, &expanded, None) {
+        let flags = match expand_and_split_flags(block, &ref_pairs) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: sponge block {}: {}", block_idx + 1, e);
+                drop(pipe_writer);
+                if let Some(ref tx) = cancel_tx_downstream {
+                    let _ = tx.send(true);
+                }
+                if let Some(tx) = pgid_tx {
+                    let _ = tx.send(Err(()));
+                }
+                let _ = reaper_tx.send(ReaperResult {
+                    block_idx,
+                    lang: block.lang.clone(),
+                    outcome: BlockOutcome::Error(std::io::Error::other(e.to_string())),
+                    stderr: vec![],
+                });
+                return None;
+            }
+        };
+
+        // prepare_block_script creates a temp file; sponge blocks deliver their
+        // source via stdin (LLM prompt or stdin-mode block body), so the path is
+        // accepted by the runner but not used. Pass empty content and no preamble —
+        // preamble injection is out of scope for sponge (no pre_exec hook available
+        // without fork).
+        let tmp = match prepare_block_script(block, "", None) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
@@ -382,8 +404,8 @@ pub(super) fn sponge_stage(
                 return None;
             }
         };
-        let runner = super::blocks::runner_for(&block.lang);
-        let (mut cmd, _node_deps_dir) = match runner.build_command(block, tmp.path()) {
+        let runner = super::blocks::runner_for(block);
+        let (mut cmd, _node_deps_dir) = match runner.build_command(block, tmp.path(), &flags) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: sponge block {}: {}", block_idx + 1, e);
@@ -1197,8 +1219,18 @@ pub(super) fn run_pipe_chain(
             drop(node_deps_dirs.drain(..));
         })?;
 
+        // Expand flags for this block. Non-sponge blocks in the pipe loop have
+        // no `{{prev}}` binding (upstream output flows on stdin, not as a template
+        // arg), so `bound_refs` is used directly without augmentation.
+        let block_flags = blocks::expand_and_split_flags(block, bound_refs).inspect_err(|_| {
+            #[cfg(unix)]
+            kill_pipe_group_by_pids(child_pgid, &child_pids);
+            drop(node_deps_dirs.drain(..));
+        })?;
+
         let (mut child, node_deps_dir) = spawn_block(
             block,
+            &block_flags,
             script_path,
             ctx,
             stdin_cfg,

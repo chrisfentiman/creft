@@ -549,7 +549,16 @@ pub(crate) fn prepare_block_script(
     expanded_code: &str,
     preamble: Option<&str>,
 ) -> Result<tempfile::NamedTempFile, CreftError> {
-    let ext = extension(&block.lang);
+    // The `# extension:` directive overrides the temp file's suffix. Validation
+    // (validate_skill) rejects malformed values at add time; this line trusts
+    // that guarantee and uses the value verbatim. Unknown tags without an
+    // extension directive fall through to `extension()`, which returns the lang
+    // tag verbatim (e.g., "ruby" for a ruby block) — the resulting suffix is
+    // unused by StdinRunner, so the fabricated name is harmless.
+    let ext: &str = block
+        .extension
+        .as_deref()
+        .unwrap_or_else(|| extension(&block.lang));
     let mut tmp = tempfile::Builder::new()
         .prefix("creft-")
         .suffix(&format!(".{}", ext))
@@ -736,6 +745,7 @@ fn execute_block(
     code: &str,
     block_idx: usize,
     ctx: &RunContext,
+    bound_refs: &[(&str, &str)],
     stdin_data: Option<&[u8]>,
 ) -> Result<String, CreftError> {
     // Check cancellation before spawning any block — avoids starting a
@@ -744,9 +754,27 @@ fn execute_block(
         return Err(CreftError::EarlyExit);
     }
 
-    let pre = preamble::for_language(&block.lang);
-    let tmp = prepare_block_script(block, code, pre.as_deref())?;
-    let tmp_path = tmp.path().to_path_buf();
+    let mode = blocks::execution_mode_for(block);
+    let flags = blocks::expand_and_split_flags(block, bound_refs)?;
+
+    let (tmp, tmp_path) = match mode {
+        blocks::ExecutionMode::File => {
+            let pre = preamble::for_language(&block.lang);
+            let tmp = prepare_block_script(block, code, pre.as_deref())?;
+            let path = tmp.path().to_path_buf();
+            (tmp, path)
+        }
+        blocks::ExecutionMode::Stdin => {
+            // Path-only temp file; body is delivered via stdin_data.
+            // The file exists for trait-signature uniformity; the runner
+            // (StdinRunner) does not use the path.
+            let tmp = prepare_block_script(block, "", None)?;
+            let path = tmp.path().to_path_buf();
+            (tmp, path)
+        }
+    };
+    // Keep `tmp` alive until the child exits.
+    let _tmp_guard = tmp;
 
     let stdin_cfg = if stdin_data.is_some() {
         std::process::Stdio::piped()
@@ -761,6 +789,7 @@ fn execute_block(
 
     let (mut child, _node_deps_dir) = spawn_block(
         block,
+        &flags,
         &tmp_path,
         ctx,
         stdin_cfg,
@@ -1078,15 +1107,16 @@ fn run_inner(cmd: &ParsedCommand, raw_args: &[String], ctx: &RunContext) -> Resu
     let block = &cmd.blocks[0];
     let expanded = substitute(&block.code, &bound_refs, &block.lang)?;
 
-    // Sponge blocks (LLM) receive their expanded content via stdin.
-    // Script-based blocks read from the temp file; stdin_data is None.
+    // Sponge blocks (LLM and stdin-mode unknown tags) receive their expanded
+    // content via stdin. Script-based blocks read from the temp file; stdin_data
+    // is None and the child inherits the parent's stdin (terminal).
     let stdin_data = if block.needs_sponge() {
         Some(expanded.as_bytes())
     } else {
         None
     };
 
-    match execute_block(block, &expanded, 0, &ctx, stdin_data) {
+    match execute_block(block, &expanded, 0, &ctx, &bound_refs, stdin_data) {
         Ok(_) => Ok(()),
         Err(CreftError::EarlyExit) => Ok(()),
         Err(e) => Err(e),
@@ -1894,6 +1924,8 @@ mod tests {
                     lang: "bash".into(),
                     code: block0_code.into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -1901,6 +1933,8 @@ mod tests {
                     lang: "bash".into(),
                     code: block1_code.into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -1980,6 +2014,8 @@ mod tests {
                     lang: "bash".into(),
                     code: "echo hello".into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -1987,6 +2023,8 @@ mod tests {
                     lang: "bash".into(),
                     code: "cat".into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -2020,6 +2058,8 @@ mod tests {
                     lang: "bash".into(),
                     code: code.to_string(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 })
@@ -2064,6 +2104,8 @@ mod tests {
                 lang: "bash".into(),
                 code: "echo single".into(),
                 deps: vec![],
+                extension: None,
+                flags: None,
                 llm_config: None,
                 llm_parse_error: None,
             }],
@@ -2136,6 +2178,8 @@ mod tests {
                 // Self-terminate with SIGTERM. bash propagates the signal exit.
                 code: "kill -TERM $$".into(),
                 deps: vec![],
+                extension: None,
+                flags: None,
                 llm_config: None,
                 llm_parse_error: None,
             }],
@@ -2368,6 +2412,8 @@ mod tests {
             lang: "bash".into(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         }
@@ -2435,6 +2481,8 @@ mod tests {
             lang: "python".into(),
             code: String::new(),
             deps: vec![],
+            extension: None,
+            flags: None,
             llm_config: None,
             llm_parse_error: None,
         };
@@ -2442,6 +2490,34 @@ mod tests {
         assert!(
             tmp.path().extension().map(|e| e == "py").unwrap_or(false),
             "python blocks must produce .py temp files"
+        );
+    }
+
+    /// A block with `# extension: .mjs` produces a temp file ending in exactly
+    /// `.mjs`, not `..mjs`. The block fixture carries `extension: Some("mjs")`
+    /// — the post-parse value after `parse_block_directives` strips the leading
+    /// dot — because the runner reads `block.extension` directly and trusts the
+    /// parser's invariant.
+    #[test]
+    fn prepare_block_script_leading_dot_extension_produces_single_dot_suffix() {
+        let block = CodeBlock {
+            lang: "node".into(),
+            code: String::new(),
+            deps: vec![],
+            extension: Some("mjs".into()),
+            flags: None,
+            llm_config: None,
+            llm_parse_error: None,
+        };
+        let tmp = prepare_block_script(&block, "console.log('hi')\n", None).unwrap();
+        let path = tmp.path().to_string_lossy();
+        assert!(
+            path.ends_with(".mjs"),
+            "extension Some(\"mjs\") must produce a path ending in .mjs, not ..mjs; got: {path}"
+        );
+        assert!(
+            !path.ends_with("..mjs"),
+            "path must not contain a double-dot suffix; got: {path}"
         );
     }
 
@@ -2477,6 +2553,8 @@ echo "search completed"
 "#
                 .into(),
                 deps: vec![],
+                extension: None,
+                flags: None,
                 llm_config: None,
                 llm_parse_error: None,
             }],
@@ -2536,6 +2614,8 @@ echo "$result"
 "#
                     .into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -2553,6 +2633,8 @@ exit 0
 "#
                     .into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -2604,6 +2686,8 @@ exit 0
                     lang: "bash".into(),
                     code: "echo ready\n".into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
@@ -2617,6 +2701,8 @@ echo "get completed"
 "#
                     .into(),
                     deps: vec![],
+                    extension: None,
+                    flags: None,
                     llm_config: None,
                     llm_parse_error: None,
                 },
